@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 小磁带轮 - 用于专辑封面内显示 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- 外圈 -->
+    <path android:fillColor="#C9A962" android:pathData="M24,24m-22,0a22,22 0,1 1,44 0a22,22 0,1 1,-44 0"/>
+    <!-- 内圈深色 -->
+    <path android:fillColor="#1A1A1F" android:pathData="M24,24m-18,0a18,18 0,1 1,36 0a18,18 0,1 1,-36 0"/>
+    <!-- 中心孔 -->
+    <path android:fillColor="#252530" android:pathData="M24,24m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0"/>
+    <!-- 中心金色环 -->
+    <path android:fillColor="#C9A962" android:pathData="M24,24m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0"/>
+    <path android:fillColor="#252530" android:pathData="M24,24m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0"/>
+</vector>

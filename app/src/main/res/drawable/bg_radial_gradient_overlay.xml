@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【Steven v1.5】径向渐变背景 — 圆心从顶部中央扩散，被 tint 着色 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient
+        android:type="radial"
+        android:gradientRadius="80%p"
+        android:startColor="#0AFFFFFF"
+        android:centerColor="#05000000"
+        android:endColor="#00000000" />
+</shape>

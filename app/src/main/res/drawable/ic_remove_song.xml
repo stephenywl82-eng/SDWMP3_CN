@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Remove song icon — 双圆环风格 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Circle -->
+    <path
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFF"
+        android:fillAlpha="0.1"
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,12m-10,0a10,10 0,1 1,20 0a10,10 0,1 1,-20 0" />
+    <!-- Minus -->
+    <path
+        android:fillColor="#FF5252"
+        android:pathData="M7,12L17,12"
+        android:strokeWidth="2"
+        android:strokeColor="#FF5252"
+        android:strokeLineCap="round" />
+</vector>

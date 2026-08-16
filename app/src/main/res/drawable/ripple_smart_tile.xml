@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 智能磁贴透明背景 + 按压时显示粉色高亮 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#601A1A1F">
+    <item android:id="@android:id/mask">
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/white" />
+            <corners android:radius="16dp" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+            <corners android:radius="16dp" />
+            <stroke
+                android:width="0.5dp"
+                android:color="#22FFFFFF" />
+        </shape>
+    </item>
+</ripple>

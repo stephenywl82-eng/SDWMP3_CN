@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 4x1 Widget Preview Layout (for previewLayout) -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg_gradient">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:padding="10dp">
+
+        <!-- Cover placeholder -->
+        <ImageView
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:scaleType="centerCrop"
+            android:src="@drawable/ic_music_note"
+            android:background="#1AFFFFFF"
+            android:layout_marginEnd="10dp"
+            android:padding="10dp" />
+
+        <!-- Title / Artist -->
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="MOTO Music"
+                android:textColor="@android:color/white"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:maxLines="1" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="No track playing"
+                android:textColor="#E6FFFFFF"
+                android:textSize="11sp"
+                android:maxLines="1"
+                android:layout_marginTop="2dp" />
+        </LinearLayout>
+
+        <!-- Prev -->
+        <ImageView
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:src="@drawable/ic_prev"
+            android:alpha="0.85"
+            android:padding="5dp" />
+
+        <!-- Play -->
+        <ImageView
+            android:layout_width="38dp"
+            android:layout_height="38dp"
+            android:src="@drawable/ic_play"
+            android:alpha="0.95"
+            android:padding="7dp"
+            android:layout_marginHorizontal="4dp" />
+
+        <!-- Next -->
+        <ImageView
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:src="@drawable/ic_next"
+            android:alpha="0.85"
+            android:padding="5dp" />
+
+    </LinearLayout>
+</FrameLayout>

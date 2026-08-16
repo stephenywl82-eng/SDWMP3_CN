@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/widget_root"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@drawable/widget_bg_gradient">
+
+    <!-- Content layer -->
+    <LinearLayout
+        android:id="@+id/widget_container"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="10dp"
+        android:paddingEnd="6dp">
+
+        <!-- Cover art thumbnail -->
+        <ImageView
+            android:id="@+id/widget_cover"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:scaleType="centerCrop"
+            android:background="@drawable/widget_cover_rounded"
+            android:clipToOutline="true"
+            android:layout_marginEnd="8dp" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:orientation="vertical"
+            android:layout_marginEnd="4dp">
+
+            <TextView
+                android:id="@+id/widget_title"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="MOTO Music"
+                android:textColor="@android:color/white"
+                android:textSize="13sp"
+                android:textStyle="bold"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:shadowColor="#80000000"
+                android:shadowRadius="3" />
+
+            <TextView
+                android:id="@+id/widget_artist"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="#E6FFFFFF"
+                android:textSize="11sp"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:shadowColor="#80000000"
+                android:shadowRadius="2.5" />
+        </LinearLayout>
+
+        <ImageView
+            android:id="@+id/widget_btn_prev"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:src="@drawable/ic_prev"
+            android:padding="4dp"
+            android:alpha="0.9"
+            android:layout_marginEnd="4dp"
+            android:contentDescription="Previous" />
+
+        <ImageView
+            android:id="@+id/widget_btn_play_pause"
+            android:layout_width="32dp"
+            android:layout_height="32dp"
+            android:src="@drawable/ic_play"
+            android:padding="5dp"
+            android:alpha="0.95"
+            android:layout_marginEnd="4dp"
+            android:contentDescription="Play/Pause" />
+
+        <ImageView
+            android:id="@+id/widget_btn_next"
+            android:layout_width="28dp"
+            android:layout_height="28dp"
+            android:src="@drawable/ic_next"
+            android:padding="4dp"
+            android:alpha="0.9"
+            android:contentDescription="Next" />
+
+    </LinearLayout>
+</FrameLayout>

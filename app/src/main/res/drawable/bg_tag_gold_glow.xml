@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Steven v1.6 FLAC Hi-Res Glow tag - golden outer glow for lossless audio -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Outer glow layer - 4px padding expansion -->
+    <item
+        android:bottom="-2dp"
+        android:end="-2dp"
+        android:start="-2dp"
+        android:top="-2dp">
+        <shape android:shape="rectangle">
+            <corners android:radius="10dp" />
+            <solid android:color="#18D4AF37" />
+        </shape>
+    </item>
+
+    <!-- Inner tag body -->
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="8dp" />
+            <solid android:color="#1AD4AF37" />
+            <stroke
+                android:width="0.5dp"
+                android:color="#50D4AF37" />
+        </shape>
+    </item>
+
+</layer-list>

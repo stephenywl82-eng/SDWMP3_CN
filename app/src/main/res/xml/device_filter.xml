@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Match any USB audio-class device (class=1), mirroring Salt Player's manifest filter
+         so the system auto-grants USB permission without a user dialog. -->
+    <usb-device class="1" />
+</resources>

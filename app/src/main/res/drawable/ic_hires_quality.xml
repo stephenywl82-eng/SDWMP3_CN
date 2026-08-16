@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【v2.0】Hi-Res无损图标 — 钻石/宝石形状 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12.16,2.05l-7.5,3.5c-0.38,0.18 -0.62,0.56 -0.62,0.98v6.94c0,4.53 2.93,8.75 7.3,10.28 0.42,0.14 0.88,0.14 1.3,0 4.37,-1.53 7.3,-5.75 7.3,-10.28V6.53c0,-0.42 -0.24,-0.8 -0.62,-0.98l-7.5,-3.5c-0.22,-0.1 -0.46,-0.1 -0.66,0zM12,4.09l6,2.8v6.58c0,3.72 -2.4,7.14 -6,8.52 -3.6,-1.38 -6,-4.8 -6,-8.52V6.89l6,-2.8zM11,11v4h2v-4h2l-3,-3 -3,3h2z" />
+</vector>

@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【v2.8】空状态图标 — 机械变形金刚音乐符号 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="160dp"
+    android:height="160dp"
+    android:viewportWidth="160"
+    android:viewportHeight="160">
+
+    <!-- 外层能量环 -->
+    <path
+        android:fillColor="#0DFFFFFF"
+        android:pathData="M80,8C40.3,8 8,40.3 8,80s32.3,72 72,72 72,-32.3 72,-72S119.7,8 80,8zM80,144c-35.3,0 -64,-28.7 -64,-64s28.7,-64 64,-64 64,28.7 64,64S115.3,144 80,144z" />
+
+    <!-- 第二层机械环 -->
+    <path
+        android:fillColor="#15FFFFFF"
+        android:pathData="M80,20c-33.1,0 -60,26.9 -60,60s26.9,60 60,60 60,-26.9 60,-60S113.1,20 80,20zM80,132c-28.7,0 -52,-23.3 -52,-52s23.3,-52 52,-52 52,23.3 52,52S108.7,132 80,132z" />
+
+    <!-- 第三层光晕 -->
+    <path
+        android:fillColor="#20FFFFFF"
+        android:pathData="M80,32c-26.5,0 -48,21.5 -48,48s21.5,48 48,48 48,-21.5 48,-48S106.5,32 80,32zM80,120c-22.1,0 -40,-17.9 -40,-40s17.9,-40 40,-40 40,17.9 40,40S102.1,120 80,120z" />
+
+    <!-- 机械结构底座 -->
+    <path
+        android:fillColor="#25FFFFFF"
+        android:pathData="M48,95a10,10 0,1 1,0 0.1z
+                         M112,95a10,10 0,1 1,0 0.1z" />
+
+    <!-- 左侧机械臂 -->
+    <path
+        android:fillColor="#40FFFFFF"
+        android:pathData="M52,60v38c-1.5,-0.8 -3.2,-1.2 -5,-1.2c-5.5,0 -10,4.5 -10,10s4.5,10 10,10s10,-4.5 10,-10V68h8v-8H52z" />
+
+    <!-- 右侧机械臂 -->
+    <path
+        android:fillColor="#40FFFFFF"
+        android:pathData="M108,60v38c-1.5,-0.8 -3.2,-1.2 -5,-1.2c-5.5,0 -10,4.5 -10,10s4.5,10 10,10s10,-4.5 10,-10V68h8v-8H108z" />
+
+    <!-- 中央能量核心 -->
+    <path
+        android:fillColor="#35FFFFFF"
+        android:pathData="M60,48h40v8H60z
+                         M60,56h40v4H60z" />
+
+    <!-- 能量连接线 -->
+    <path
+        android:strokeColor="#50FFFFFF"
+        android:strokeWidth="3"
+        android:strokeLineCap="round"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M66,52 L52,60
+                         M94,52 L108,60" />
+
+    <!-- 左侧发光核心 -->
+    <path
+        android:fillColor="#90FFFFFF"
+        android:pathData="M47,95m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
+    <path
+        android:fillColor="#CCFFFFFF"
+        android:pathData="M47,95m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+
+    <!-- 右侧发光核心 -->
+    <path
+        android:fillColor="#90FFFFFF"
+        android:pathData="M113,95m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0" />
+    <path
+        android:fillColor="#CCFFFFFF"
+        android:pathData="M113,95m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+
+    <!-- 顶部能量脉冲 -->
+    <path
+        android:fillColor="#70FFFFFF"
+        android:pathData="M80,36 L86,44 L74,44 Z" />
+
+    <!-- 装饰性机械纹理 -->
+    <path
+        android:strokeColor="#30FFFFFF"
+        android:strokeWidth="1"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M70,48 L70,40 M90,48 L90,40
+                         M65,44 L75,44 M85,44 L95,44" />
+
+    <!-- 能量波纹 -->
+    <path
+        android:fillColor="#15FFFFFF"
+        android:pathData="M80,60m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+
+</vector>

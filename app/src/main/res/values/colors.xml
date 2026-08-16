@@ -1,0 +1,58 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- 图标背景 - 纯黑 -->
+    <color name="icon_background">#FFFFFFFF</color>
+
+    <!-- 主题色 - 亮紫（更鲜明） -->
+    <color name="primary">#FF8E6FD0</color>
+    <color name="primary_dark">#FF6B4D9C</color>
+
+    <!-- 背景色 - 深空灰 -->
+    <color name="surface">#FF1A1A1F</color>
+    <color name="surface_card">#FF252530</color>
+    <color name="background">#FF1A1A1F</color>
+
+    <!-- 文字色 - 米白/中灰 -->
+    <color name="on_surface">#FFF5F5F7</color>
+    <color name="text_primary">#FFF5F5F7</color>
+    <color name="text_secondary">#FF8E8E93</color>
+
+    <!-- 强调色 - 亮紫（更鲜明） -->
+    <color name="accent_green">#FFB388FF</color>
+
+    <!-- 紫色签名色 - 亮紫（更鲜明） -->
+    <color name="gold">#FF8E6FD0</color>
+
+    <!-- 交互态 - 亮紫（更鲜明） -->
+    <color name="interactive">#FF8E6FD0</color>
+
+    <!-- 分割线 - 深灰 -->
+    <color name="divider">#FF3A3A40</color>
+
+    <!-- 格式标签颜色 -->
+    <!-- MP3/AAC：亮紫 -->
+    <color name="format_tag_bg">#338E6FD0</color>
+    <color name="format_tag_text">#FFB388FF</color>
+
+    <!-- FLAC 无损：亮金 -->
+    <color name="flac_tag_bg">#40D4AF37</color>
+    <color name="flac_tag_text">#FFD4AF37</color>
+
+    <!-- WAV/AIFF：银色 -->
+    <color name="wav_tag_bg">#33C0C0C0</color>
+    <color name="wav_tag_text">#FFC0C0C0</color>
+
+    <!-- ALAC/DSD：淡金 -->
+    <color name="hires_tag_bg">#40E8C875</color>
+    <color name="hires_tag_text">#FFE8C875</color>
+
+    <!-- 功能色 -->
+    <color name="error">#FFF44336</color>
+    <color name="accent">#FFB388FF</color>
+    
+    <!-- 卡片描边 - 亮紫 -->
+    <color name="card_stroke">#3B8E6FD0</color>
+</resources>

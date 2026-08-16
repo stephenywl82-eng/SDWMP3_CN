@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【Steven v1.5 呼吸边框底栏】setTint 只作用于 solid，stroke 保持独立 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#FFFFFF" />
+    <corners android:radius="24dp" />
+    <stroke
+        android:width="0.5dp"
+        android:color="#00000000" />
+</shape>

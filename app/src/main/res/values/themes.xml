@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.SDWMusic" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+        <item name="android:statusBarColor">#1A1A1F</item>
+        <item name="android:navigationBarColor">#1A1A1F</item>
+        <item name="android:windowBackground">#1A1A1F</item>
+    </style>
+    <color name="purple_primary">#8E6FD0</color>
+    <color name="purple_accent">#B388FF</color>
+    <color name="dark_bg">#1A1A1F</color>
+    <color name="dark_card">#252530</color>
+    <color name="gold_accent">#C9A962</color>
+</resources>

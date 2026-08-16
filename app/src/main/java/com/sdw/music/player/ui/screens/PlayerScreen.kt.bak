@@ -1,0 +1,1251 @@
+package com.sdw.music.player.ui.screens
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.CubicBezierEasing
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.material.ripple.rememberRipple
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
+import android.util.Log
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.flow.collect
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.snapshotFlow
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material.icons.automirrored.filled.QueueMusic
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.draw.blur
+import coil.compose.rememberAsyncImagePainter
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.positionInWindow
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import android.app.Activity
+import android.os.Build
+import android.content.res.Configuration
+import android.content.Context
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import com.sdw.music.player.R
+import com.sdw.music.player.util.DeviceMapper
+import com.sdw.music.player.ui.components.LyricViewCompose
+import com.sdw.music.player.LyricLine
+import com.sdw.music.player.LrcParser
+import com.sdw.music.player.BpmKeyCache
+import com.sdw.music.player.MusicService
+import kotlin.math.exp
+import android.os.PowerManager
+import com.sdw.music.player.ui.theme.*
+import com.sdw.music.player.ui.components.Smooth
+
+import com.sdw.music.player.EqualizerManager
+import com.sdw.music.player.ui.components.VuMeter
+import com.sdw.music.player.ui.components.VuMeterStyle
+import com.sdw.music.player.ui.viewmodel.PlayerState
+import com.sdw.music.player.ui.animation.CoverPosition
+import com.sdw.music.player.ui.animation.SharedCoverState
+import androidx.media3.common.Player
+
+data class BandLevels(val sub: Float = 0f, val bass: Float = 0f, val mid: Float = 0f, val high: Float = 0f, val rms: Float = 0f)
+
+/** Map raw band energy (0~0.15ish) to display range 0~1 using log10, calibrated for LP-diff output */
+private fun Float.toLog(): Float {
+    if (this <= 0.0001f) return 0f
+    // log10 maps: 0.001→0.35, 0.01→0.67, 0.1→1.0
+    val v = (kotlin.math.log10(this) + 3f) / 3f
+    return v.coerceIn(0f, 1f)
+}
+
+
+@Composable
+fun PlayerScreen(
+    state: PlayerState,
+    sharedCoverState: SharedCoverState? = null,
+    fullCoverVisible: Boolean = true,
+    positionMs: Long = 0L,
+    durationMs: Long = 0L,
+    isPlaying: Boolean = false,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+    onPrevious: () -> Unit,
+    onSeekTo: (Long) -> Unit,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
+    onNavigateBack: () -> Unit,
+    onNavigateToLyrics: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onShare: () -> Unit,
+    onToggleEqualizer: () -> Unit,
+    onDeleteSong: () -> Unit,
+    onNavigateToAlbum: (albumName: String) -> Unit = {},
+    onNavigateToArtist: (artistName: String) -> Unit = {},
+    onPlayQueueIndex: (Int) -> Unit = {},
+    onDismiss: (() -> Unit)? = null,
+    audioSessionId: Int = 0,
+) {
+    val coverUri = state.currentSongAlbumArt
+    val hasCoverColor = state.accentColor != 0L && coverUri != null && coverUri.isNotEmpty()
+    val accentColor by animateColorAsState(
+        targetValue = if (hasCoverColor) Color(state.accentColor) else MaterialTheme.colorScheme.primary,
+        animationSpec = tween(600, easing = FastOutSlowInEasing),
+        label = "accentColor"
+    )
+    val textAccentColor = remember(accentColor) {
+        val hsv = FloatArray(3)
+        android.graphics.Color.RGBToHSV(
+            (accentColor.red * 255).toInt(), (accentColor.green * 255).toInt(),
+            (accentColor.blue * 255).toInt(), hsv
+        )
+        if (hsv[2] < 0.65f) hsv[2] = 0.65f + (hsv[2] * 0.25f).coerceIn(0f, 0.1f)
+        if (hsv[1] > 0.55f) hsv[1] = 0.55f + (hsv[1] - 0.55f) * 0.3f
+        Color(android.graphics.Color.HSVToColor(hsv))
+    }
+    var showMenu by remember { mutableStateOf(false) }
+    var showQueue by remember { mutableStateOf(false) }
+
+    // Lyrics
+    val lyricsLines = remember(state.currentLyrics) {
+        if (!state.currentLyrics.isNullOrBlank()) LrcParser.parse(state.currentLyrics) else emptyList<LyricLine>()
+    }
+    val currentLyricLine = if (lyricsLines.isNotEmpty()) {
+        val idx = LrcParser.findCurrentLineIndex(lyricsLines, positionMs)
+        if (idx in lyricsLines.indices) lyricsLines[idx].text else null
+    } else null
+
+    // BackHandler: system back triggers navigate back
+    BackHandler(onBack = onNavigateBack)
+
+    // Immersive: hide status bar, restore on leave
+    val view = LocalView.current
+    DisposableEffect(Unit) {
+        val window = (view.context as? Activity)?.window ?: return@DisposableEffect onDispose {}
+        val controller = WindowInsetsControllerCompat(window, view)
+        controller.hide(WindowInsetsCompat.Type.statusBars())
+        controller.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        onDispose { controller.show(WindowInsetsCompat.Type.statusBars()) }
+    }
+
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val screenHeightDp = LocalConfiguration.current.screenHeightDp
+    val isCompact = screenWidthDp < 400
+    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val isFoldable = screenWidthDp >= 580 && (screenWidthDp.toFloat() / screenHeightDp.toFloat()) in 0.7f..1.4f
+
+    val artSize = if (isLandscape) (screenHeightDp * 0.68f).dp.coerceAtMost(260.dp)
+                  else (screenWidthDp * 0.55f).dp.coerceAtMost(240.dp)
+
+    // 【V7.97】屏幕状态感知：熄屏时停掉60fps动画，主线程CPU从~16%压到~1%
+    val screenOn = remember { mutableStateOf(true) }
+    val context = LocalContext.current
+    LaunchedEffect(Unit) {
+        val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        while (isActive) {
+            screenOn.value = pm.isInteractive
+            delay(2000)
+        }
+    }
+
+    val rotation by key(screenOn.value) {
+        if (screenOn.value) {
+            val infiniteTransition = rememberInfiniteTransition(label = "spin")
+            infiniteTransition.animateFloat(
+                initialValue = 0f,
+                targetValue = 360f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(30000, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart
+                ),
+                label = "albumRotation"
+            )
+        } else {
+            remember { mutableFloatStateOf(0f) }
+        }
+    }
+
+    // EQ status poll
+    var eqEnabled by remember { mutableStateOf(false) }
+    var eqPresetName by remember { mutableStateOf<String?>(null) }
+    var vuSessionId by remember { mutableIntStateOf(audioSessionId) }
+
+    val vuPrefs = remember { context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE) }
+    var vuEnabled by remember { mutableStateOf(vuPrefs.getBoolean("vu_meter_enabled", true)) }
+    var vuStyleIdx by remember { mutableIntStateOf(vuPrefs.getInt("vu_meter_style", 3).coerceIn(0, 3)) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            try {
+                // [v10] Oboe/DAC mode: use native DSP EQ, not Media3 EqualizerManager
+                val svc = com.sdw.music.player.MusicService.instance
+                if (svc?.isOboeDirectMode() == true || svc?.getUsbDacController() != null) {
+                    eqEnabled = svc.isDspEqEnabled()
+                    eqPresetName = if (eqEnabled) "DSP EQ" else null
+                } else {
+                    eqEnabled = EqualizerManager.isEnabled() && EqualizerManager.isInitialized()
+                    eqPresetName = if (eqEnabled) EqualizerManager.getCurrentPresetName() else null
+                }
+            } catch (_: Exception) { eqPresetName = null }
+            kotlinx.coroutines.delay(500)
+        }
+    }
+
+    // Dismiss drag (for embedded mode)
+    var _dismissDragAmount by remember { mutableStateOf(0f) }
+    val portraitModifier = if (onDismiss != null) {
+        Modifier.pointerInput(Unit) {
+            detectVerticalDragGestures(
+                onDragEnd = {
+                    if (_dismissDragAmount > 300f) onDismiss.invoke()
+                    _dismissDragAmount = 0f
+                },
+                onVerticalDrag = { _, dragAmount ->
+                    if (dragAmount > 0) _dismissDragAmount += dragAmount
+                    else _dismissDragAmount = maxOf(0f, _dismissDragAmount + dragAmount)
+                }
+            )
+        }
+    } else Modifier
+
+    val bandLevelsState = remember { mutableStateOf(BandLevels()) }
+    // Onset detection → drives PolarEdgeLight beats (replaces BPM timing)
+    val onsetSeq = remember { mutableStateOf(0L) }
+    val onsetIntensityState = remember { mutableStateOf(1f) }
+    LaunchedEffect(Unit) {
+        val emaSub = mutableStateOf(0f); val emaBass = mutableStateOf(0f)
+        val emaMid = mutableStateOf(0f); val emaHigh = mutableStateOf(0f)
+        var bgRhythm = 0f; var onsetArmed = true // onset detection locals
+        MusicService.instance?.setFftCallback { fft ->
+            val n = fft.size / 2 // pairs of (real, imag)
+            if (n < 8) return@setFftCallback
+            // Split FFT bins into 4 bands
+            var s = 0f; var b = 0f; var m = 0f; var h = 0f
+            var cs = 0; var cb = 0; var cm = 0; var ch = 0
+            val subEnd = (n * 0.08f).toInt().coerceAtLeast(1)
+            val bassEnd = (n * 0.20f).toInt().coerceAtLeast(2)
+            val midEnd = (n * 0.55f).toInt().coerceAtLeast(4)
+            for (i in 0 until n step 2) {
+                val re = fft[i].toFloat() / 128f
+                val im = if (i + 1 < fft.size) fft[i + 1].toFloat() / 128f else 0f
+                val mag = kotlin.math.sqrt(re * re + im * im)
+                if (i < subEnd) { s += mag; cs++ }
+                else if (i < bassEnd) { b += mag; cb++ }
+                else if (i < midEnd) { m += mag; cm++ }
+                else { h += mag; ch++ }
+            }
+            val sv = (s / maxOf(1, cs)).coerceIn(0f, 1f)
+            val bv = (b / maxOf(1, cb)).coerceIn(0f, 1f)
+            val mv = (m / maxOf(1, cm)).coerceIn(0f, 1f)
+            val hv = (h / maxOf(1, ch)).coerceIn(0f, 1f)
+            // ── Onset detection (adaptive, audio-rate) ──
+            // Bass-heavy weighting: bass (80–250 Hz) carries most rhythmic info
+            val rhythmEnergy = sv * 0.7f + bv * 1.3f + mv * 0.25f + hv * 0.08f
+            bgRhythm = bgRhythm * 0.92f + rhythmEnergy * 0.08f
+            val onsetThresh = (bgRhythm * 1.35f).coerceAtLeast(0.05f)
+            if (rhythmEnergy > onsetThresh && onsetArmed) {
+                onsetArmed = false
+                onsetSeq.value += 1
+                onsetIntensityState.value = (rhythmEnergy / onsetThresh).coerceIn(0.5f, 3.0f)
+            }
+            if (rhythmEnergy < onsetThresh * 0.5f) { onsetArmed = true }
+            emaSub.value = emaSub.value * 0.85f + sv * 0.15f
+            emaBass.value = emaBass.value * 0.85f + bv * 0.15f
+            emaMid.value = emaMid.value * 0.85f + mv * 0.15f
+            emaHigh.value = emaHigh.value * 0.85f + hv * 0.15f
+            // bandLevelsState updated exclusively by Oboe poll loop below
+        }
+        // Poll real band levels from Oboe LP-diff analysis
+        // Raw band values are tiny (0.001~0.05); apply log10 mapping for visual range
+        while (true) {
+            try {
+                val oboe = MusicService.instance?.getOboePlayer()
+                if (oboe != null) {
+                    bandLevelsState.value = BandLevels(
+                        sub = oboe.getBandSub(),
+                        bass = oboe.getBandBass(),
+                        mid = oboe.getBandMid(),
+                        high = oboe.getBandHigh(),
+                        rms = oboe.getRmsLevel()
+                    )
+                }
+            } catch (_: Exception) { }
+            kotlinx.coroutines.delay(80)
+        }
+    }
+    DisposableEffect(Unit) {
+        onDispose { MusicService.instance?.setFftCallback(null) }
+    }
+
+    val progressFraction = if (durationMs > 0) positionMs.toFloat() / durationMs.toFloat() else 0f
+
+    // Band-reactive Aurora 鈥?4 band groups 脳 3 blobs each
+    val baseHue = remember(accentColor) {
+        val hsv = FloatArray(3)
+        android.graphics.Color.colorToHSV(
+            android.graphics.Color.argb(
+                (accentColor.alpha * 255).toInt(), (accentColor.red * 255).toInt(),
+                (accentColor.green * 255).toInt(), (accentColor.blue * 255).toInt()
+            ), hsv
+        )
+        hsv[0]
+    }
+    val seedHues = remember(baseHue) {
+        listOf(baseHue, (baseHue + 120f) % 360f, (baseHue + 240f) % 360f)
+    }
+
+    data class BandBlob(
+        val hueOff: Float, val period: Int, val scale: Float,
+        val baseX: Float, val baseY: Float, val baseAlpha: Float,
+        val sat: Float, val bright: Float, val phaseOff: Float,
+        val bandGroup: Int // 0=sub, 1=bass, 2=mid, 3=high
+    )
+
+    val bandReactiveBlobs = remember {
+        listOf(
+            BandBlob( 4f,   19000, 0.82f, 0.08f, 0.08f, 0.22f, 0.62f, 0.72f, 0.0f, 0),
+            BandBlob(-3f,   23000, 0.64f, 0.88f, 0.15f, 0.24f, 0.58f, 0.76f, 1.5f, 0),
+            BandBlob( 7f,   27000, 0.78f, 0.22f, 0.84f, 0.20f, 0.68f, 0.64f, 0.8f, 0),
+            BandBlob(-9f,   29000, 0.56f, 0.92f, 0.78f, 0.20f, 0.60f, 0.70f, 2.3f, 1),
+            BandBlob(11f,   31000, 0.70f, 0.12f, 0.92f, 0.22f, 0.65f, 0.74f, 1.1f, 1),
+            BandBlob(-5f,   34000, 0.60f, 0.74f, 0.24f, 0.24f, 0.62f, 0.68f, 0.4f, 1),
+            BandBlob(14f,   37000, 0.74f, 0.96f, 0.12f, 0.18f, 0.70f, 0.62f, 1.9f, 2),
+            BandBlob(-8f,   41000, 0.54f, 0.36f, 0.68f, 0.20f, 0.58f, 0.78f, 0.6f, 2),
+            BandBlob( 2f,   43000, 0.68f, 0.55f, 0.15f, 0.18f, 0.66f, 0.66f, 2.7f, 2),
+            BandBlob(-12f,  47000, 0.58f, 0.05f, 0.58f, 0.22f, 0.64f, 0.72f, 0.2f, 3),
+            BandBlob( 6f,   49000, 0.72f, 0.78f, 0.88f, 0.24f, 0.68f, 0.70f, 1.7f, 3),
+            BandBlob(-15f,  53000, 0.62f, 0.32f, 0.42f, 0.20f, 0.60f, 0.76f, 3.1f, 3),
+        )
+    }
+
+    val ease = CubicBezierEasing(0.42f, 0.0f, 0.58f, 1.0f)
+
+    // Edge light preference — VU-style edge bars only, no background flash
+    val edgeLightPref = LocalContext.current.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE)
+    val edgeLightEnabled = edgeLightPref.getBoolean("moto_edge_light", true)
+    // Cover color background — blurred album art as player backdrop
+    val coverColorBgEnabled = edgeLightPref.getBoolean("cover_color_bg", false)
+
+    // Per-band beat flash for pulse effect
+    data class BandBeat(val flash: Float = 0f, val decay: Float = 0f)
+    var subBeat by remember { mutableStateOf(BandBeat()) }
+    var bassBeat by remember { mutableStateOf(BandBeat()) }
+    var midBeat by remember { mutableStateOf(BandBeat()) }
+    var highBeat by remember { mutableStateOf(BandBeat()) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Cover color blurred background
+        if (coverColorBgEnabled) {
+            val coverUri = state.currentSongAlbumArt
+            if (coverUri?.isNotBlank() == true) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .scale(1.5f)
+                        .blur(120.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Image(
+                        painter = rememberAsyncImagePainter(coverUri),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop,
+                        alpha = 0.35f
+                    )
+                }
+            }
+            // Accent color overlay gradient
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                drawRect(
+                    Brush.radialGradient(
+                        0.0f to accentColor.copy(alpha = 0.25f),
+                        0.5f to accentColor.copy(alpha = 0.08f),
+                        1.0f to Color.Black.copy(alpha = 0.30f),
+                        center = Offset(size.width / 2f, size.height * 0.4f),
+                        radius = size.width * 0.7f
+                    )
+                )
+            }
+        }
+        // VU-style Edge Bars — only when edge light enabled
+        if (!isFoldable && edgeLightEnabled) {
+            EdgeVuBars(
+                bandLevels = bandLevelsState.value,
+                isPlaying = isPlaying,
+                coverColors = state.coverColors,
+                accentColor = accentColor,
+                isLandscape = isLandscape
+            )
+        }
+
+        // Vignette
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val cx = size.width / 2f; val cy = size.height / 2f
+            val maxR = kotlin.math.sqrt(cx * cx + cy * cy)
+            drawCircle(
+                Brush.radialGradient(
+                    0.0f to Color.Transparent,
+                    0.45f to Color.Transparent,
+                    1.0f to Color.Black.copy(alpha = 0.10f),
+                    center = Offset(cx, cy), radius = maxR * 1.2f
+                ),
+                radius = maxR * 1.2f, center = Offset(cx, cy)
+            )
+        }
+
+        // Edge light removed — replaced by VU Meter
+
+        // Layout switch
+        if (isLandscape && isFoldable) {
+            FoldableLayout(
+                state = state,
+                sharedCoverState = sharedCoverState,
+                accentColor = accentColor,
+                textAccentColor = textAccentColor,
+                isPlaying = isPlaying,
+                rotation = rotation,
+                progressFraction = progressFraction,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                eqPresetName = eqPresetName,
+                eqEnabled = eqEnabled,
+                lyricsLines = lyricsLines,
+                showMenu = showMenu,
+                onToggleMenu = { showMenu = true },
+                onDismissMenu = { showMenu = false },
+                onNavigateBack = onNavigateBack,
+                onDeleteSong = onDeleteSong,
+                onPlayPause = onPlayPause,
+                onPrevious = onPrevious,
+                onNext = onNext,
+                onToggleShuffle = onToggleShuffle,
+                onCycleRepeat = onCycleRepeat,
+                onSeekTo = onSeekTo,
+                onNavigateToAlbum = onNavigateToAlbum,
+                onNavigateToArtist = onNavigateToArtist,
+                onToggleFavorite = onToggleFavorite,
+                onToggleEqualizer = onToggleEqualizer,
+                onShare = onShare,
+                onNavigateToLyrics = onNavigateToLyrics,
+                onNavigateToQueue = { showQueue = true }
+            )
+        } else if (isLandscape) {
+            LandscapeLayout(
+                state = state,
+                accentColor = accentColor,
+                textAccentColor = textAccentColor,
+                isPlaying = isPlaying,
+                rotation = rotation,
+                artSize = artSize,
+                progressFraction = progressFraction,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                eqPresetName = eqPresetName,
+                eqEnabled = eqEnabled,
+                vuEnabled = vuEnabled,
+                bandLevels = bandLevelsState.value,
+                vuStyleIdx = vuStyleIdx,
+                currentLyricLine = currentLyricLine,
+                showMenu = showMenu,
+                onToggleMenu = { showMenu = true },
+                onDismissMenu = { showMenu = false },
+                onNavigateBack = onNavigateBack,
+                onDeleteSong = onDeleteSong,
+                onPlayPause = onPlayPause,
+                onPrevious = onPrevious,
+                onNext = onNext,
+                onToggleShuffle = onToggleShuffle,
+                onCycleRepeat = onCycleRepeat,
+                onSeekTo = onSeekTo,
+                onNavigateToAlbum = onNavigateToAlbum,
+                onNavigateToArtist = onNavigateToArtist,
+                onToggleFavorite = onToggleFavorite,
+                onToggleEqualizer = onToggleEqualizer,
+                onShare = onShare,
+                onNavigateToLyrics = onNavigateToLyrics,
+                onNavigateToQueue = { showQueue = true }
+            )
+        } else {
+            PortraitLayout(
+                state = state,
+                accentColor = accentColor,
+                textAccentColor = textAccentColor,
+                isPlaying = isPlaying,
+                rotation = rotation,
+                artSize = artSize,
+                isCompact = isCompact,
+                progressFraction = progressFraction,
+                positionMs = positionMs,
+                durationMs = durationMs,
+                eqPresetName = eqPresetName,
+                eqEnabled = eqEnabled,
+                vuEnabled = vuEnabled,
+                bandLevels = bandLevelsState.value,
+                vuStyleIdx = vuStyleIdx,
+                currentLyricLine = currentLyricLine,
+                showMenu = showMenu,
+                portraitModifier = portraitModifier,
+                onToggleMenu = { showMenu = true },
+                onDismissMenu = { showMenu = false },
+                onNavigateBack = onNavigateBack,
+                onDeleteSong = onDeleteSong,
+                onPlayPause = onPlayPause,
+                onPrevious = onPrevious,
+                onNext = onNext,
+                onToggleShuffle = onToggleShuffle,
+                onCycleRepeat = onCycleRepeat,
+                onSeekTo = onSeekTo,
+                onNavigateToAlbum = onNavigateToAlbum,
+                onNavigateToArtist = onNavigateToArtist,
+                onToggleFavorite = onToggleFavorite,
+                onToggleEqualizer = onToggleEqualizer,
+                onShare = onShare,
+                onNavigateToLyrics = onNavigateToLyrics,
+                onNavigateToQueue = { showQueue = true }
+            )
+        }
+
+        if (showQueue) {
+            QueueSheet(
+                queue = state.queue,
+                currentSongId = state.currentSongId,
+                accentColor = accentColor,
+                onSongClick = onPlayQueueIndex,
+                onDismiss = { showQueue = false }
+            )
+        }
+    }
+}
+
+// ============================================================================
+// Layout Composables
+// ============================================================================
+
+@Composable
+private fun FoldableLayout(
+    state: PlayerState,
+    sharedCoverState: SharedCoverState?,
+    accentColor: Color,
+    textAccentColor: Color,
+    isPlaying: Boolean,
+    rotation: Float,
+    progressFraction: Float,
+    positionMs: Long,
+    durationMs: Long,
+    eqPresetName: String?,
+    eqEnabled: Boolean,
+    lyricsLines: List<LyricLine>,
+    showMenu: Boolean,
+    onToggleMenu: () -> Unit,
+    onDismissMenu: () -> Unit,
+    onNavigateBack: () -> Unit,
+    onDeleteSong: () -> Unit,
+    onPlayPause: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
+    onSeekTo: (Long) -> Unit,
+    onNavigateToAlbum: (String) -> Unit,
+    onNavigateToArtist: (String) -> Unit,
+    onToggleFavorite: () -> Unit,
+    onToggleEqualizer: () -> Unit,
+    onShare: () -> Unit,
+    onNavigateToLyrics: () -> Unit,
+    onNavigateToQueue: () -> Unit = {}
+) {
+    Row(
+        modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)
+    ) {
+        // Left: player controls
+        Column(
+            modifier = Modifier.weight(1f).fillMaxHeight().padding(start = 12.dp, end = 4.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            PlayerTopBar(
+                showMenu = showMenu,
+                onToggleMenu = onToggleMenu,
+                onDismissMenu = onDismissMenu,
+                onNavigateBack = onNavigateBack,
+                onDelete = onDeleteSong,
+                onNavigateToQueue = onNavigateToQueue,
+                modifier = Modifier.padding(horizontal = 0.dp, vertical = 4.dp)
+            )
+
+            // Center: cover + song info
+            Column(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                // Cover (fixed position, outside AnimatedContent)
+                Box(
+                    modifier = Modifier
+                        .size(140.dp)
+                        .graphicsLayer { alpha = if (true) 1f else 0f }
+                        .clickable(
+                            indication = rememberRipple(bounded = false, radius = 70.dp),
+                            interactionSource = remember { MutableInteractionSource() }
+                        ) { onNavigateToAlbum(state.currentSongAlbum) },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Box(modifier = Modifier.size(140.dp).clip(CircleShape).background(accentColor.copy(alpha = 0.08f)))
+                    PlayerCoverArt(
+                        artUri = state.currentSongAlbumArt,
+                        songTitle = state.currentSongTitle,
+                        songArtist = state.currentSongArtist,
+                        accentColor = accentColor,
+                        isPlaying = isPlaying,
+                        rotation = rotation,
+                        sizeDp = 130.dp,
+                        glowSizeDp = 140.dp,
+                        onCoverPositioned = { offset, size ->
+                            sharedCoverState?.fullCoverPosition = CoverPosition(windowOffset = offset, size = size)
+                        },
+                        onClick = { onNavigateToAlbum(state.currentSongAlbum) }
+                    )
+                }
+
+                Spacer(Modifier.height(12.dp))
+
+                // Song info animated on track change
+                AnimatedContent(
+                    targetState = state.currentSongId,
+                    transitionSpec = {
+                        (fadeIn(tween(350))).togetherWith(fadeOut(tween(250)))
+                    }
+                ) { _ ->
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            state.currentSongTitle.ifEmpty { "Not Playing" },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                        )
+                        PlayerSongInfo(
+                            artist = state.currentSongArtist,
+                            format = state.currentSongFormat,
+                            textAccentColor = textAccentColor
+                        )
+                    }
+                }
+            }
+
+            // Bottom: controls
+            PlayerEqLabel(eqPresetName, accentColor, textAccentColor)
+            Spacer(Modifier.height(4.dp))
+            DacInfoBar(accentColor, textAccentColor, isPlaying,
+                modifier = Modifier.align(Alignment.CenterHorizontally))
+            Spacer(Modifier.height(4.dp))
+
+            PlayerProgress(
+                progressFraction, durationMs, positionMs, accentColor,
+                onSeekTo = { onSeekTo((durationMs * it).toLong()) },
+                modifier = Modifier.padding(horizontal = 8.dp)
+            )
+            Spacer(Modifier.height(6.dp))
+
+            PlayerControlBar(
+                shuffleEnabled = state.shuffleEnabled,
+                repeatMode = state.repeatMode,
+                isPlaying = isPlaying,
+                accentColor = accentColor,
+                onToggleShuffle = onToggleShuffle,
+                onPrevious = onPrevious,
+                onPlayPause = onPlayPause,
+                onNext = onNext,
+                onCycleRepeat = onCycleRepeat,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
+                playButtonSize = 48.dp
+            )
+            Spacer(Modifier.height(4.dp))
+
+            PlayerBottomActions(
+                eqEnabled = eqEnabled,
+                isCurrentSongFavorite = state.isCurrentSongFavorite,
+                onNavigateToLyrics = onNavigateToLyrics,
+                onToggleEqualizer = onToggleEqualizer,
+                onToggleFavorite = onToggleFavorite,
+                onShare = onShare,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+            )
+
+            MotorolaWatermark(accentColor = accentColor)
+        }
+
+        // Divider
+        Box(
+            modifier = Modifier.fillMaxHeight().width(0.5.dp)
+                .background(accentColor.copy(alpha = 0.15f))
+        )
+
+        // Right: full-screen lyrics
+        Column(
+            modifier = Modifier.weight(1f).fillMaxHeight().padding(horizontal = 8.dp, vertical = 4.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 8.dp).statusBarsPadding(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Lyrics - ${state.currentSongTitle.ifEmpty { "Lyrics" }}",
+                    style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
+                )
+                IconButton(onClick = onNavigateToLyrics, modifier = Modifier.size(32.dp)) {
+                    Icon(Icons.Default.Search, null, tint = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
+                }
+            }
+
+            if (lyricsLines.isEmpty()) {
+                Box(modifier = Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f), modifier = Modifier.size(48.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Text("No Lyrics", color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f), style = MaterialTheme.typography.bodyMedium)
+                    }
+                }
+            } else {
+                LyricViewCompose(
+                    lyrics = lyricsLines,
+                    positionMs = positionMs,
+                    themeColor = accentColor.value.toInt(),
+                    onLineClick = { line -> onSeekTo(line.timeMs) },
+                    modifier = Modifier.weight(1f).fillMaxWidth()
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun LandscapeLayout(
+    state: PlayerState,
+    accentColor: Color,
+    textAccentColor: Color,
+    isPlaying: Boolean,
+    rotation: Float,
+    artSize: androidx.compose.ui.unit.Dp,
+    progressFraction: Float,
+    positionMs: Long,
+    durationMs: Long,
+    eqPresetName: String?,
+    eqEnabled: Boolean,
+    vuEnabled: Boolean,
+    bandLevels: BandLevels,
+    vuStyleIdx: Int,
+    currentLyricLine: String?,
+    showMenu: Boolean,
+    onToggleMenu: () -> Unit,
+    onDismissMenu: () -> Unit,
+    onNavigateBack: () -> Unit,
+    onDeleteSong: () -> Unit,
+    onPlayPause: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
+    onSeekTo: (Long) -> Unit,
+    onNavigateToAlbum: (String) -> Unit,
+    onNavigateToArtist: (String) -> Unit,
+    onToggleFavorite: () -> Unit,
+    onToggleEqualizer: () -> Unit,
+    onShare: () -> Unit,
+    onNavigateToLyrics: () -> Unit,
+    onNavigateToQueue: () -> Unit = {}
+) {
+    Row(
+        modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)
+    ) {
+        // Left: controls
+        Column(
+            modifier = Modifier.weight(1.05f).fillMaxHeight().padding(horizontal = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            PlayerTopBar(
+                showMenu = showMenu,
+                onToggleMenu = onToggleMenu,
+                onDismissMenu = onDismissMenu,
+                onNavigateBack = onNavigateBack,
+                onDelete = onDeleteSong,
+                onNavigateToQueue = onNavigateToQueue
+            )
+
+            // Center: song info
+            Column(
+                modifier = Modifier.weight(1f).fillMaxWidth(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    state.currentSongTitle.ifEmpty { "Not Playing" },
+                    style = MaterialTheme.typography.titleLarge,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis,
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                )
+                PlayerSongInfo(
+                    artist = state.currentSongArtist,
+                    format = state.currentSongFormat,
+                    textAccentColor = textAccentColor,
+                    onArtistClick = { onNavigateToArtist(state.currentSongArtist) }
+                )
+                Spacer(Modifier.height(10.dp))
+                PlayerInlineLyric(currentLyricLine, textAccentColor)
+            }
+
+            // Bottom: controls
+            // VU Meter
+            if (vuEnabled) {
+                VuMeter(sub = bandLevels.sub, bass = bandLevels.bass, mid = bandLevels.mid, high = bandLevels.high, rms = bandLevels.rms, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx], accentColor = accentColor, modifier = Modifier.padding(horizontal = 8.dp).heightIn(max = 80.dp))
+                Spacer(Modifier.height(12.dp))
+            }
+            PlayerEqLabel(eqPresetName, accentColor, textAccentColor)
+            DacInfoBar(accentColor, textAccentColor, isPlaying,
+                modifier = Modifier.align(Alignment.CenterHorizontally))
+            Spacer(Modifier.height(4.dp))
+            PlayerProgress(
+                progressFraction, durationMs, positionMs, accentColor,
+                onSeekTo = { onSeekTo((durationMs * it).toLong()) }
+            )
+            Spacer(Modifier.height(8.dp))
+
+            PlayerControlBar(
+                shuffleEnabled = state.shuffleEnabled,
+                repeatMode = state.repeatMode,
+                isPlaying = isPlaying,
+                accentColor = accentColor,
+                onToggleShuffle = onToggleShuffle,
+                onPrevious = onPrevious,
+                onPlayPause = onPlayPause,
+                onNext = onNext,
+                onCycleRepeat = onCycleRepeat,
+                modifier = Modifier.fillMaxWidth(),
+                playButtonSize = 52.dp
+            )
+            Spacer(Modifier.height(4.dp))
+
+            PlayerBottomActions(
+                eqEnabled = eqEnabled,
+                isCurrentSongFavorite = state.isCurrentSongFavorite,
+                onNavigateToLyrics = onNavigateToLyrics,
+                onToggleEqualizer = onToggleEqualizer,
+                onToggleFavorite = onToggleFavorite,
+                onShare = onShare,
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            MotorolaWatermark(accentColor = accentColor)
+        }
+
+        // Right: album art
+        PlayerCoverArt(
+            artUri = state.currentSongAlbumArt,
+            songTitle = state.currentSongTitle,
+            songArtist = state.currentSongArtist,
+            accentColor = accentColor,
+            isPlaying = isPlaying,
+            rotation = rotation,
+            sizeDp = artSize,
+            glowSizeDp = artSize + 32.dp,
+            onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+            modifier = Modifier.weight(1f).fillMaxHeight().padding(24.dp)
+        )
+    }
+}
+
+@Composable
+private fun PortraitLayout(
+    state: PlayerState,
+    accentColor: Color,
+    textAccentColor: Color,
+    isPlaying: Boolean,
+    rotation: Float,
+    artSize: androidx.compose.ui.unit.Dp,
+    isCompact: Boolean,
+    progressFraction: Float,
+    positionMs: Long,
+    durationMs: Long,
+    eqPresetName: String?,
+    eqEnabled: Boolean,
+    vuEnabled: Boolean,
+    bandLevels: BandLevels,
+    vuStyleIdx: Int,
+    currentLyricLine: String?,
+    showMenu: Boolean,
+    portraitModifier: Modifier,
+    onToggleMenu: () -> Unit,
+    onDismissMenu: () -> Unit,
+    onNavigateBack: () -> Unit,
+    onDeleteSong: () -> Unit,
+    onPlayPause: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onToggleShuffle: () -> Unit,
+    onCycleRepeat: () -> Unit,
+    onSeekTo: (Long) -> Unit,
+    onNavigateToAlbum: (String) -> Unit,
+    onNavigateToArtist: (String) -> Unit,
+    onToggleFavorite: () -> Unit,
+    onToggleEqualizer: () -> Unit,
+    onShare: () -> Unit,
+    onNavigateToLyrics: () -> Unit,
+    onNavigateToQueue: () -> Unit = {}
+) {
+    val hPadding = if (isCompact) 24.dp else 48.dp
+    val infoPadding = if (isCompact) 20.dp else 32.dp
+
+    Column(
+        modifier = Modifier.fillMaxSize()
+            .windowInsetsPadding(WindowInsets.displayCutout)
+            .navigationBarsPadding()
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp).then(portraitModifier),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            IconButton(onClick = onNavigateBack) {
+                Icon(Icons.Default.KeyboardArrowDown, "Back", tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(32.dp))
+            }
+            Spacer(modifier = Modifier.weight(1f))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onNavigateToQueue) {
+                    Icon(Icons.Default.QueueMusic, "Queue", tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                }
+                Box {
+                    IconButton(onClick = onToggleMenu) {
+                        Icon(Icons.Default.MoreVert, "Menu", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    DropdownMenu(expanded = showMenu, onDismissRequest = onDismissMenu) {
+                    DropdownMenuItem(
+                        text = { Text("Delete Song", color = Color.Red) },
+                        onClick = { onDismissMenu(); onDeleteSong() },
+                        leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color.Red) }
+                    )
+                }
+                }
+            }
+        }
+
+        Spacer(Modifier.height(12.dp))
+
+        // Song header
+        Column(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = infoPadding),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                state.currentSongTitle.ifEmpty { "Not Playing" },
+                style = MaterialTheme.typography.headlineMedium,
+                color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+            )
+            PlayerSongInfo(
+                artist = state.currentSongArtist,
+                format = state.currentSongFormat,
+                textAccentColor = textAccentColor,
+                onArtistClick = { onNavigateToArtist(state.currentSongArtist) }
+            )
+            Spacer(Modifier.height(14.dp))
+            PlayerInlineLyric(currentLyricLine, textAccentColor)
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        // Album art — fixed position, does not move with lyrics
+        PlayerCoverArt(
+            artUri = state.currentSongAlbumArt,
+            songTitle = state.currentSongTitle,
+            songArtist = state.currentSongArtist,
+            accentColor = accentColor,
+            isPlaying = isPlaying,
+            rotation = rotation,
+            sizeDp = artSize,
+            glowSizeDp = artSize + 36.dp,
+            onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+            modifier = Modifier.fillMaxWidth().height(artSize + 36.dp)
+        )
+
+        Spacer(Modifier.weight(1f))
+
+        // VU Meter
+        if (vuEnabled) {
+                VuMeter(sub = bandLevels.sub, bass = bandLevels.bass, mid = bandLevels.mid, high = bandLevels.high, rms = bandLevels.rms, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx], accentColor = accentColor, modifier = Modifier.padding(horizontal = infoPadding))
+            Spacer(Modifier.height(6.dp))
+        }
+
+        // EQ label
+        PlayerEqLabel(eqPresetName, accentColor, textAccentColor)
+        Spacer(Modifier.height(8.dp))
+
+        // V3.3.4: DAC info capsule (visible only in USB DAC exclusive mode)
+        DacInfoBar(accentColor, textAccentColor, isPlaying,
+            modifier = Modifier.align(Alignment.CenterHorizontally))
+        Spacer(Modifier.height(8.dp))
+        // Progress
+        PlayerProgress(
+            progressFraction, durationMs, positionMs, accentColor,
+            onSeekTo = { onSeekTo((durationMs * it).toLong()) },
+            modifier = Modifier.padding(horizontal = infoPadding)
+        )
+        Spacer(Modifier.height(16.dp))
+
+        // Controls
+        PlayerControlBar(
+            shuffleEnabled = state.shuffleEnabled,
+            repeatMode = state.repeatMode,
+            isPlaying = isPlaying,
+            accentColor = accentColor,
+            onToggleShuffle = onToggleShuffle,
+            onPrevious = onPrevious,
+            onPlayPause = onPlayPause,
+            onNext = onNext,
+            onCycleRepeat = onCycleRepeat,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = infoPadding)
+        )
+        Spacer(Modifier.height(8.dp))
+
+        // Bottom actions
+        PlayerBottomActions(
+            eqEnabled = eqEnabled,
+            isCurrentSongFavorite = state.isCurrentSongFavorite,
+            onNavigateToLyrics = onNavigateToLyrics,
+            onToggleEqualizer = onToggleEqualizer,
+            onToggleFavorite = onToggleFavorite,
+            onShare = onShare,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = hPadding)
+        )
+
+        MotorolaWatermark(accentColor = accentColor)
+    }
+}
+
+// ============================================================================
+// Motorola Device Detection & Branding — delegates to DeviceMapper singleton
+// ============================================================================
+
+internal fun getMotorolaDeviceName(): String? {
+    val manufacturer = Build.MANUFACTURER.lowercase()
+    if (!manufacturer.contains("motorola")) return null
+    val model = Build.MODEL
+    return DeviceMapper.getDisplayName(model) ?: model
+}
+
+@Composable
+private fun MotorolaWatermark(accentColor: Color) {
+    val deviceName = remember { getMotorolaDeviceName() } ?: return
+    val montserrat = remember { FontFamily(Font(R.font.montserrat_regular)) }
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            modifier = Modifier
+                .padding(horizontal = 64.dp)
+                .height(0.5.dp)
+                .fillMaxWidth()
+                .background(accentColor.copy(alpha = 0.2f))
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            text = "Motorola $deviceName",
+            fontFamily = montserrat,
+            fontSize = MaterialTheme.typography.titleMedium.fontSize,
+            color = lerp(accentColor, Color.White, 0.65f),
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Edge VU Bars — 28 strips, each mapped to cover palette colors
+// coverColors: [vibrant, lightVibrant, darkVibrant, muted, lightMuted]
+// Dynamic hue/sat/brightness per strip; organic glow bloom + gradient
+// ═══════════════════════════════════════════════════════════════════
+@Composable
+private fun EdgeVuBars(
+    bandLevels: BandLevels,
+    isPlaying: Boolean,
+    coverColors: IntArray,
+    accentColor: Color,
+    isLandscape: Boolean
+) {
+    val stripsPerSide = 28
+    val smoothL = remember { Array(stripsPerSide) { Smooth(0.5f) } }
+    val smoothR = remember { Array(stripsPerSide) { Smooth(0.5f) } }
+    val peaksL = remember { FloatArray(stripsPerSide) }
+    val peaksR = remember { FloatArray(stripsPerSide) }
+    val frame = remember { longArrayOf(0L) }
+    // Pre-compute strip hues from cover palette or fallback
+    val stripHues = remember(coverColors) {
+        if (coverColors.size >= 5 && coverColors.any { it != 0 }) {
+            val hsv = FloatArray(3)
+            val hues = FloatArray(5)
+            for (j in 0..4) {
+                if (coverColors[j] != 0) {
+                    android.graphics.Color.colorToHSV(coverColors[j], hsv); hues[j] = hsv[0]
+                } else hues[j] = -1f
+            }
+            FloatArray(stripsPerSide) { i ->
+                val f = i / (stripsPerSide - 1f)
+                // Pick one of the 5 palette swatches with some randomness
+                val pick = (i * 7 + 3) % 5
+                if (hues[pick] >= 0f) hues[pick]
+                else {
+                    // Spread fallback hues across the spectrum
+                    val avail = hues.withIndex().filter { it.value >= 0f }.map { it.value }
+                    if (avail.isNotEmpty()) avail[i % avail.size]
+                    else -1f
+                }
+            }
+        } else FloatArray(stripsPerSide) { -1f }
+    }
+    val fallbackHue = remember(accentColor) {
+        val hsv = FloatArray(3)
+        android.graphics.Color.colorToHSV(android.graphics.Color.rgb(
+            (accentColor.red * 255).toInt().coerceIn(0, 255),
+            (accentColor.green * 255).toInt().coerceIn(0, 255),
+            (accentColor.blue * 255).toInt().coerceIn(0, 255)), hsv)
+        hsv[0]
+    }
+
+    Canvas(Modifier.fillMaxSize()) {
+        frame[0]++
+        val w = size.width; val h = size.height
+        if (w <= 50f || h <= 50f) return@Canvas
+
+        val isVert = !isLandscape
+        val barLen = if (isVert) h else w
+        val barTk = (if (isVert) w else h) * 0.022f
+        val strips = stripsPerSide
+        val gap = 1.5.dp.toPx()
+        val segH = (barLen - gap * (strips + 1)) / strips
+        val cr = barTk * 0.5f
+        val fc = frame[0].toFloat()
+
+        for (side in 0..1) {
+            val isL = side == 0
+            val smooth = if (isL) smoothL else smoothR
+            val peaks = if (isL) peaksL else peaksR
+
+            for (i in 0 until strips) {
+                val f = i / (strips - 1f)
+                val envelope = kotlin.math.sin(f * Math.PI).toFloat().coerceIn(0.35f, 1f)
+
+                val raw = if (isL) {
+                    if (f < 0.35f) bandLevels.sub * (1f - f / 0.35f) + bandLevels.bass * (f / 0.35f)
+                    else bandLevels.bass * (1f - (f - 0.35f) / 0.65f) + bandLevels.sub * 0.08f
+                } else {
+                    if (f < 0.45f) bandLevels.mid * (1f - f / 0.45f) + bandLevels.high * (f / 0.45f)
+                    else bandLevels.high * (1f - (f - 0.45f) / 0.55f) + bandLevels.mid * 0.10f
+                }
+
+                val t = raw.coerceIn(0f, 1f)
+                // Softer curve for larger movement + bigger jitter
+                val curved = kotlin.math.sqrt(t)  // lifts mid-range
+                val phase = i * 0.37f + side * 2.4f
+                val jit = kotlin.math.sin(fc * 0.11f + phase) * 0.10f
+                val target = if (isPlaying) (curved * envelope + jit).coerceIn(0f, 1f) else 0.02f
+
+                val v = smooth[i].update(target)
+                if (v > peaks[i]) peaks[i] = v
+                else peaks[i] += (v - peaks[i]) * 0.20f
+                val pk = peaks[i].coerceIn(0f, 1f)
+
+                // Hue: from cover palette spread, or fallback gradient
+                val hue = if (stripHues[i] >= 0f) {
+                    (stripHues[i] + f * 4f) % 360f
+                } else {
+                    // Fallback: L=blue→teal, R=orange→pink
+                    val hStart = if (isL) 215f else 30f
+                    val hRange = if (isL) -55f else -45f
+                    (hStart + f * hRange + 360f) % 360f
+                }
+                val sat = (0.55f + v * 0.45f * envelope).coerceAtMost(1f)
+                val lit = (0.10f + v * 0.55f * envelope + f * 0.08f).coerceAtMost(0.85f)
+
+                if (isVert) {
+                    val x = if (isL) 0f else w - barTk
+                    val pos = gap + i * (segH + gap)
+                    val h2 = (v * segH * envelope).coerceAtLeast(0f)
+                    if (v > 0.01f && h2 > 1f) {
+                        val y2 = pos + segH - h2
+                        val baseColor = Color.hsl(hue, sat * 0.6f, lit * 0.5f, 0.8f)
+                        val tipColor = Color.hsl((hue + 8f) % 360f, sat, (lit + 0.15f).coerceAtMost(0.95f), 1f)
+                        val grad = Brush.verticalGradient(0f to baseColor, 1f to tipColor)
+                        drawRoundRect(grad, Offset(x, y2), Size(barTk, h2), CornerRadius(cr, cr))
+                        if (pk > 0.04f) {
+                            val pkY = pos + segH - (pk * segH * envelope).coerceAtLeast(1.5f)
+                            drawRoundRect(Color.hsl(hue, sat, 0.8f, 0.9f),
+                                Offset(x, pkY), Size(barTk, 2.dp.toPx()), CornerRadius(cr, cr))
+                        }
+                    } else {
+                        val cy2 = pos + segH * 0.5f
+                        drawRoundRect(Color.hsl(hue, 0.2f, 0.04f + f * 0.04f, 0.10f + f * 0.05f),
+                            Offset(x, cy2 - barTk * 0.4f), Size(barTk * 0.8f, barTk * 0.8f), CornerRadius(cr))
+                    }
+                } else {
+                    val yPos = if (isL) 0f else h - barTk
+                    val pos = gap + i * (segH + gap)
+                    val w2 = (v * segH * envelope).coerceAtLeast(0f)
+                    if (v > 0.01f && w2 > 1f) {
+                        val baseColor = Color.hsl(hue, sat * 0.6f, lit * 0.5f, 0.8f)
+                        val tipColor = Color.hsl((hue + 8f) % 360f, sat, (lit + 0.15f).coerceAtMost(0.95f), 1f)
+                        val grad = Brush.horizontalGradient(0f to baseColor, 1f to tipColor)
+                        drawRoundRect(grad, Offset(pos, yPos), Size(w2, barTk), CornerRadius(cr, cr))
+
+                        if (pk > 0.04f) {
+                            val pw = (pk * segH * envelope).coerceAtLeast(1.5f)
+                            drawRoundRect(Color.hsl(hue, sat, 0.8f, 0.9f),
+                                Offset(pos + pw - 2.dp.toPx(), yPos), Size(2.dp.toPx(), barTk), CornerRadius(cr))
+                        }
+                    } else {
+                        val cx2 = pos + segH * 0.5f
+                        drawRoundRect(Color.hsl(hue, 0.2f, 0.04f + f * 0.04f, 0.10f + f * 0.05f),
+                            Offset(cx2 - barTk * 0.4f, yPos), Size(barTk * 0.8f, barTk * 0.8f), CornerRadius(cr))
+                    }
+                }
+            }
+        }
+    }
+}

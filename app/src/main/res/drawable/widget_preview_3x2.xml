@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 3x2 Widget Preview — mimics actual widget appearance -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Background gradient -->
+    <item>
+        <shape android:shape="rectangle">
+            <gradient
+                android:startColor="#1A1A2E"
+                android:endColor="#0D0D1A"
+                android:angle="135" />
+            <corners android:radius="20dp" />
+        </shape>
+    </item>
+
+    <!-- Cover art placeholder — rounded rect, top area -->
+    <item
+        android:width="96dp"
+        android:height="96dp"
+        android:gravity="center_horizontal|top"
+        android:top="16dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#22FFFFFF" />
+            <corners android:radius="12dp" />
+            <stroke
+                android:width="1dp"
+                android:color="#33FFFFFF" />
+        </shape>
+    </item>
+
+    <!-- Music note icon inside cover placeholder -->
+    <item
+        android:width="32dp"
+        android:height="32dp"
+        android:gravity="center_horizontal|top"
+        android:top="48dp"
+        android:alpha="0.4">
+        <bitmap android:src="@drawable/ic_music_note" />
+    </item>
+
+    <!-- Title placeholder bar -->
+    <item
+        android:width="100dp"
+        android:height="6dp"
+        android:gravity="center_horizontal|bottom"
+        android:bottom="46dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#AAFFFFFF" />
+            <corners android:radius="3dp" />
+        </shape>
+    </item>
+
+    <!-- Artist placeholder bar -->
+    <item
+        android:width="60dp"
+        android:height="4dp"
+        android:gravity="center_horizontal|bottom"
+        android:bottom="36dp">
+        <shape android:shape="rectangle">
+            <solid android:color="#66FFFFFF" />
+            <corners android:radius="2dp" />
+        </shape>
+    </item>
+
+    <!-- Play button placeholder -->
+    <item
+        android:width="12dp"
+        android:height="12dp"
+        android:gravity="center_horizontal|bottom"
+        android:bottom="14dp">
+        <shape android:shape="oval">
+            <solid android:color="#FFFFFFFF" />
+        </shape>
+    </item>
+
+    <!-- Prev and Next dots -->
+    <item
+        android:width="6dp"
+        android:height="6dp"
+        android:gravity="center_horizontal|bottom"
+        android:bottom="17dp"
+        android:left="40dp">
+        <shape android:shape="oval">
+            <solid android:color="#77FFFFFF" />
+        </shape>
+    </item>
+
+    <item
+        android:width="6dp"
+        android:height="6dp"
+        android:gravity="center_horizontal|bottom"
+        android:bottom="17dp"
+        android:right="40dp">
+        <shape android:shape="oval">
+            <solid android:color="#77FFFFFF" />
+        </shape>
+    </item>
+
+</layer-list>

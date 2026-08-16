@@ -1,0 +1,22 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="28dp"
+    android:height="28dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- 外圈光晕 -->
+    <path
+        android:pathData="M12,2C6.48,2 2,6.48 2,12s4.48,10 10,10 10,-4.48 10,-10S17.52,2 12,2z"
+        android:fillColor="#1AFFFFFF"
+        android:strokeColor="#40FFFFFF"
+        android:strokeWidth="0.5"/>
+    <!-- 内圈 -->
+    <path
+        android:pathData="M12,4.5c-4.14,0 -7.5,3.36 -7.5,7.5s3.36,7.5 7.5,7.5 7.5,-3.36 7.5,-7.5S16.14,4.5 12,4.5z"
+        android:fillColor="#25FFFFFF"/>
+    <!-- 返回箭头 - 粗体圆润风格 -->
+    <path
+        android:pathData="M15.41,7.41L14,6l-6,6 6,6 1.41,-1.41L11.83,13H18v-2h-6.17z"
+        android:fillColor="#FFFFFF"
+        android:strokeWidth="0.3"
+        android:strokeLineJoin="round"/>
+</vector>

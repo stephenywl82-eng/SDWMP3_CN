@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Widget preview image — clean icon, no personal photo -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#1A1A2E" />
+            <corners android:radius="24dp" />
+        </shape>
+    </item>
+    <item
+        android:width="56dp"
+        android:height="56dp"
+        android:gravity="center">
+        <shape android:shape="oval">
+            <solid android:color="#2A2A3E" />
+        </shape>
+    </item>
+</layer-list>

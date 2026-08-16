@@ -1,0 +1,59 @@
+﻿# Android/Gradle
+.gradle/
+build/
+*/build/
+local.properties
+*.iml
+.idea/
+*.log
+*.hprof
+.cxx/
+captures/
+.externalNativeBuild/
+
+# Keystore / secrets
+*.keystore
+*.jks
+keystore.properties
+app/keystore.properties
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Build artifacts
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Mapping (keep for crash deobfuscation)
+# !app/build/outputs/mapping/
+gradle/wrapper/gradle.zip
+
+# --- Root-level scratch/debug files (added for clean git backup) ---
+*.txt
+*.log
+adb_*.py
+check_*.py
+dump*.py
+fix_*.py
+find_*.py
+scan_*.py
+read_*.py
+inspect_*.py
+analyze_*.py
+sample_*.py
+count_*.py
+diff*.py
+cmp_*.py
+grep_*.py
+audit_*.py
+clean_*.py
+cn_*.py
+translate*.py
+_*.py
+trace*.txt
+build*.bat

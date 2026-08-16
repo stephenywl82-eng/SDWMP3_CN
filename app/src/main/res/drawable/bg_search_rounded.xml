@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【Steven v1.5 极简浮空搜索框】 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <!-- 极浅半透明底色，像浮在背景上 -->
+    <solid android:color="#1A9C87C0" />
+    <corners android:radius="24dp" />
+    <!-- 极微弱边框，若隐若现 -->
+    <stroke
+        android:width="0.5dp"
+        android:color="#22C9A962" />
+</shape>

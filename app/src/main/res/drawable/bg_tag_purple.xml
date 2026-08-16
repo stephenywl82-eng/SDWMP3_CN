@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Steven v1.5 · ALAC 标签 · 琥珀金半透明 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="8dp" />
+    <solid android:color="#1AC9A962" />
+    <stroke
+        android:width="0.5dp"
+        android:color="#40C9A962" />
+</shape>

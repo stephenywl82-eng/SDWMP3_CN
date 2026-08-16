@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【v3.62】统一渐变遮罩，从上到下渐变，取消歌名和封面之间的分割线 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient
+        android:angle="270"
+        android:startColor="#99000000"
+        android:centerColor="#66000000"
+        android:endColor="#88000000"
+        android:type="linear" />
+</shape>

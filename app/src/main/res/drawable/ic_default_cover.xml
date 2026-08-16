@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【v5.23】默认专辑封面 - 使用用户照片作为默认封面 -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="#1A1A2E" />
+            <corners android:radius="32dp" />
+        </shape>
+    </item>
+    <item>
+        <bitmap
+            android:src="@drawable/default_album_bg"
+            android:gravity="center"
+            android:alpha="0.8" />
+    </item>
+</layer-list>

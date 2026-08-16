@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Outer ring - dark gray -->
+    <path android:fillColor="#252530" android:pathData="M12,12m-11,0a11,11 0,1 1,22 0a11,11 0,1 1,-22 0"/>
+    <!-- Second ring - gold -->
+    <path android:fillColor="#C9A962" android:pathData="M12,12m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0"/>
+    <!-- Center dark -->
+    <path android:fillColor="#1A1A1F" android:pathData="M12,12m-7,0a7,7 0,1 1,14 0a7,7 0,1 1,-14 0"/>
+    <!-- Inner ring - gold -->
+    <path android:fillColor="#C9A962" android:pathData="M12,12m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0"/>
+    <!-- Center gold dot -->
+    <path android:fillColor="#C9A962" android:pathData="M12,12m-3,3a3,3 0,1 1,6 0a3,3 0,1 1,-6 0"/>
+    <!-- Inner hole -->
+    <path android:fillColor="#252530" android:pathData="M12,12m-1,0a1,1 0,1 1,2 0a1,1 0,1 1,-2 0"/>
+</vector>

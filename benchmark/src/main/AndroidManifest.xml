@@ -1,0 +1,6 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Profileable so Macrobenchmark can measure release builds -->
+    <application android:debuggable="false" />
+
+</manifest>

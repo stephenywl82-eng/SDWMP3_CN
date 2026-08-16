@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Steven v1.6 ALAC Glow tag - purple outer glow -->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Outer glow -->
+    <item
+        android:bottom="-2dp"
+        android:end="-2dp"
+        android:start="-2dp"
+        android:top="-2dp">
+        <shape android:shape="rectangle">
+            <corners android:radius="10dp" />
+            <solid android:color="#18CE93D8" />
+        </shape>
+    </item>
+
+    <!-- Inner tag body -->
+    <item>
+        <shape android:shape="rectangle">
+            <corners android:radius="8dp" />
+            <solid android:color="#1ACE93D8" />
+            <stroke
+                android:width="0.5dp"
+                android:color="#50CE93D8" />
+        </shape>
+    </item>
+
+</layer-list>

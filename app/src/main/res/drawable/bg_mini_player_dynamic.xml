@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【Steven v1.5 动态底栏】纯白底，通过 setTint 注入 HSL 优化色 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <solid android:color="#FFFFFF" />
+    <corners android:radius="24dp" />
+    <stroke
+        android:width="0.5dp"
+        android:color="#1A000000" />
+</shape>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 【v2.8.7】歌曲列表项 ripple 背景，深色主题适配 -->
+<ripple xmlns:android="http://schemas.android.com/apk/res/android"
+    android:color="#33C9A962">
+    <item android:id="@android:id/mask">
+        <shape android:shape="rectangle">
+            <solid android:color="@color/surface" />
+        </shape>
+    </item>
+    <item>
+        <shape android:shape="rectangle">
+            <solid android:color="@android:color/transparent" />
+        </shape>
+    </item>
+</ripple>

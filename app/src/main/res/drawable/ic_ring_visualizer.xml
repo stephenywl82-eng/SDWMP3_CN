@@ -1,0 +1,44 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    
+    <!-- 外环 -->
+    <path
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFF"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M12,12m-8,0a8,8 0,1 1,16 0a8,8 0,1 1,-16 0" />
+    
+    <!-- 内环 -->
+    <path
+        android:strokeWidth="1.5"
+        android:strokeColor="#FFFFFF"
+        android:strokeAlpha="0.5"
+        android:fillColor="@android:color/transparent"
+        android:pathData="M12,12m-4,0a4,4 0,1 1,8 0a4,4 0,1 1,-8 0" />
+    
+    <!-- 顶部发光点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M12,4L13,6L11,6Z" />
+    
+    <!-- 右侧发光点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.7"
+        android:pathData="M20,12L18,13L18,11Z" />
+    
+    <!-- 底部发光点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.5"
+        android:pathData="M12,20L11,18L13,18Z" />
+    
+    <!-- 左侧发光点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillAlpha="0.7"
+        android:pathData="M4,12L6,11L6,13Z" />
+</vector>

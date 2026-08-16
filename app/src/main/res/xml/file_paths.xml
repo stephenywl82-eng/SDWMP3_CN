@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- file_paths.xml - Authorized paths for FileProvider to share -->
+<paths>
+    <!-- External storage root: /storage/emulated/0/ -->
+    <external-path
+        name="external"
+        path="." />
+    <!-- App external files: /storage/emulated/0/Android/data/com.sdw.music.player/ -->
+    <external-files-path
+        name="external_files"
+        path="." />
+    <!-- App cache -->
+    <external-cache-path
+        name="external_cache"
+        path="." />
+    <!-- App internal files -->
+    <files-path
+        name="internal_files"
+        path="." />
+</paths>

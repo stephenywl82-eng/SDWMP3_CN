@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!-- 銆怱teven v1.5銆戦粯璁ゆ牸寮忔爣绛?鈥?鑳跺泭鍗婇€忔槑缁?-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <corners android:radius="8dp" />
+    <solid android:color="#1A1DB954" />
+    <stroke
+        android:width="0.5dp"
+        android:color="#401DB954" />
+</shape>
+

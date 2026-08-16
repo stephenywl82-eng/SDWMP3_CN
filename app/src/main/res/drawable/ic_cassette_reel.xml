@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 磁带轮 - 带轮齿的圆盘 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="60dp"
+    android:height="60dp"
+    android:viewportWidth="60"
+    android:viewportHeight="60">
+    <!-- 外圈 -->
+    <path android:fillColor="#C9A962" android:pathData="M30,30m-28,0a28,28 0,1 1,56 0a28,28 0,1 1,-56 0"/>
+    <!-- 内圈深色 -->
+    <path android:fillColor="#1A1A1F" android:pathData="M30,30m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0"/>
+    <!-- 轮齿 - 6个 -->
+    <path android:fillColor="#C9A962" android:pathData="M30,2 L32,12 L28,12 Z"/>
+    <path android:fillColor="#C9A962" android:pathData="M30,58 L32,48 L28,48 Z" android:rotation="180"/>
+    <path android:fillColor="#C9A962" android:pathData="M2,30 L12,32 L12,28 Z" android:rotation="0"/>
+    <path android:fillColor="#C9A962" android:pathData="M58,30 L48,32 L48,28 Z"/>
+    <!-- 斜向轮齿 -->
+    <path android:fillColor="#C9A962" android:pathData="M10,10 L18,14 L14,18 Z"/>
+    <path android:fillColor="#C9A962" android:pathData="M50,50 L42,46 L46,42 Z"/>
+    <path android:fillColor="#C9A962" android:pathData="M50,10 L46,18 L42,14 Z"/>
+    <path android:fillColor="#C9A962" android:pathData="M10,50 L14,42 L18,46 Z"/>
+    <!-- 中心孔 -->
+    <path android:fillColor="#252530" android:pathData="M30,30m-6,0a6,6 0,1 1,12 0a6,6 0,1 1,-12 0"/>
+    <!-- 中心金色环 -->
+    <path android:fillColor="#C9A962" android:pathData="M30,30m-8,0a8,8 0,1 1,16 0a8,8 0,1 1,-16 0"/>
+    <path android:fillColor="#252530" android:pathData="M30,30m-5,0a5,5 0,1 1,10 0a5,5 0,1 1,-10 0"/>
+</vector>

@@ -71,7 +71,8 @@ class LyricRepository private constructor(
         return listOf(
             "auto" to "Auto",
             "lrclib" to "LRCLIB",
-            "local" to "Local"
+            "local" to "Local",
+            "embedded" to "Embedded"
         )
     }
 
@@ -88,10 +89,41 @@ class LyricRepository private constructor(
                 loadLocalLyrics(song)?.let { return@withContext it }
                 return@withContext localLrcProvider.matchLocal(song.filePath, song.title, song.artist)
             }
+            "embedded" -> return@withContext loadEmbedded(song)
             else -> {
                 val provider = providers.find { it.providerId == providerId }
                 provider?.match(song.title, song.artist, song.duration)
             }
+        }
+    }
+
+    /**
+     * 【v8.0】直接读音频文件内嵌歌词（验证用）
+     * FLAC：native dr_flac 读 Vorbis comment LYRICS / UNSYNCEDLYRICS；其他格式暂不支持
+     */
+    private suspend fun loadEmbedded(song: Song): LyricResult? = withContext(Dispatchers.IO) {
+        val actualPath = song.filePath.ifBlank { song.path }
+        Log.d(TAG, "loadEmbedded: path=$actualPath")
+        if (actualPath.isBlank()) return@withContext null
+        val isFlac = actualPath.substringAfterLast('.', "").equals("flac", ignoreCase = true)
+        if (!isFlac) { Log.d(TAG, "loadEmbedded: not flac, skip"); return@withContext null }
+        try {
+            val lyrics = com.sdw.music.player.core.audio.UsbDacManager.flacReadLyrics(context, actualPath)
+            if (lyrics.isNullOrBlank()) { Log.d(TAG, "loadEmbedded: flacReadLyrics 返回空"); return@withContext null }
+            Log.d(TAG, "loadEmbedded: 读到 ${lyrics.length} 字")
+            val hasSync = lyrics.contains('[')
+            LyricResult(
+                title = song.title,
+                artist = song.artist,
+                album = song.album,
+                syncedLrc = if (hasSync) lyrics else null,
+                plainLrc = if (hasSync) null else lyrics,
+                source = "embedded",
+                songId = "embedded"
+            )
+        } catch (e: Throwable) {
+            Log.w(TAG, "读内嵌歌词失败: ${e.message}")
+            null
         }
     }
 
@@ -504,6 +536,16 @@ class LyricRepository private constructor(
             val cacheKey = "${song.title}_${song.artist}_${song.duration}"
             synchronized(cacheLock) { lyricsCache.remove(cacheKey) }
             Log.d(TAG, "💾 Lyrics已Save: ${targetFile.name}")
+
+            // 内嵌进音频 tag（FLAC / MP3），失败不影响 .lrc 保存结果
+            if (actualPath.isNotBlank() && !actualPath.startsWith("content://")) {
+                val ext = actualPath.substringAfterLast('.', "").lowercase()
+                if (ext == "flac" || ext == "mp3") {
+                    val embedded = com.sdw.music.player.core.audio.LyricsEmbedder.embedLyrics(actualPath, lyrics)
+                    Log.d(TAG, "💾 内嵌歌词${if (embedded) "成功" else "失败/不支持"}: $actualPath")
+                }
+            }
+
             targetFile.absolutePath
         } catch (e: Exception) {
             Log.e(TAG, "手动SaveLyrics失败: ${e.message}")

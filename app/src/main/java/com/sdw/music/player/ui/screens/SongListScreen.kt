@@ -206,8 +206,8 @@ fun SongListScreen(
                                 )
                             )
                         } else {
-                            Column {
-                                Text(stringResource(R.string.brand_name), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onBackground)
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(stringResource(R.string.brand_name), style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 Text(stringResource(R.string.songlist_song_count, songs.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
@@ -317,8 +317,8 @@ fun SongListScreen(
                             )
                         )
                     } else {
-                        Column {
-                            Text(stringResource(R.string.brand_name), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground)
+                        Column(modifier = Modifier.fillMaxWidth()) {
+                            Text(stringResource(R.string.brand_name), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             Text(stringResource(R.string.songlist_song_count, songs.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }

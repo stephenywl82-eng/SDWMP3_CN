@@ -91,7 +91,7 @@ object LyricUtils {
         }
         
         // 优先级 2：内嵌Lyrics（使用实际文件路径）
-        val embedded = loadEmbeddedLyrics(actualPath)
+        val embedded = loadEmbeddedLyrics(context, actualPath)
         if (embedded != null) {
             Log.d(TAG, "✅ 内嵌Lyrics加载成功: ${song.title}")
             return@withContext embedded
@@ -150,15 +150,31 @@ object LyricUtils {
      * 【Steven 建议】使用 MediaMetadataRetriever 提取内嵌Lyrics
      * 注意：Android 原生对内嵌Lyrics支持有限
      */
-    private fun loadEmbeddedLyrics(path: String): List<LyricLine>? {
+    /**
+     * 提取内嵌歌词
+     * 1. FLAC：走 native dr_flac 读 Vorbis comment 的 LYRICS / UNSYNCEDLYRICS 字段
+     * 2. 其他格式：MediaMetadataRetriever（Android 原生对内嵌歌词支持有限，大多返回 null）
+     */
+    private fun loadEmbeddedLyrics(context: Context, path: String): List<LyricLine>? {
+        val isFlac = path.substringAfterLast('.', "").equals("flac", ignoreCase = true)
+        if (isFlac) {
+            return try {
+                val lyrics = com.sdw.music.player.core.audio.UsbDacManager.flacReadLyrics(context, path)
+                if (!lyrics.isNullOrBlank()) {
+                    if (lyrics.contains("[")) LrcParser.parse(lyrics)
+                    else parseEmbeddedLyrics(lyrics)
+                } else null
+            } catch (e: Throwable) {
+                Log.e(TAG, "提取 FLAC 内嵌歌词失败: ${e.message}")
+                null
+            }
+        }
+
+        // 非 FLAC：保留原 MediaMetadataRetriever 尝试（占位，标准 API 不支持内嵌歌词）
         val retriever = MediaMetadataRetriever()
         return try {
             retriever.setDataSource(path)
-            
-            // 【关键】Android 没有 METADATA_KEY_LYRICS 常量
-            // 需要使用原始键名（部分设备支持）
             val lyrics = extractLyricsMetadata()
-            
             if (!lyrics.isNullOrBlank() && lyrics.contains("[")) {
                 LrcParser.parse(lyrics)
             } else null

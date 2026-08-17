@@ -355,7 +355,14 @@ fun SDWNavHost(
                 SettingsScreen(
                     onNavigateBack = { navController.popBackStack() },
                     onNavigateToAudioDiagnostic = { navController.navigate(Screen.AudioDiagnostic.route) },
-                    onNavigateToAudioQuality = { navController.navigate(Screen.AudioQuality.route) }
+                    onNavigateToAudioQuality = { navController.navigate(Screen.AudioQuality.route) },
+                    onNavigateToCoverEmbed = { navController.navigate(Screen.CoverEmbed.route) }
+                )
+            }
+            composable(Screen.CoverEmbed.route) {
+                CoverEmbedScreen(
+                    songs = state.songList,
+                    onNavigateBack = { navController.popBackStack() }
                 )
             }
             composable(Screen.AudioQuality.route) {

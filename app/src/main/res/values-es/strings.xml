@@ -16,6 +16,9 @@
 <string name="language_japanese">Japonés</string>
 <string name="language_korean">Coreano</string>
 <string name="language_french">Francés</string>
+<string name="language_traditional_chinese">Chino tradicional</string>
+<string name="language_portuguese">Portugués</string>
+<string name="language_hindi">Hindi</string>
 <string name="action_back">Atrás</string>
 <string name="action_cancel">Cancelar</string>
 <string name="action_save">Guardar</string>
@@ -303,4 +306,16 @@
 <string name="label_unknown_album">Álbum desconocido</string>
 <string name="app_name_moto">Moto Music Premium</string>
 <string name="notif_close">Cerrar</string>
+    <string name="cover_embed_title">Descargar e incrustar carátula</string>
+    <string name="cover_embed_nocover_count">%1$d canciones sin carátula</string>
+    <string name="cover_embed_all">Incrustar todo</string>
+    <string name="cover_embed_only_nocover">Mostrar solo sin carátula</string>
+    <string name="cover_embed_all_done">Todas las canciones tienen carátula</string>
+    <string name="cover_embed_not_found">No se encontró carátula</string>
+    <string name="cover_embed_success">¡Carátula incrustada!</string>
+    <string name="cover_embed_failed">Error al incrustar</string>
+    <string name="cover_embed_error">Error: %1$s</string>
+    <string name="cover_embed_all_result">%1$d hechas, %2$d errores</string>
+    <string name="cover_embed_need_storage">Incrustar requiere acceso a todos los archivos</string>
+    <string name="cover_embed_grant">Conceder</string>
 </resources>

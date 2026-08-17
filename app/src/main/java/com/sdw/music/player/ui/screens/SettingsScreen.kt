@@ -37,7 +37,7 @@ import kotlinx.coroutines.withContext
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() -> Unit)? = null, onNavigateToAudioQuality: (() -> Unit)? = null) {
+fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() -> Unit)? = null, onNavigateToAudioQuality: (() -> Unit)? = null, onNavigateToCoverEmbed: (() -> Unit)? = null) {
     val context = LocalContext.current
     var refreshTrigger by remember { mutableStateOf(0) }
 
@@ -621,15 +621,20 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     title = stringResource(R.string.settings_cover_tool),
                     subtitle = stringResource(R.string.settings_cover_tool_desc),
                     onClick = {
-                        try {
-                            val intent = context.packageManager.getLaunchIntentForPackage("com.coverembed")
-                            if (intent != null) {
-                                context.startActivity(intent)
-                            } else {
-                                android.widget.Toast.makeText(context, R.string.settings_cover_not_installed, android.widget.Toast.LENGTH_SHORT).show()
+                        if (onNavigateToCoverEmbed != null) {
+                            onNavigateToCoverEmbed()
+                        } else {
+                            // 兜底：无导航回调时尝试跳转独立 CoverEmbed 应用
+                            try {
+                                val intent = context.packageManager.getLaunchIntentForPackage("com.coverembed")
+                                if (intent != null) {
+                                    context.startActivity(intent)
+                                } else {
+                                    android.widget.Toast.makeText(context, R.string.settings_cover_not_installed, android.widget.Toast.LENGTH_SHORT).show()
+                                }
+                            } catch (e: Exception) {
+                                android.widget.Toast.makeText(context, context.getString(R.string.settings_open_failed, e.message), android.widget.Toast.LENGTH_SHORT).show()
                             }
-                        } catch (e: Exception) {
-                            android.widget.Toast.makeText(context, context.getString(R.string.settings_open_failed, e.message), android.widget.Toast.LENGTH_SHORT).show()
                         }
                     }
                 )
@@ -648,6 +653,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     "ja" -> stringResource(R.string.language_japanese)
                     "ko" -> stringResource(R.string.language_korean)
                     "fr" -> stringResource(R.string.language_french)
+                    "zh-TW" -> stringResource(R.string.language_traditional_chinese)
+                    "pt" -> stringResource(R.string.language_portuguese)
+                    "hi" -> stringResource(R.string.language_hindi)
                     else -> stringResource(R.string.language_system)
                 }
                 SettingsItem(

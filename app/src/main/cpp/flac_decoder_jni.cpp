@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <string>
 #include <algorithm>   // std::min
+#include <cctype>      // std::toupper
 
 #include "usb_audio_driver.h"
 
@@ -66,6 +67,41 @@ static int64_t msToPcmFrames(int64_t ms) {
     int sr = gSampleRate.load();
     if (sr <= 0) return 0;
     return (ms * sr) / 1000LL;
+}
+
+// ── Embedded lyrics (Vorbis comment) collector ─────────────────────────────
+// FLAC 内嵌歌词存在 VORBIS_COMMENT metadata block 的 LYRICS / UNSYNCEDLYRICS 字段。
+struct FlacLyricsCollector {
+    std::string lyrics;
+};
+
+static void flacMetaCallback(void* pUserData, drflac_metadata* pMetadata) {
+    if (!pUserData || !pMetadata) return;
+    if (pMetadata->type != DRFLAC_METADATA_BLOCK_TYPE_VORBIS_COMMENT) return;
+
+    auto* collector = static_cast<FlacLyricsCollector*>(pUserData);
+    if (!collector->lyrics.empty()) return;  // 已找到，不再覆盖
+
+    const auto& vc = pMetadata->data.vorbis_comment;
+    drflac_vorbis_comment_iterator iter;
+    drflac_init_vorbis_comment_iterator(&iter, vc.commentCount, vc.pComments);
+
+    const char* comment;
+    drflac_uint32 commentLen;
+    while ((comment = drflac_next_vorbis_comment(&iter, &commentLen)) != nullptr) {
+        if (commentLen == 0) continue;
+        std::string c(comment, commentLen);
+        size_t eq = c.find('=');
+        if (eq == std::string::npos) continue;
+
+        // field 名 ASCII 转大写后比较（Vorbis comment field 大小写不敏感）
+        std::string field = c.substr(0, eq);
+        for (auto& ch : field) ch = (char)std::toupper((unsigned char)ch);
+        if (field == "LYRICS" || field == "UNSYNCEDLYRICS") {
+            collector->lyrics = c.substr(eq + 1);
+            return;
+        }
+    }
 }
 
 // ── dr_flac callbacks (memory-based, we read full file via mmap/fread in JNI) ─
@@ -286,6 +322,30 @@ JNIEXPORT jlong JNICALL
 Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacTotalSamples(
     JNIEnv* /*env*/, jobject /*this*/) {
     return gTotalPcmFrames.load();
+}
+
+// 读 FLAC 内嵌歌词（Vorbis comment LYRICS / UNSYNCEDLYRICS 字段）
+// 返回 UTF-8 jstring；无内嵌歌词时返回 null。
+// 独立 open/close，不触碰解码状态（gFlac 等），线程安全。
+JNIEXPORT jstring JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacReadLyrics(
+    JNIEnv* env, jobject /*this*/, jstring jpath) {
+
+    const char* path = env->GetStringUTFChars(jpath, nullptr);
+    if (!path) return nullptr;
+
+    FlacLyricsCollector collector;
+    drflac* flac = drflac_open_file_with_metadata(path, flacMetaCallback, &collector, nullptr);
+    env->ReleaseStringUTFChars(jpath, path);
+
+    if (flac) drflac_close(flac);
+
+    if (collector.lyrics.empty()) {
+        LOGD("nativeFlacReadLyrics: no embedded lyrics");
+        return nullptr;
+    }
+    LOGI("nativeFlacReadLyrics: found %zu chars", collector.lyrics.size());
+    return env->NewStringUTF(collector.lyrics.c_str());
 }
 
 } // extern "C"

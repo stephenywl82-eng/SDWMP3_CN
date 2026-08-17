@@ -337,6 +337,47 @@ object UsbDacManager {
         val info = flacInfo(); return if (info[3] > 0) info[3].toLong() else 0L
     }
 
+    /**
+     * 读 FLAC 内嵌歌词（Vorbis comment LYRICS / UNSYNCEDLYRICS 字段）。
+     * 返回 UTF-8 歌词文本；无内嵌歌词或非 FLAC 返回 null。
+     * 独立 open/close，不触碰解码状态，线程安全。
+     * 懒加载：非 DAC 模式下 oboe_bridge 可能未加载（init 只在 USB 独占时调用），
+     * 这里通过 init(context) 确保 native 库加载 + contextRef 设置，但不启动 USB 驱动。
+     */
+    fun flacReadLyrics(context: Context, path: String): String? {
+        if (!isNativeLoaded) {
+            init(context)
+            if (!isNativeLoaded) return null
+        }
+        return try {
+            // 【V3.3.5】纯 ASCII 路径直接用；含非 ASCII 字符则复制到 cache/flac_temp/（NDK fopen 不支持 UTF-8）
+            val openPath = if (path.all { it.code <= 0x7F }) {
+                path
+            } else {
+                val tmp = java.io.File(getFlacTempDir(), "lyrics_${path.hashCode().toUInt().toString(16)}.flac")
+                try {
+                    java.io.File(path).copyTo(tmp, overwrite = true)
+                    tmp.absolutePath
+                } catch (_: Throwable) {
+                    android.util.Log.w("FlacLyrics", "copyTo tmp failed")
+                    null
+                }
+            }
+            if (openPath == null) return null
+            android.util.Log.d("FlacLyrics", "flacReadLyrics: openPath=$openPath")
+            val result = try { nativeFlacReadLyrics(openPath) } catch (e: Throwable) {
+                android.util.Log.w("FlacLyrics", "nativeFlacReadLyrics throw: ${e.message}")
+                null
+            }
+            android.util.Log.d("FlacLyrics", "flacReadLyrics: result=${result?.length ?: -1} chars")
+            // 清理临时文件
+            if (openPath != path) { try { java.io.File(openPath).delete() } catch (_: Throwable) {} }
+            result
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
     fun isStreaming(): Boolean = streaming && isNativeLoaded && nativeIsClaimed()
     // V3.3.3: claim held (stream may be paused after EOS keep-claim)
     fun isClaimed(): Boolean = isNativeLoaded && nativeIsClaimed()
@@ -614,4 +655,5 @@ object UsbDacManager {
     private external fun nativeFlacPositionMs(): Long
     private external fun nativeFlacGaplessSeek(path: String, targetSample: Long): Boolean
     private external fun nativeFlacTotalSamples(): Long
+private external fun nativeFlacReadLyrics(path: String): String?
 }

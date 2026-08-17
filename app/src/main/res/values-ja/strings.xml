@@ -16,6 +16,9 @@
 <string name="language_japanese">日本語</string>
 <string name="language_korean">韓国語</string>
 <string name="language_french">フランス語</string>
+<string name="language_traditional_chinese">繁体字中国語</string>
+<string name="language_portuguese">ポルトガル語</string>
+<string name="language_hindi">ヒンディー語</string>
 <string name="action_back">戻る</string>
 <string name="action_cancel">キャンセル</string>
 <string name="action_save">保存</string>
@@ -303,4 +306,16 @@
 <string name="label_unknown_album">不明なアルバム</string>
 <string name="app_name_moto">Moto Music Premium</string>
 <string name="notif_close">閉じる</string>
+    <string name="cover_embed_title">カバーをダウンロードして埋め込む</string>
+    <string name="cover_embed_nocover_count">カバーなしの曲が %1$d 件</string>
+    <string name="cover_embed_all">すべて埋め込む</string>
+    <string name="cover_embed_only_nocover">カバーなしのみ表示</string>
+    <string name="cover_embed_all_done">すべての曲にカバーがあります</string>
+    <string name="cover_embed_not_found">カバーが見つかりません</string>
+    <string name="cover_embed_success">カバーを埋め込みました！</string>
+    <string name="cover_embed_failed">埋め込みに失敗しました</string>
+    <string name="cover_embed_error">エラー: %1$s</string>
+    <string name="cover_embed_all_result">%1$d 件成功、%2$d 件失敗</string>
+    <string name="cover_embed_need_storage">埋め込みには全ファイルアクセス権限が必要です</string>
+    <string name="cover_embed_grant">許可する</string>
 </resources>

@@ -793,7 +793,8 @@ void UsbAudioDriver::streamLoop() {
 
         uint8_t* buf = urbSlots_[slot].buffer;
         const int ringMask = kRingFrames * 2 - 1;
-        int sampleOffset = 0;
+        int sampleOffset = 0;   // 字节偏移：urb 缓冲写入终点
+        int sampleCursor = 0;   // 样本游标：本 URB 已输出样本总数(与字节偏移隔离，避免 /bytesPerSample 反推)
         int totalFramesNeeded = 0;
 
         // Phase accumulator: alternate 5/6 frames per microframe for exact 44100 Hz
@@ -813,7 +814,7 @@ void UsbAudioDriver::streamLoop() {
                     auto* out = reinterpret_cast<int16_t*>(buf + sampleOffset);
                     const bool dither = ditherEnabled_.load(std::memory_order_relaxed);
                     for (int j = 0; j < nSamples; ++j) {
-                        int idx = ((rp * 2) + sampleOffset / 2 + j) & ringMask;
+                        int idx = ((rp * 2) + sampleCursor + j) & ringMask;
                         float s = ringBuffer_[idx] * vol;
                         if (s >  1.0f) s =  1.0f;
                         if (s < -1.0f) s = -1.0f;
@@ -838,11 +839,11 @@ void UsbAudioDriver::streamLoop() {
                     // 銆怴3.2.7锟? 瀛楄妭 LE 鎵撳寘锛坅lt2 subslot=3锟?
                     uint8_t* out = buf + sampleOffset;
                     for (int j = 0; j < nSamples; ++j) {
-                        int idx = ((rp * 2) + sampleOffset / 3 + j) & ringMask;
+                        int idx = ((rp * 2) + sampleCursor + j) & ringMask;
                         float s = ringBuffer_[idx] * vol;
                         if (s >  1.0f) s =  1.0f;
                         if (s < -1.0f) s = -1.0f;
-                        int32_t v = static_cast<int32_t>(s * 8388607.0f);
+                        int32_t v = std::lrintf(s * 8388607.0f);  // 无偏舍入(round-half-to-even)替代截断，消除负样本朝零截断的 -0.5LSB 直流偏置
                         out[j * 3]     = static_cast<uint8_t>(v & 0xFF);
                         out[j * 3 + 1] = static_cast<uint8_t>((v >> 8) & 0xFF);
                         out[j * 3 + 2] = static_cast<uint8_t>((v >> 16) & 0xFF);
@@ -852,7 +853,7 @@ void UsbAudioDriver::streamLoop() {
                 case 32: {
                     auto* out = reinterpret_cast<int32_t*>(buf + sampleOffset);
                     for (int j = 0; j < nSamples; ++j) {
-                        int idx = ((rp * 2) + sampleOffset / 4 + j) & ringMask;
+                        int idx = ((rp * 2) + sampleCursor + j) & ringMask;
                         double s = static_cast<double>(ringBuffer_[idx]) * vol;
                         if (s >  1.0) s =  1.0;
                         if (s < -1.0) s = -1.0;
@@ -869,6 +870,7 @@ void UsbAudioDriver::streamLoop() {
                 memset(buf + sampleOffset, 0, nBytes);
             }
             sampleOffset += nBytes;
+            sampleCursor += nFrames * channels_;
         }
 
         if (availFrames >= totalFramesNeeded) {
@@ -1010,7 +1012,10 @@ int UsbAudioDriver::findFeedbackEndpoint() {
                 // Check if it's part of an audio streaming interface
                 // Simple heuristic: any IN isochronous endpoint that isn't our OUT
                 LOGI("Found potential feedback endpoint: 0x%02X", epAddr);
-                return epAddr & 0x7F; // strip direction bit
+                // [fix] Keep the FULL 8-bit bEndpointAddress (incl. bit7 direction).
+                // Stripping to & 0x7F turns 0x81 -> 0x01 (OUT), which the kernel
+                // rejects with -EINVAL/-EPIPE when we later submit an IN URB on it.
+                return epAddr;
             }
         }
 

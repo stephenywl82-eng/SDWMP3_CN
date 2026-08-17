@@ -28,6 +28,7 @@ sealed class Screen(val route: String) {
     }
     data object AudioDiagnostic : Screen("audioDiagnostic")
     data object AudioQuality : Screen("audioQuality")
+    data object CoverEmbed : Screen("coverEmbed")
     data object SongPicker : Screen("songPicker/{playlistId}") {
         fun createRoute(playlistId: Long) = "songPicker/$playlistId"
     }

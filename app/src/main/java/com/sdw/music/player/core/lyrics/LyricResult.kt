@@ -50,6 +50,7 @@ data class LyricResult(
     fun getSourceColor(): String {
         return when (source) {
             "local" -> "#FFB300"   // Local金色
+            "embedded" -> "#9C27B0" // 内嵌紫色
             "salt" -> "#31C27C"    // Salt Lyrics绿
             "QQ" -> "#31C27C"      // QQ 音乐绿
             "NetEase" -> "#E60026" // NetEase红
@@ -66,6 +67,7 @@ data class LyricResult(
     fun getSourceDisplayName(): String {
         return when (source) {
             "local" -> "Local"
+            "embedded" -> "Embedded"
             "salt" -> "SaltLyrics"
             "QQ" -> "QQ Music"
             "NetEase" -> "NetEase"

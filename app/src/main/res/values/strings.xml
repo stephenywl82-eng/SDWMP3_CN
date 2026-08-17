@@ -16,6 +16,9 @@
 <string name="language_japanese">Japanese</string>
 <string name="language_korean">Korean</string>
 <string name="language_french">French</string>
+<string name="language_traditional_chinese">Traditional Chinese</string>
+<string name="language_portuguese">Portuguese</string>
+<string name="language_hindi">Hindi</string>
 <string name="action_back">Back</string>
 <string name="action_cancel">Cancel</string>
 <string name="action_save">Save</string>
@@ -303,4 +306,16 @@
 <string name="label_unknown_album">Unknown Album</string>
 <string name="app_name_moto">Moto Music Premium</string>
 <string name="notif_close">Close</string>
+    <string name="cover_embed_title">Cover Download &amp; Embed</string>
+    <string name="cover_embed_nocover_count">%1$d songs without cover</string>
+    <string name="cover_embed_all">Embed All</string>
+    <string name="cover_embed_only_nocover">Only show no-cover songs</string>
+    <string name="cover_embed_all_done">All songs have covers</string>
+    <string name="cover_embed_not_found">No cover found</string>
+    <string name="cover_embed_success">Cover embedded!</string>
+    <string name="cover_embed_failed">Embed failed</string>
+    <string name="cover_embed_error">Error: %1$s</string>
+    <string name="cover_embed_all_result">%1$d done, %2$d errors</string>
+    <string name="cover_embed_need_storage">Embedding needs All Files Access to write tags</string>
+    <string name="cover_embed_grant">Grant</string>
 </resources>

@@ -21,7 +21,7 @@ object AppLanguageManager {
     private const val KEY_LANG = "app_language"
 
     /** 支持的语言 code（与 res/values-<code> 目录名对应）；"" 表示跟随系统 */
-    val SUPPORTED = listOf("", "zh", "en", "es", "ja", "ko", "fr")
+    val SUPPORTED = listOf("", "zh", "en", "es", "ja", "ko", "fr", "zh-TW", "pt", "hi")
 
     fun getCurrent(context: Context): String {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

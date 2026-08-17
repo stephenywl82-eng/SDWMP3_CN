@@ -16,6 +16,9 @@
 <string name="language_japanese">日语</string>
 <string name="language_korean">韩语</string>
 <string name="language_french">法语</string>
+<string name="language_traditional_chinese">繁体中文</string>
+<string name="language_portuguese">葡萄牙语</string>
+<string name="language_hindi">印地语</string>
 <string name="action_back">返回</string>
 <string name="action_cancel">取消</string>
 <string name="action_save">保存</string>
@@ -303,4 +306,16 @@
 <string name="label_unknown_album">未知专辑</string>
 <string name="app_name_moto">Moto Music Premium</string>
 <string name="notif_close">关闭</string>
+    <string name="cover_embed_title">封面下载与嵌入</string>
+    <string name="cover_embed_nocover_count">%1$d 首歌曲无封面</string>
+    <string name="cover_embed_all">一键嵌入全部</string>
+    <string name="cover_embed_only_nocover">只显示无封面歌曲</string>
+    <string name="cover_embed_all_done">所有歌曲都已有封面</string>
+    <string name="cover_embed_not_found">未找到封面</string>
+    <string name="cover_embed_success">封面嵌入成功！</string>
+    <string name="cover_embed_failed">嵌入失败</string>
+    <string name="cover_embed_error">错误：%1$s</string>
+    <string name="cover_embed_all_result">完成 %1$d 首，失败 %2$d 首</string>
+    <string name="cover_embed_need_storage">嵌入封面需要「所有文件访问」权限才能写入标签</string>
+    <string name="cover_embed_grant">去授权</string>
 </resources>

@@ -16,6 +16,9 @@
 <string name="language_japanese">Japonais</string>
 <string name="language_korean">Coréen</string>
 <string name="language_french">Français</string>
+<string name="language_traditional_chinese">Chinois traditionnel</string>
+<string name="language_portuguese">Portugais</string>
+<string name="language_hindi">Hindi</string>
 <string name="action_back">Retour</string>
 <string name="action_cancel">Annuler</string>
 <string name="action_save">Enregistrer</string>
@@ -303,4 +306,16 @@
 <string name="label_unknown_album">Album inconnu</string>
 <string name="app_name_moto">Moto Music Premium</string>
 <string name="notif_close">Fermer</string>
+    <string name="cover_embed_title">Télécharger et intégrer la pochette</string>
+    <string name="cover_embed_nocover_count">%1$d chansons sans pochette</string>
+    <string name="cover_embed_all">Tout intégrer</string>
+    <string name="cover_embed_only_nocover">Afficher uniquement sans pochette</string>
+    <string name="cover_embed_all_done">Toutes les chansons ont une pochette</string>
+    <string name="cover_embed_not_found">Pochette introuvable</string>
+    <string name="cover_embed_success">Pochette intégrée !</string>
+    <string name="cover_embed_failed">Échec de l\'intégration</string>
+    <string name="cover_embed_error">Erreur : %1$s</string>
+    <string name="cover_embed_all_result">%1$d faites, %2$d erreurs</string>
+    <string name="cover_embed_need_storage">L\'intégration nécessite l\'accès à tous les fichiers</string>
+    <string name="cover_embed_grant">Autoriser</string>
 </resources>

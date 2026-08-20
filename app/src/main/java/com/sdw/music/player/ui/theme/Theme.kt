@@ -2,10 +2,9 @@ package com.sdw.music.player.ui.theme
 
 import android.app.Activity
 import android.os.Build
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
@@ -14,8 +13,9 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
+import com.sdw.music.player.ThemeManager
 
-private val SDWDarkColorScheme = darkColorScheme(
+val SDWDarkColorScheme = darkColorScheme(
     primary = AccentBlue,
     onPrimary = DarkBg,
     primaryContainer = Color(0xFF1A3A5C),
@@ -36,34 +36,58 @@ private val SDWDarkColorScheme = darkColorScheme(
     onError = TextPrimary,
 )
 
+private val SDWLightColorScheme = lightColorScheme(
+    primary = Color(0xFF1E6FBA),          // 深蓝主色（浅色背景下保证对比度）
+    onPrimary = Color(0xFFFFFFFF),
+    primaryContainer = Color(0xFFD1E4FF),
+    onPrimaryContainer = Color(0xFF0A3D6B),
+    secondary = Color(0xFF8C6D1F),        // 深金
+    onSecondary = Color(0xFFFFFFFF),
+    secondaryContainer = Color(0xFFF3E2B8),
+    onSecondaryContainer = Color(0xFF3E2E00),
+    tertiary = Color(0xFF3A6EA5),
+    background = Color(0xFFF5F5F7),       // 浅灰白背景
+    onBackground = Color(0xFF1A1A1C),
+    surface = Color(0xFFFFFFFF),          // 白色卡片
+    onSurface = Color(0xFF1A1A1C),
+    surfaceVariant = Color(0xFFE8E8EA),   // 浅灰表面
+    onSurfaceVariant = Color(0xFF5A5A5E),
+    outline = Color(0xFFD0D0D4),
+    outlineVariant = Color(0xFFB8B8BC),
+    error = Color(0xFFD32F2F),
+    onError = Color(0xFFFFFFFF),
+)
+
 @Composable
 fun SDWMusicTheme(
     content: @Composable () -> Unit
 ) {
-    // Force dark theme always, using system MD3 dynamic dark color
-    val colorScheme = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-        val context = LocalContext.current
-        try {
-            val dyn = dynamicDarkColorScheme(context)
-            android.util.Log.d("SDWTheme", "Dynamic dark color OK: primary=${dyn.primary}")
-            dyn
-        } catch (e: Exception) {
-            android.util.Log.w("SDWTheme", "Dynamic color FAILED, fallback: ${e.message}")
-            SDWDarkColorScheme
+    // 浅色模式由 ThemeManager 驱动（默认深色）
+    val lightMode = ThemeManager.lightMode.value
+    val context = LocalContext.current
+
+    val colorScheme = when {
+        // 浅色模式：优先动态浅色，回退静态浅色
+        lightMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+            try {
+                dynamicLightColorScheme(context)
+            } catch (e: Exception) {
+                SDWLightColorScheme
+            }
         }
-    } else {
-        SDWDarkColorScheme
+        lightMode -> SDWLightColorScheme
+        // 深色模式：固定纯黑静态配色（CDJ-3000 风格），不做动态取色
+        else -> SDWDarkColorScheme
     }
 
-    val darkTheme = true
     val view = LocalView.current
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
             window.statusBarColor = colorScheme.background.toArgb()
             window.navigationBarColor = colorScheme.background.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = false
-            WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = false
+            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = lightMode
+            WindowCompat.getInsetsController(window, view).isAppearanceLightNavigationBars = lightMode
         }
     }
 

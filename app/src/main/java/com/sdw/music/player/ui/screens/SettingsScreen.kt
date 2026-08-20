@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.ViewList
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -209,7 +210,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             checkedThumbColor = Color.White,
                             checkedTrackColor = MaterialTheme.colorScheme.primary,
                             uncheckedThumbColor = Color.White,
-                            uncheckedTrackColor = MaterialTheme.colorScheme.surface
+                            uncheckedTrackColor = Color(0xFF3A3A3E)
                         )
                     )
                     Text(
@@ -259,7 +260,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             checkedThumbColor = Color.White,
                             checkedTrackColor = MaterialTheme.colorScheme.primary,
                             uncheckedThumbColor = Color.White,
-                            uncheckedTrackColor = MaterialTheme.colorScheme.surface
+                            uncheckedTrackColor = Color(0xFF3A3A3E)
                         )
                     )
                 }
@@ -673,6 +674,96 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 )
             }
 
+            // === Appearance ===
+            item {
+                SettingsSectionTitle(stringResource(R.string.settings_appearance))
+            }
+            item {
+                SettingsSwitchItem(
+                    icon = Icons.Default.LightMode,
+                    title = stringResource(R.string.settings_light_mode),
+                    subtitle = if (com.sdw.music.player.ThemeManager.lightMode.value)
+                        stringResource(R.string.settings_light_mode_on)
+                    else stringResource(R.string.settings_light_mode_off),
+                    checked = com.sdw.music.player.ThemeManager.lightMode.value,
+                    onCheckedChange = { enabled ->
+                        com.sdw.music.player.ThemeManager.setLightMode(context, enabled)
+                        refreshTrigger++
+                    }
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            item { SettingsDivider() }
+
+            // === Lyrics Display ===
+            item {
+                SettingsSectionTitle(stringResource(R.string.settings_lyrics_display))
+            }
+            item {
+                val lyricPref = context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE)
+                var lyricFontSize by remember(refreshTrigger) {
+                    mutableStateOf(lyricPref.getInt("lyric_font_size", 28))
+                }
+                SettingsItem(
+                    icon = Icons.Default.FormatSize,
+                    title = stringResource(R.string.settings_lyric_font_size),
+                    subtitle = "${lyricFontSize}sp"
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(24, 28, 32).forEach { size ->
+                        val selected = lyricFontSize == size
+                        FilterChip(
+                            selected = selected,
+                            onClick = {
+                                lyricFontSize = size
+                                lyricPref.edit().putInt("lyric_font_size", size).apply()
+                                refreshTrigger++
+                            },
+                            label = { Text("${size}sp", color = if (selected) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.onBackground, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                containerColor = MaterialTheme.colorScheme.surface
+                            )
+                        )
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                var lyricVisibleLines by remember(refreshTrigger) {
+                    mutableStateOf(lyricPref.getInt("lyric_visible_lines", 7))
+                }
+                SettingsItem(
+                    icon = Icons.AutoMirrored.Filled.ViewList,
+                    title = stringResource(R.string.settings_lyric_visible_lines),
+                    subtitle = "$lyricVisibleLines"
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(5, 7, 9).forEach { n ->
+                        val selected = lyricVisibleLines == n
+                        FilterChip(
+                            selected = selected,
+                            onClick = {
+                                lyricVisibleLines = n
+                                lyricPref.edit().putInt("lyric_visible_lines", n).apply()
+                                refreshTrigger++
+                            },
+                            label = { Text("$n", color = if (selected) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.onBackground, fontSize = 12.sp) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                containerColor = MaterialTheme.colorScheme.surface
+                            )
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+            }
+            item { SettingsDivider() }
+
             // === About ===
             item {
                 SettingsSectionTitle(stringResource(R.string.settings_about))
@@ -749,7 +840,9 @@ private fun SettingsSwitchItem(
             onCheckedChange = onCheckedChange,
             colors = SwitchDefaults.colors(
                 checkedThumbColor = MaterialTheme.colorScheme.primary,
-                checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                uncheckedThumbColor = Color.White,
+                uncheckedTrackColor = Color(0xFF3A3A3E)
             )
         )
     }

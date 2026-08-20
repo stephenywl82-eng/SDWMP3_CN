@@ -5,6 +5,8 @@ import androidx.compose.animation.*
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,6 +43,7 @@ import com.sdw.music.player.ui.animation.SharedCoverOverlay
 import com.sdw.music.player.ui.animation.SharedCoverState
 import com.sdw.music.player.ui.screens.*
 import com.sdw.music.player.SongRepository
+import com.sdw.music.player.splitArtists
 import com.sdw.music.player.PlaylistManager
 import com.sdw.music.player.R
 import com.sdw.music.player.MusicService
@@ -100,7 +103,11 @@ fun SDWNavHost(
         val screenHeightPx = with(LocalDensity.current) { maxHeight.toPx() }
         NavHost(
             navController = navController,
-            startDestination = Screen.SongList.route
+            startDestination = Screen.SongList.route,
+            enterTransition = { slideInHorizontally(tween(300)) { it } + fadeIn(tween(300)) },
+            exitTransition = { slideOutHorizontally(tween(300)) { -it / 4 } + fadeOut(tween(300)) },
+            popEnterTransition = { slideInHorizontally(tween(300)) { -it / 4 } + fadeIn(tween(300)) },
+            popExitTransition = { slideOutHorizontally(tween(300)) { it } + fadeOut(tween(300)) }
         ) {
             composable(
                 Screen.SongList.route,
@@ -208,10 +215,10 @@ fun SDWNavHost(
 
             composable(
                 Screen.Player.route,
-                enterTransition = { fadeIn(tween(200)) },
-                exitTransition = { fadeOut(tween(150)) },
-                popEnterTransition = { fadeIn(tween(200)) },
-                popExitTransition = { fadeOut(tween(150)) }
+                enterTransition = { slideInVertically(tween(300)) { it } + fadeIn(tween(300)) },
+                exitTransition = { slideOutVertically(tween(220)) { -it / 5 } + fadeOut(tween(220)) },
+                popEnterTransition = { slideInVertically(tween(260)) { -it / 5 } + fadeIn(tween(260)) },
+                popExitTransition = { slideOutVertically(tween(300)) { it } + fadeOut(tween(300)) }
             ) {
                 // Collect hot flows inside player scope to isolate from song list recomposition
                 val positionMs by vm.positionMs.collectAsState()
@@ -336,6 +343,26 @@ fun SDWNavHost(
                     onPlaySongs = { songs ->
                         vm.handleIntent(PlayerIntent.PlaySongList(songs))
                         navController.navigate(Screen.Player.route)
+                    },
+                    onOpenFolder = { path ->
+                        navController.navigate(Screen.FolderDetail.createRoute(path))
+                    }
+                )
+            }
+            composable(Screen.FolderDetail.route) { backStackEntry ->
+                val rawToken = backStackEntry.arguments?.getString("token") ?: ""
+                val folderPath = rawToken.toIntOrNull()
+                    ?.let { com.sdw.music.player.FolderPathRegistry.get(it) }
+                    ?: ""
+                FolderDetailScreen(
+                    folderPath = folderPath,
+                    onNavigateBack = { navController.popBackStack() },
+                    onOpenFolder = { path ->
+                        navController.navigate(Screen.FolderDetail.createRoute(path))
+                    },
+                    onPlaySongs = { songs, startIndex ->
+                        vm.handleIntent(PlayerIntent.PlaySongList(songs, startIndex = startIndex))
+                        navController.navigate(Screen.Player.route)
                     }
                 )
             }
@@ -383,6 +410,7 @@ fun SDWNavHost(
                 val lyricsPositionMs by vm.positionMs.collectAsState()
                 LyricFullscreenScreen(
                     songId = state.currentSongId,
+                    songTitle = state.currentSongTitle,
                     songArtist = state.currentSongArtist,
                     accentColor = state.accentColor,
                     positionMs = lyricsPositionMs,
@@ -496,7 +524,7 @@ fun SDWNavHost(
                 val rawArtistName = backStackEntry.arguments?.getString("artistName") ?: ""
                 val artistName = java.net.URLDecoder.decode(rawArtistName, "UTF-8")
                 val filtered = remember(artistName, state.songList) {
-                    state.songList.filter { it.artist == artistName }
+                    state.songList.filter { splitArtists(it.artist).any { a -> a == artistName } }
                 }
                 ArtistSongScreen(
                     artistName = artistName,

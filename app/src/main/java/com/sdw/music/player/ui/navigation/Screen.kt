@@ -1,6 +1,7 @@
 package com.sdw.music.player.ui.navigation
 
 import android.net.Uri
+import com.sdw.music.player.FolderPathRegistry
 
 sealed class Screen(val route: String) {
     data object SongList : Screen("songList")
@@ -8,6 +9,9 @@ sealed class Screen(val route: String) {
     data object LyricFullscreen : Screen("lyricFullscreen")
     data object Settings : Screen("settings")
     data object FolderList : Screen("folderList")
+    data object FolderDetail : Screen("folderDetail/{token}") {
+        fun createRoute(path: String) = "folderDetail/${FolderPathRegistry.put(path)}"
+    }
     data object PlaylistList : Screen("playlistList")
     data object PlaylistDetail : Screen("playlistDetail/{playlistId}") {
         fun createRoute(playlistId: Long) = "playlistDetail/$playlistId"

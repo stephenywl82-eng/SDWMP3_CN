@@ -44,7 +44,8 @@ import com.sdw.music.player.R
 @Composable
 fun FolderListScreen(
     onNavigateBack: () -> Unit,
-    onPlaySongs: (List<com.sdw.music.player.Song>) -> Unit
+    onPlaySongs: (List<com.sdw.music.player.Song>) -> Unit,
+    onOpenFolder: (String) -> Unit
 ) {
     var foldersVersion by remember { mutableStateOf(0L) }
     // Observe foldersVersion so folder list + counts refresh after scan/delete
@@ -53,20 +54,10 @@ fun FolderListScreen(
             foldersVersion = v
         }
     }
-    val folders = remember(foldersVersion) {
-        com.sdw.music.player.SongRepository.getFolders()
-    }
-    var selectedFolder by remember { mutableStateOf<com.sdw.music.player.Folder?>(null) }
-    val accentPurple = MaterialTheme.colorScheme.primary
 
-    // If a folder is selected, show its songs
-    if (selectedFolder != null) {
-        FolderSongsView(
-            folder = selectedFolder!!,
-            onBack = { selectedFolder = null },
-            onPlaySongs = onPlaySongs
-        )
-        return
+    // 根视图：列出所有存储卷根（主存储 + SD 卡），点进去才是目录树
+    val volumeRoots = remember(foldersVersion) {
+        com.sdw.music.player.SongRepository.getStorageVolumeRoots()
     }
 
     Scaffold(
@@ -76,7 +67,7 @@ fun FolderListScreen(
                     Column {
                         Text(stringResource(R.string.title_folders), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium)
                         Text(
-                            "${folders.size} folders",
+                            "${volumeRoots.size} locations",
                             color = MaterialTheme.colorScheme.outlineVariant,
                             style = MaterialTheme.typography.labelSmall
                         )
@@ -93,7 +84,7 @@ fun FolderListScreen(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = {}
     ) { padding ->
-        if (folders.isEmpty()) {
+        if (volumeRoots.isEmpty()) {
             Box(
                 modifier = Modifier.fillMaxSize().padding(padding),
                 contentAlignment = Alignment.Center
@@ -113,11 +104,17 @@ fun FolderListScreen(
         } else {
             LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
                 item { Spacer(Modifier.height(8.dp)) }
-                itemsIndexed(folders, key = { _, f -> f.path }) { index, folder ->
-                    val folderAlbumArt = remember(folder.path) {
-                        val songs = com.sdw.music.player.SongRepository.getSongsInFolder(folder.path)
-                        songs.firstOrNull { !it.albumArtUri.isNullOrBlank() }?.albumArtUri ?: ""
+                itemsIndexed(volumeRoots, key = { _, r -> r }) { _, root ->
+                    val directSongCount = remember(root, foldersVersion) {
+                        com.sdw.music.player.SongRepository.getDirectSongsIn(root).size
                     }
+                    val subfolderCount = remember(root, foldersVersion) {
+                        com.sdw.music.player.SongRepository.getSubfoldersOf(root).size
+                    }
+                    val totalSongCount = remember(root, foldersVersion) {
+                        com.sdw.music.player.SongRepository.getSongsInFolder(root).size
+                    }
+                    val rootLabel = rootName(root)
 
                     Card(
                         modifier = Modifier
@@ -133,37 +130,20 @@ fun FolderListScreen(
                                 .clickable(
                                     indication = null,
                                     interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-                                ) { selectedFolder = folder }
+                                ) { onOpenFolder(root) }
                                 .padding(12.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            if (folderAlbumArt.isNotBlank()) {
-                                Box(
-                                    modifier = Modifier.size(48.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    coil.compose.AsyncImage(
-                                        model = folderAlbumArt,
-                                        contentDescription = null,
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                }
-                            } else {
-                                DefaultCoverImage(
-                                    songTitle = folder.name,
-                                    songArtist = "",
-                                    modifier = Modifier.size(48.dp),
-                                    shape = RoundedCornerShape(10.dp),
-                                    overlayAlpha = 0.2f
-                                )
+                            Box(
+                                modifier = Modifier.size(48.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surfaceVariant),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(Icons.Default.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
                             }
-
                             Spacer(Modifier.width(14.dp))
-
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    folder.name,
+                                    rootLabel,
                                     color = MaterialTheme.colorScheme.onBackground,
                                     style = MaterialTheme.typography.bodyLarge,
                                     maxLines = 1,
@@ -171,19 +151,18 @@ fun FolderListScreen(
                                 )
                                 Spacer(Modifier.height(2.dp))
                                 Text(
-                                    "${folder.songCount} songs",
+                                    "$directSongCount songs · $subfolderCount folders",
                                     color = MaterialTheme.colorScheme.outlineVariant,
                                     style = MaterialTheme.typography.bodySmall
                                 )
                                 Text(
-                                    folder.path,
+                                    root,
                                     color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
                                     style = MaterialTheme.typography.labelSmall,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
-
                             Icon(
                                 Icons.Default.ChevronRight,
                                 null,
@@ -196,6 +175,18 @@ fun FolderListScreen(
                 item { Spacer(Modifier.height(16.dp)) }
             }
         }
+    }
+}
+
+/** 存储卷根显示名：主存储 → 内部存储，SD 卡 → SD 卡 */
+@Composable
+private fun rootName(root: String): String {
+    val internal = stringResource(R.string.folder_root_internal)
+    val sdcard = stringResource(R.string.folder_root_sdcard)
+    val lower = root.lowercase()
+    return when {
+        lower.startsWith("/storage/emulated/0") -> internal
+        else -> sdcard
     }
 }
 
@@ -434,44 +425,57 @@ fun PlaylistListScreen(
     }
 }
 
-// === Folder Songs View (inline within FolderListScreen) ===
+// === Folder Detail Screen（目录树导航：子文件夹在上、歌曲在下） ===
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun FolderSongsView(
-    folder: com.sdw.music.player.Folder,
-    onBack: () -> Unit,
-    onPlaySongs: (List<com.sdw.music.player.Song>) -> Unit
+fun FolderDetailScreen(
+    folderPath: String,
+    onNavigateBack: () -> Unit,
+    onOpenFolder: (String) -> Unit,
+    onPlaySongs: (List<com.sdw.music.player.Song>, Int) -> Unit
 ) {
-    val songs = remember(folder.path) {
-        com.sdw.music.player.SongRepository.getSongsInFolder(folder.path)
-    }
-    var searchQuery by remember { mutableStateOf("") }
-    val displayedSongs = remember(songs, searchQuery) {
-        if (searchQuery.isBlank()) songs
-        else songs.filter {
-            it.title.contains(searchQuery, ignoreCase = true) ||
-            it.artist.contains(searchQuery, ignoreCase = true)
+    var foldersVersion by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        com.sdw.music.player.SongRepository.foldersVersion.collect { v ->
+            foldersVersion = v
         }
     }
+
+    val subfolders = remember(folderPath, foldersVersion) {
+        com.sdw.music.player.SongRepository.getSubfoldersOf(folderPath)
+    }
+    val directSongs = remember(folderPath, foldersVersion) {
+        com.sdw.music.player.SongRepository.getDirectSongsIn(folderPath)
+    }
+    // 播放本文件夹（含所有子目录）
+    val allSongs = remember(folderPath, foldersVersion) {
+        com.sdw.music.player.SongRepository.getSongsInFolder(folderPath)
+    }
+
+    val folderName = folderPath.substringAfterLast('/')
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Column {
-                        Text(folder.name, color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text("${songs.size} songs", color = MaterialTheme.colorScheme.outlineVariant, style = MaterialTheme.typography.labelSmall)
+                        Text(folderName, color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            "${directSongs.size} songs · ${subfolders.size} folders",
+                            color = MaterialTheme.colorScheme.outlineVariant,
+                            style = MaterialTheme.typography.labelSmall
+                        )
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = MaterialTheme.colorScheme.onBackground)
                     }
                 },
                 actions = {
-                    if (songs.isNotEmpty()) {
-                        IconButton(onClick = { onPlaySongs(songs) }) {
-                            Icon(Icons.Default.PlayArrow, "Play All", tint = MaterialTheme.colorScheme.primary)
+                    if (allSongs.isNotEmpty()) {
+                        IconButton(onClick = { onPlaySongs(allSongs, 0) }) {
+                            Icon(Icons.Default.PlayArrow, stringResource(R.string.placeholder_play_folder), tint = MaterialTheme.colorScheme.primary)
                         }
                     }
                 },
@@ -480,7 +484,7 @@ private fun FolderSongsView(
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
-        if (displayedSongs.isEmpty()) {
+        if (subfolders.isEmpty() && directSongs.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.size(48.dp))
@@ -491,16 +495,77 @@ private fun FolderSongsView(
         } else {
             LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
                 item { Spacer(Modifier.height(8.dp)) }
-                itemsIndexed(displayedSongs, key = { _, s -> s.id }) { index, song ->
-                    com.sdw.music.player.ui.screens.SongItem(
-                        song = song,
-                        index = index,
-                        isPlaying = false,
-                        accentColor = MaterialTheme.colorScheme.primary,
-                        onClick = { onPlaySongs(listOf(song)) },
-                        onLongClick = { }
-                    )
+
+                // === 子文件夹（可继续向下点，无限层级） ===
+                if (subfolders.isNotEmpty()) {
+                    item {
+                        Text(
+                            stringResource(R.string.folder_subfolders),
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp)
+                        )
+                    }
+                    itemsIndexed(subfolders, key = { _, s -> s }) { _, sub ->
+                        val subName = sub.substringAfterLast('/')
+                        val subSongCount = remember(sub, foldersVersion) {
+                            com.sdw.music.player.SongRepository.getSongsInFolder(sub).size
+                        }
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 2.dp),
+                            shape = RoundedCornerShape(10.dp),
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable(
+                                        indication = null,
+                                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+                                    ) { onOpenFolder(sub) }
+                                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(Icons.Default.Folder, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(subName, color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                    Text("$subSongCount songs", color = MaterialTheme.colorScheme.outlineVariant, style = MaterialTheme.typography.bodySmall)
+                                }
+                                Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
                 }
+
+                // === 本目录直接歌曲 ===
+                if (directSongs.isNotEmpty()) {
+                    item {
+                        Text(
+                            stringResource(R.string.folder_songs),
+                            color = MaterialTheme.colorScheme.primary,
+                            style = MaterialTheme.typography.labelSmall,
+                            modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 4.dp)
+                        )
+                    }
+                    itemsIndexed(directSongs, key = { _, s -> s.id }) { index, song ->
+                        com.sdw.music.player.ui.screens.SongItem(
+                            song = song,
+                            index = index,
+                            isPlaying = false,
+                            accentColor = MaterialTheme.colorScheme.primary,
+                            onClick = {
+                                val clickedIdx = directSongs.indexOfFirst { it.id == song.id }
+                                onPlaySongs(directSongs, if (clickedIdx >= 0) clickedIdx else 0)
+                            },
+                            onLongClick = { }
+                        )
+                    }
+                }
+
                 item { Spacer(Modifier.height(16.dp)) }
             }
         }

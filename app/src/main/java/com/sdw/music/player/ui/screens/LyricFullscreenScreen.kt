@@ -32,6 +32,7 @@ import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sdw.music.player.LrcParser
@@ -50,6 +51,7 @@ import kotlinx.coroutines.withContext
 @Composable
 fun LyricFullscreenScreen(
     songId: Long,
+    songTitle: String,
     songArtist: String,
     accentColor: Long,
     positionMs: Long,
@@ -78,6 +80,11 @@ fun LyricFullscreenScreen(
     var isSaving by remember { mutableStateOf(false) }
 
     val effectiveSource = if (isManualSource) selectedSource else "auto"
+
+    // 歌词显示偏好（字号/行数）
+    val lyricPrefs = remember { context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE) }
+    val lyricFontSize = lyricPrefs.getInt("lyric_font_size", 28)
+    val lyricVisibleLines = lyricPrefs.getInt("lyric_visible_lines", 7)
 
     // === 沉浸式：隐藏状态栏 + 导航栏 ===
     val view = LocalView.current
@@ -147,6 +154,8 @@ fun LyricFullscreenScreen(
     // 系统返回键
     BackHandler(onBack = onNavigateBack)
 
+    // 全屏歌词固定深色配色：歌词文字/开关都是白色设计，浅色模式下必须锁深色
+    MaterialTheme(colorScheme = SDWDarkColorScheme) {
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -171,11 +180,14 @@ fun LyricFullscreenScreen(
                     positionMs = positionMs,
                     themeColor = accentColor.toInt(),
                     onLineClick = { line -> onSeekTo(line.timeMs) },
+                    showProgressBar = true,
+                    fontSize = lyricFontSize,
+                    visibleLines = lyricVisibleLines,
                     modifier = Modifier
                         .fillMaxSize()
                         .statusBarsPadding()  // 顶部避开状态栏
                         .let { mod ->
-                            if (isManualSource && sourceLabel.isNotEmpty())
+                            if (isManualSource)
                                 mod.padding(bottom = 52.dp)  // 给底部标签留出空间
                             else mod
                         }
@@ -199,13 +211,14 @@ fun LyricFullscreenScreen(
 
             Spacer(Modifier.width(4.dp))
 
-            // 歌手名（居中）
+            // 歌名（居中），歌手名作为次要显示
             Text(
-                text = songArtist.ifEmpty { stringResource(R.string.title_fullscreen_lyrics) },
+                text = songTitle.ifEmpty { songArtist.ifEmpty { stringResource(R.string.title_fullscreen_lyrics) } },
                 color = MaterialTheme.colorScheme.onBackground,
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
                 modifier = Modifier.weight(1f)
             )
 
@@ -253,7 +266,7 @@ fun LyricFullscreenScreen(
         }
 
         // 手动模式下显示来源选择（底部叠加）
-        if (isManualSource && sourceLabel.isNotEmpty()) {
+        if (isManualSource) {
             Surface(
                 color = accent.copy(alpha = 0.15f),
                 shape = RoundedCornerShape(16.dp),
@@ -453,6 +466,7 @@ fun LyricFullscreenScreen(
                 }
             }
         )
+    }
     }
 }
 

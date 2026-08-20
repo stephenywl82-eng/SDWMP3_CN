@@ -19,6 +19,13 @@
 <string name="language_traditional_chinese">Traditional Chinese</string>
 <string name="language_portuguese">Portuguese</string>
 <string name="language_hindi">Hindi</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_light_mode">Light Mode</string>
+    <string name="settings_light_mode_on">On · light theme</string>
+    <string name="settings_light_mode_off">Off · dark theme</string>
+    <string name="settings_lyrics_display">Lyrics Display</string>
+    <string name="settings_lyric_font_size">Font Size</string>
+    <string name="settings_lyric_visible_lines">Lines Shown</string>
 <string name="action_back">Back</string>
 <string name="action_cancel">Cancel</string>
 <string name="action_save">Save</string>
@@ -41,6 +48,11 @@
 <string name="title_artists">Artists</string>
 <string name="title_playlists">Playlists</string>
 <string name="title_folders">Folders</string>
+    <string name="folder_subfolders">Subfolders</string>
+    <string name="folder_songs">Songs</string>
+    <string name="placeholder_play_folder">Play folder (recursive)</string>
+    <string name="folder_root_internal">Internal storage</string>
+    <string name="folder_root_sdcard">SD card</string>
 <string name="title_audio_diagnostic">Audio Diagnostic</string>
 <string name="title_audio_quality">Audio Quality</string>
 <string name="title_equalizer">Equalizer</string>

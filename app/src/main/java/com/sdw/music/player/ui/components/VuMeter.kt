@@ -186,15 +186,15 @@ private fun VuMixer(sub: Float, bass: Float, mid: Float, high: Float,
             val v = smooth[i].update(target)
             // Peak: instant rise, slow fall
             if (v > peaks[i]) peaks[i] = v
-            else peaks[i] += (v - peaks[i]) * 0.20f
+            else peaks[i] += (v - peaks[i]) * 0.015f
             val pk = peaks[i].coerceIn(0f, 1f)
             val x = gap + i * (stripW + gap)
             val half = stripW / 2f - 1.dp.toPx()
             // Color: use Android native HSV→ARGB (faster than Compose Color.hsl)
             val hCol = stripHues[i]
             val stripAlpha = (0.15f + v * 0.7f).coerceIn(0f, 1f)
-            val stripColor = colorFromHsv(hCol, 0.55f + v * 0.35f, 0.25f + v * 0.55f, stripAlpha)
-            val peakColor = colorFromHsv(hCol, 0.55f + pk * 0.35f, 0.45f + pk * 0.55f, (0.78f + pk * 0.22f).coerceAtMost(0.92f))
+            val stripColor = colorFromHsv(hCol, 0.55f + v * 0.35f, 0.45f + v * 0.5f, stripAlpha)
+            val peakColor = colorFromHsv(hCol, 0.55f + pk * 0.35f, 0.6f + pk * 0.4f, (0.85f + pk * 0.15f).coerceAtMost(1f))
             // Main strip
             val lh = (v * h).coerceAtLeast(0f)
             if (lh > 1f) drawRoundRect(stripColor, Offset(x, h - lh), Size(half, lh), CornerRadius(cr, cr))
@@ -205,7 +205,7 @@ private fun VuMixer(sub: Float, bass: Float, mid: Float, high: Float,
             // Right channel (slightly dimmer)
             val rv = v * 0.92f
             val rh = (rv * h).coerceAtLeast(0f)
-            val rc = colorFromHsv(hCol, 0.55f + rv * 0.35f, 0.25f + rv * 0.55f, stripAlpha * 0.85f)
+            val rc = colorFromHsv(hCol, 0.55f + rv * 0.35f, 0.45f + rv * 0.5f, stripAlpha * 0.85f)
             val rx = x + stripW / 2f + 1.dp.toPx()
             if (rh > 1f) drawRoundRect(rc, Offset(rx, h - rh), Size(half, rh), CornerRadius(cr, cr))
             val rpk = (pk * 0.92f).coerceIn(0f, 1f)

@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <resources>
 <string name="app_name">Moto Music Premium</string>
 <string name="no_music_found">找不到音樂檔案</string>
@@ -19,6 +19,13 @@
 <string name="language_traditional_chinese">繁體中文</string>
 <string name="language_portuguese">葡萄牙語</string>
 <string name="language_hindi">印地語</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_light_mode">Light Mode</string>
+    <string name="settings_light_mode_on">On · light theme</string>
+    <string name="settings_light_mode_off">Off · dark theme</string>
+    <string name="settings_lyrics_display">歌詞顯示</string>
+    <string name="settings_lyric_font_size">字型大小</string>
+    <string name="settings_lyric_visible_lines">顯示行數</string>
 <string name="action_back">返回</string>
 <string name="action_cancel">取消</string>
 <string name="action_save">儲存</string>
@@ -41,6 +48,11 @@
 <string name="title_artists">藝人</string>
 <string name="title_playlists">播放清單</string>
 <string name="title_folders">資料夾</string>
+    <string name="folder_subfolders">Subfolders</string>
+    <string name="folder_songs">Songs</string>
+    <string name="placeholder_play_folder">Play folder (recursive)</string>
+    <string name="folder_root_internal">Internal storage</string>
+    <string name="folder_root_sdcard">SD card</string>
 <string name="title_audio_diagnostic">音訊診斷</string>
 <string name="title_audio_quality">音訊品質</string>
 <string name="title_equalizer">等化器</string>

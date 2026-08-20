@@ -311,6 +311,49 @@ object SongRepository {
         }
     }
 
+    // === 目录树导航（多级文件夹浏览） ===
+
+    // 存储卷根：主存储 /storage/emulated/0 + SD 卡 /storage/XXXX-XXXX
+    private val VOLUME_ROOT_REGEX = Regex("^(/storage/(?:emulated/0|[0-9A-F]{4}-[0-9A-F]{4}))")
+
+    /** 返回所有存储卷根（主存储 + SD 卡），供根视图列出顶层目录 */
+    fun getStorageVolumeRoots(): List<String> {
+        val roots = mutableSetOf<String>()
+        for (song in songs) {
+            val fp = song.filePath.ifBlank { song.path }
+            VOLUME_ROOT_REGEX.find(fp)?.groupValues?.get(1)?.let { roots.add(it) }
+        }
+        if (roots.isEmpty()) {
+            roots.add(android.os.Environment.getExternalStorageDirectory().absolutePath)
+        }
+        return roots.toList().sorted()
+    }
+
+    /** 返回某目录的直接子目录（仅含歌的），返回完整路径，按名称排序 */
+    fun getSubfoldersOf(parentPath: String): List<String> {
+        val normalized = parentPath.trimEnd('/')
+        val result = mutableSetOf<String>()
+        for (song in songs) {
+            val fp = song.filePath.ifBlank { song.path }
+            if (!fp.startsWith("$normalized/")) continue
+            val rest = fp.removePrefix("$normalized/")
+            val slashIdx = rest.indexOf('/')
+            if (slashIdx > 0) {
+                result.add("$normalized/${rest.substring(0, slashIdx)}")
+            }
+        }
+        return result.toList().sortedBy { it.substringAfterLast('/').lowercase() }
+    }
+
+    /** 返回某目录下「直接」的歌（不含子目录） */
+    fun getDirectSongsIn(folderPath: String): List<Song> {
+        val normalized = folderPath.trimEnd('/')
+        return songs.filter { song ->
+            val fp = song.filePath.ifBlank { song.path }
+            fp.substringBeforeLast('/', "") == normalized
+        }
+    }
+
     fun getSongById(id: Long): Song? = songs.find { it.id == id }
 
     // ==================== BPM / Key 解析 ====================

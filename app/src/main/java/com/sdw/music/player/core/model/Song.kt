@@ -26,3 +26,22 @@ data class Song(
 ) : Parcelable
 
 
+/**
+ * 拆分多歌手字符串。
+ * 常见分隔："/"、"、"、"，"、","、";"、"；"、"&"、"·"、"|"
+ * 以及 feat./ft./featuring/vs.（忽略大小写）。
+ * 无分隔时返回原串（单元素）。
+ */
+fun splitArtists(artist: String): List<String> {
+    if (artist.isBlank()) return listOf(artist)
+    val regex = Regex(
+        """\s*(?:[/、,;；&·|]|feat\.?|ft\.?|featuring|vs\.?)\s*""",
+        RegexOption.IGNORE_CASE
+    )
+    return artist.split(regex)
+        .map { it.trim() }
+        .filter { it.isNotBlank() }
+        .ifEmpty { listOf(artist) }
+}
+
+

@@ -19,6 +19,13 @@
 <string name="language_traditional_chinese">繁体中文</string>
 <string name="language_portuguese">葡萄牙语</string>
 <string name="language_hindi">印地语</string>
+    <string name="settings_appearance">外观</string>
+    <string name="settings_light_mode">浅色模式</string>
+    <string name="settings_light_mode_on">开 · 浅色主题</string>
+    <string name="settings_light_mode_off">关 · 深色主题</string>
+    <string name="settings_lyrics_display">歌词显示</string>
+    <string name="settings_lyric_font_size">字号</string>
+    <string name="settings_lyric_visible_lines">显示行数</string>
 <string name="action_back">返回</string>
 <string name="action_cancel">取消</string>
 <string name="action_save">保存</string>
@@ -41,6 +48,11 @@
 <string name="title_artists">歌手</string>
 <string name="title_playlists">歌单</string>
 <string name="title_folders">文件夹</string>
+    <string name="folder_subfolders">子文件夹</string>
+    <string name="folder_songs">歌曲</string>
+    <string name="placeholder_play_folder">播放文件夹（含子文件夹）</string>
+    <string name="folder_root_internal">内部存储</string>
+    <string name="folder_root_sdcard">SD 卡</string>
 <string name="title_audio_diagnostic">音频诊断</string>
 <string name="title_audio_quality">音频质量</string>
 <string name="title_equalizer">均衡器</string>

@@ -27,6 +27,7 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.launch
 import com.sdw.music.player.Song
+import com.sdw.music.player.splitArtists
 import com.sdw.music.player.ui.components.AlphabetIndexBar
 import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.ui.theme.*
@@ -44,8 +45,14 @@ fun ArtistListScreen(
     onNavigateBack: () -> Unit
 ) {
     val allArtists = remember(songs) {
-        songs.groupBy { it.artist.ifBlank { "Unknown Artist" } }
-            .mapValues { (_, v) -> v to v.firstOrNull()?.albumArtUri.orEmpty() }
+        // 把每首歌的 artist 拆成多个独立歌手，各自归组（一首歌可能同时出现在多个歌手名下）
+        val map = mutableMapOf<String, MutableList<Song>>()
+        songs.forEach { song ->
+            splitArtists(song.artist.ifBlank { "Unknown Artist" }).forEach { name ->
+                map.getOrPut(name) { mutableListOf() }.add(song)
+            }
+        }
+        map.mapValues { (_, v) -> v to v.firstOrNull()?.albumArtUri.orEmpty() }
             .toList()
             .sortedBy { it.first.lowercase() }
     }

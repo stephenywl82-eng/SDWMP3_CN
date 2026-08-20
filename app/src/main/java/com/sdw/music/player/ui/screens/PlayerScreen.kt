@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -55,6 +56,11 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asAndroidPath
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
+import android.graphics.BlurMaskFilter
+import android.graphics.Paint
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -73,6 +79,7 @@ import android.content.Context
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.core.view.WindowInsetsCompat
@@ -84,7 +91,6 @@ import com.sdw.music.player.LyricLine
 import com.sdw.music.player.LrcParser
 import com.sdw.music.player.BpmKeyCache
 import com.sdw.music.player.MusicService
-import kotlin.math.exp
 import android.os.PowerManager
 import com.sdw.music.player.ui.theme.*
 
@@ -214,20 +220,14 @@ fun PlayerScreen(
         }
     }
 
-    val rotation by key(screenOn.value) {
-        if (screenOn.value) {
-            val infiniteTransition = rememberInfiniteTransition(label = "spin")
-            infiniteTransition.animateFloat(
-                initialValue = 0f,
-                targetValue = 360f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(30000, easing = LinearEasing),
-                    repeatMode = RepeatMode.Restart
-                ),
-                label = "albumRotation"
+    // 封面旋转：播放+亮屏时推进，暂停/熄屏时冻结（连续无跳变，切歌 isPlaying 抖动不再导致角度突变）
+    val rotation = remember { Animatable(0f) }
+    LaunchedEffect(isPlaying, screenOn.value) {
+        while (isPlaying && screenOn.value) {
+            rotation.animateTo(
+                targetValue = rotation.value + 360f,
+                animationSpec = tween(30000, easing = LinearEasing)
             )
-        } else {
-            remember { mutableFloatStateOf(0f) }
         }
     }
 
@@ -260,18 +260,25 @@ fun PlayerScreen(
     // Dismiss drag (for embedded mode)
     var _dismissDragAmount by remember { mutableStateOf(0f) }
     val portraitModifier = if (onDismiss != null) {
-        Modifier.pointerInput(Unit) {
-            detectVerticalDragGestures(
-                onDragEnd = {
-                    if (_dismissDragAmount > 300f) onDismiss.invoke()
-                    _dismissDragAmount = 0f
-                },
-                onVerticalDrag = { _, dragAmount ->
-                    if (dragAmount > 0) _dismissDragAmount += dragAmount
-                    else _dismissDragAmount = maxOf(0f, _dismissDragAmount + dragAmount)
-                }
-            )
-        }
+        Modifier
+            .pointerInput(Unit) {
+                detectVerticalDragGestures(
+                    onDragEnd = {
+                        if (_dismissDragAmount > 300f) onDismiss.invoke()
+                        _dismissDragAmount = 0f
+                    },
+                    onVerticalDrag = { _, dragAmount ->
+                        if (dragAmount > 0) _dismissDragAmount += dragAmount
+                        else _dismissDragAmount = maxOf(0f, _dismissDragAmount + dragAmount)
+                    }
+                )
+            }
+            .graphicsLayer {
+                // 跟手：下拉时内容随手下移 + 逐渐透明，松手回弹或超阈值关闭
+                val progress = (_dismissDragAmount / 400f).coerceIn(0f, 1f)
+                translationY = _dismissDragAmount * 0.55f
+                alpha = 1f - progress * 0.45f
+            }
     } else Modifier
 
     val bandLevelsState = remember { mutableStateOf(BandLevels()) }
@@ -391,15 +398,18 @@ fun PlayerScreen(
     var midBeat by remember { mutableStateOf(BandBeat()) }
     var highBeat by remember { mutableStateOf(BandBeat()) }
 
+    // 播放器页固定深色配色：无论全局切浅色还是深色，播放器内部始终走深色（含文字）
+    MaterialTheme(colorScheme = SDWDarkColorScheme) {
     Box(modifier = Modifier.fillMaxSize()) {
         // Cover color blurred background
         if (coverColorBgEnabled) {
             val coverUri = state.currentSongAlbumArt
             if (coverUri?.isNotBlank() == true) {
+                // 封面模糊背景：适度放大 + 大半径模糊，保留色块存在感又抹平细节
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .scale(1.5f)
+                        .scale(1.35f)
                         .blur(120.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -408,19 +418,28 @@ fun PlayerScreen(
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop,
-                        alpha = 0.35f
+                        alpha = 0.28f
                     )
                 }
             }
-            // Accent color overlay gradient
+            // 氛围渐变：accent 光晕 radius 覆盖全屏（避免竖屏下出现环形条纹）+ 上下柔和压暗
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawRect(
                     Brush.radialGradient(
-                        0.0f to accentColor.copy(alpha = 0.25f),
-                        0.5f to accentColor.copy(alpha = 0.08f),
-                        1.0f to Color.Black.copy(alpha = 0.30f),
+                        0.0f to accentColor.copy(alpha = 0.12f),
+                        0.55f to accentColor.copy(alpha = 0.03f),
+                        1.0f to Color.Transparent,
                         center = Offset(size.width / 2f, size.height * 0.4f),
-                        radius = size.width * 0.7f
+                        radius = size.maxDimension * 0.75f
+                    )
+                )
+                drawRect(
+                    Brush.verticalGradient(
+                        0.0f to Color.Black.copy(alpha = 0.55f),
+                        0.25f to Color.Black.copy(alpha = 0.18f),
+                        0.55f to Color.Black.copy(alpha = 0.22f),
+                        0.78f to Color.Black.copy(alpha = 0.38f),
+                        1.0f to Color.Black.copy(alpha = 0.65f)
                     )
                 )
             }
@@ -459,7 +478,7 @@ fun PlayerScreen(
                 accentColor = accentColor,
                 textAccentColor = textAccentColor,
                 isPlaying = isPlaying,
-                rotation = rotation,
+                rotation = rotation.value,
                 progressFraction = progressFraction,
                 positionMs = positionMs,
                 durationMs = durationMs,
@@ -494,7 +513,7 @@ fun PlayerScreen(
                 accentColor = accentColor,
                 textAccentColor = textAccentColor,
                 isPlaying = isPlaying,
-                rotation = rotation,
+                rotation = rotation.value,
                 artSize = artSize,
                 progressFraction = progressFraction,
                 positionMs = positionMs,
@@ -533,7 +552,7 @@ fun PlayerScreen(
                 accentColor = accentColor,
                 textAccentColor = textAccentColor,
                 isPlaying = isPlaying,
-                rotation = rotation,
+                rotation = rotation.value,
                 artSize = artSize,
                 isCompact = isCompact,
                 progressFraction = progressFraction,
@@ -639,6 +658,7 @@ fun PlayerScreen(
         }
 
     }
+    }
 }
 
 // ============================================================================
@@ -729,7 +749,10 @@ private fun FoldableLayout(coverUri: String?,
                         onCoverPositioned = { offset, size ->
                             sharedCoverState?.fullCoverPosition = CoverPosition(windowOffset = offset, size = size)
                         },
-                        onClick = { onNavigateToAlbum(state.currentSongAlbum) }
+                        onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+                        onDoubleTap = { if (isPlaying) onPause() else onPlay() },
+                        onSwipePrevious = onPrevious,
+                        onSwipeNext = onNext
                     )
                 }
 
@@ -922,7 +945,7 @@ private fun LandscapeLayout(coverUri: String?,
                     artist = state.currentSongArtist,
                     format = state.currentSongFormat,
                     textAccentColor = textAccentColor,
-                    onArtistClick = { onNavigateToArtist(state.currentSongArtist) }
+                    onArtistClick = { name -> onNavigateToArtist(name) }
                 )
                 Spacer(Modifier.height(6.dp))
                 PlayerInlineLyric(currentLyricLine, textAccentColor)
@@ -985,7 +1008,10 @@ private fun LandscapeLayout(coverUri: String?,
                 rotation = rotation,
                 sizeDp = artSize,
                 glowSizeDp = artSize + 32.dp,
-                onClick = { onNavigateToAlbum(state.currentSongAlbum) }
+                onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+                onDoubleTap = { if (isPlaying) onPause() else onPlay() },
+                onSwipePrevious = onPrevious,
+                onSwipeNext = onNext
             )
         }
     }
@@ -1072,7 +1098,7 @@ private fun PortraitLayout(coverUri: String?,
             }
         }
 
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(4.dp))
 
         // Song header
         Column(
@@ -1081,15 +1107,15 @@ private fun PortraitLayout(coverUri: String?,
         ) {
             Text(
                 state.currentSongTitle.ifEmpty { stringResource(R.string.player_not_playing) },
-                style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Normal),
+                color = MaterialTheme.colorScheme.onBackground, maxLines = 2, overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
             )
             PlayerSongInfo(
                 artist = state.currentSongArtist,
                 format = state.currentSongFormat,
                 textAccentColor = textAccentColor,
-                onArtistClick = { onNavigateToArtist(state.currentSongArtist) }
+                onArtistClick = { name -> onNavigateToArtist(name) }
             )
             Spacer(Modifier.height(14.dp))
             PlayerInlineLyric(currentLyricLine, textAccentColor)
@@ -1108,6 +1134,9 @@ private fun PortraitLayout(coverUri: String?,
             sizeDp = artSize,
             glowSizeDp = artSize + 36.dp,
             onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+            onDoubleTap = { if (isPlaying) onPause() else onPlay() },
+            onSwipePrevious = onPrevious,
+            onSwipeNext = onNext,
             modifier = Modifier.fillMaxWidth().height(artSize + 36.dp)
         )
 
@@ -1226,19 +1255,27 @@ private fun EdgePulseBand(
     }
     val hueBase = (if (coverHue >= 0f) coverHue else accentHue + 360f) % 360f
 
-    // 呼吸效果：带明确"熄灭段"——0 停留 → 缓亮 → 短暂峰值 → 回落 → 0 停留
-    val infinite = rememberInfiniteTransition(label = "breathe")
-    val breath by infinite.animateFloat(
+    // 流动：色相沿边缘绕圈（极慢，近乎静止）
+    val infinite = rememberInfiniteTransition(label = "edge_flow")
+    val flow by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 25000, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "flow"
+    )
+    // 呼吸：整体亮度 0.30~1.00，最暗时保留可见光不纯黑
+    val breathe by infinite.animateFloat(
         initialValue = 0f,
         targetValue = 1f,
         animationSpec = infiniteRepeatable(
             animation = keyframes {
-                durationMillis = 9000
-                0f at 0 with FastOutSlowInEasing          // 熄灭
-                0f at 1600 with LinearEasing                // 熄灭段保持（暗态停留）
-                1f at 5600 with FastOutSlowInEasing        // 缓亮到峰值（慢）
-                1f at 6400 with LinearEasing                // 峰值短暂保持
-                0f at 9000 with FastOutSlowInEasing        // 回落到熄灭（慢）
+                durationMillis = 8000
+                0.30f at 0 with FastOutSlowInEasing
+                1.00f at 4000 with FastOutSlowInEasing
+                0.30f at 8000 with FastOutSlowInEasing
             },
             repeatMode = RepeatMode.Restart
         ),
@@ -1249,27 +1286,59 @@ private fun EdgePulseBand(
         val w = size.width; val h = size.height
         if (w <= 50f || h <= 50f) return@Canvas
         val minDim = minOf(w, h)
-        val tk = minDim * 0.014f
-        val inset = minDim * 0.012f
+        val tk = minDim * 0.014f          // 线宽基准
+        val inset = minDim * 0.008f
+        // 圆角：屏幕物理玻璃圆角(68px)偏方、旧值(0.14=170px)太圆不贴合，取 0.085 折中
+        val ringCorner = minDim * 0.085f
         val ringRect = Rect(inset, inset, w - inset, h - inset)
         val ringPath = Path().apply {
-            addRoundRect(
-                androidx.compose.ui.geometry.RoundRect(ringRect, CornerRadius(minDim * 0.10f, minDim * 0.10f))
-            )
+            addRoundRect(RoundRect(ringRect, CornerRadius(ringCorner, ringCorner)))
         }
-        // 呼吸驱动幅度：0~1 全范围摆动，明暗对比明显
-        val breatheAmp = breath.coerceIn(0f, 1f)
 
-        drawPath(
-            ringPath,
-            Color.hsl(hueBase, 0.85f, 0.6f, 0f + breatheAmp * 0.60f),
-            style = Stroke(width = tk * 3.5f, cap = StrokeCap.Round)
-        )
-        drawPath(
-            ringPath,
-            Color.hsl((hueBase + 15f) % 360f, 0.9f, 0.7f, 0f + breatheAmp * 0.95f),
-            style = Stroke(width = tk * 1.6f, cap = StrokeCap.Round)
-        )
+        val breatheAmp = breathe.coerceIn(0f, 1f)
+        val cx = w / 2f; val cy = h / 2f
+
+        drawIntoCanvas { canvas ->
+            // 均匀往返渐变：色相 ±30° 五段平滑往返；亮度按方位调制：左右亮、上下暗
+            val c = 0.55f  // 略饱和
+            val vBright = 0.95f  // 左右亮
+            val vDim = 0.32f     // 上下暗
+            val c1 = android.graphics.Color.HSVToColor(floatArrayOf(hueBase, c, vBright))
+            val c2 = android.graphics.Color.HSVToColor(floatArrayOf(hueBase + 30f, c, vDim))
+            val c3 = android.graphics.Color.HSVToColor(floatArrayOf(hueBase, c, vBright))
+            val c4 = android.graphics.Color.HSVToColor(floatArrayOf((hueBase - 30f + 360f) % 360f, c, vDim))
+            val c5 = android.graphics.Color.HSVToColor(floatArrayOf(hueBase, c, vBright))
+            val sweep = android.graphics.SweepGradient(
+                cx, cy,
+                intArrayOf(c1, c2, c3, c4, c5),
+                floatArrayOf(0f, 0.25f, 0.5f, 0.75f, 1.0f)
+            )
+            sweep.setLocalMatrix(android.graphics.Matrix().apply {
+                setRotate(flow * 360f, cx, cy)
+            })
+
+            // 外发光：宽 + 柔和 blur
+            val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+                strokeWidth = tk * 3.6f
+                shader = sweep
+                maskFilter = BlurMaskFilter(tk * 1.8f, BlurMaskFilter.Blur.NORMAL)
+                alpha = (breatheAmp * 255).toInt().coerceIn(0, 255)
+            }
+            // 核心亮线：更细、接近白的高亮
+            val core = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                style = Paint.Style.STROKE
+                strokeCap = Paint.Cap.ROUND
+                strokeWidth = tk * 1.1f
+                shader = sweep
+                alpha = (breatheAmp * 255).toInt().coerceIn(0, 255)
+            }
+
+            val ap = ringPath.asAndroidPath()
+            canvas.nativeCanvas.drawPath(ap, glow)
+            canvas.nativeCanvas.drawPath(ap, core)
+        }
     }
 }
 

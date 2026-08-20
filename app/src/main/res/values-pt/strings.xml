@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <resources>
 <string name="app_name">Moto Music Premium</string>
 <string name="no_music_found">Nenhum arquivo de música encontrado</string>
@@ -19,6 +19,13 @@
 <string name="language_traditional_chinese">Chinês tradicional</string>
 <string name="language_portuguese">Português</string>
 <string name="language_hindi">Hindi</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_light_mode">Light Mode</string>
+    <string name="settings_light_mode_on">On · light theme</string>
+    <string name="settings_light_mode_off">Off · dark theme</string>
+    <string name="settings_lyrics_display">Exibição de letras</string>
+    <string name="settings_lyric_font_size">Tamanho da fonte</string>
+    <string name="settings_lyric_visible_lines">Linhas exibidas</string>
 <string name="action_back">Voltar</string>
 <string name="action_cancel">Cancelar</string>
 <string name="action_save">Salvar</string>
@@ -41,6 +48,11 @@
 <string name="title_artists">Artistas</string>
 <string name="title_playlists">Playlists</string>
 <string name="title_folders">Pastas</string>
+    <string name="folder_subfolders">Subfolders</string>
+    <string name="folder_songs">Songs</string>
+    <string name="placeholder_play_folder">Play folder (recursive)</string>
+    <string name="folder_root_internal">Internal storage</string>
+    <string name="folder_root_sdcard">SD card</string>
 <string name="title_audio_diagnostic">Diagnóstico de áudio</string>
 <string name="title_audio_quality">Qualidade de áudio</string>
 <string name="title_equalizer">Equalizador</string>

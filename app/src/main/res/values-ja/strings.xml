@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <resources>
 <string name="app_name">Moto Music Premium</string>
 <string name="no_music_found">音楽ファイルが見つかりません</string>
@@ -19,6 +19,13 @@
 <string name="language_traditional_chinese">繁体字中国語</string>
 <string name="language_portuguese">ポルトガル語</string>
 <string name="language_hindi">ヒンディー語</string>
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_light_mode">Light Mode</string>
+    <string name="settings_light_mode_on">On · light theme</string>
+    <string name="settings_light_mode_off">Off · dark theme</string>
+    <string name="settings_lyrics_display">歌詞表示</string>
+    <string name="settings_lyric_font_size">文字サイズ</string>
+    <string name="settings_lyric_visible_lines">表示行数</string>
 <string name="action_back">戻る</string>
 <string name="action_cancel">キャンセル</string>
 <string name="action_save">保存</string>
@@ -41,6 +48,11 @@
 <string name="title_artists">アーティスト</string>
 <string name="title_playlists">プレイリスト</string>
 <string name="title_folders">フォルダ</string>
+    <string name="folder_subfolders">Subfolders</string>
+    <string name="folder_songs">Songs</string>
+    <string name="placeholder_play_folder">Play folder (recursive)</string>
+    <string name="folder_root_internal">Internal storage</string>
+    <string name="folder_root_sdcard">SD card</string>
 <string name="title_audio_diagnostic">オーディオ診断</string>
 <string name="title_audio_quality">オーディオ品質</string>
 <string name="title_equalizer">イコライザー</string>

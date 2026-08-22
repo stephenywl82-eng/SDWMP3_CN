@@ -214,16 +214,16 @@ bool UsbAudioDriver::open(int fd, int epAddress, int maxPacketSize, int interval
     }
 
     // 銆愯嚜閫傚簲DAC銆戣clock sub-range (GET_RANGE) 锟?楠岃瘉姣忎釜rate鏄惁琚獶AC纭欢鏀寔
+    // NOTE: parseSupportedRates() MUST run first — parseClockRanges()'s UAC1
+    // tSamFreq fallback reads supportedRates_ as its source.
+    parseSupportedRates();
+    LOGI("Supported sample rates: %s", supportedRates_.c_str());
     parseClockRanges();
     LOGI("Clock ranges: %zu found", clockRanges_.size());
     for (size_t i = 0; i < clockRanges_.size(); ++i) {
         auto& cr = clockRanges_[i];
         LOGI("  #%zu: clkId=%d min=%d max=%d res=%d", i, cr.clockId, cr.min, cr.max, cr.res);
     }
-
-    // Parse supported sample rates from AudioControl descriptors
-    parseSupportedRates();
-    LOGI("Supported sample rates: %s", supportedRates_.c_str());
 
     // Detect UAC 1.0 / 2.0 clock source
     clockSourceId_ = findClockSourceId();
@@ -1045,45 +1045,32 @@ void UsbAudioDriver::parseSupportedRates() {
         uint8_t dType = (pos + 1 < len) ? desc[pos + 1] : 0;
         uint8_t dSub  = (pos + 2 < len) ? desc[pos + 2] : 0;
 
-        // UAC 1.0: Type I Format = CS_INTERFACE, subtype 0x02 (FORMAT_TYPE)
-        // UAC 2.0: Type I Format = CS_INTERFACE, subtype 0x01 (FORMAT_TYPE_I)
-        bool isFormatDesc = (dType == UAC2_CS_INTERFACE) &&
-            ((dSub == 2) || (dSub == 0x01));
+        // FORMAT_TYPE descriptor (subtype 0x02) exists in BOTH UAC1 and UAC2.
+        // UAC 1.0: +3=bFormatType +4=bNrChannels +5=bSubframeSize +6=bBitResolution
+        //          +7=bSamFreqType +8=tSamFreq[N] (3 bytes each)
+        // UAC 2.0: +3=bFormatType +4=bSubslotSize +5=bBitResolution
+        //          (rates live in Clock Source, NOT here — parseClockRanges handles them)
+        bool isFormatDesc = (dType == UAC2_CS_INTERFACE) && (dSub == 0x02);
 
         if (isFormatDesc && dLen >= 8) {
-            // Parse tSamFreq or the frequency table
-            // UAC 1.0 Type I: 3-byte tSamFreq at offset 7+
-            // UAC 2.0 Type I: 4-byte tSamFreq at offset 7+
-            if (supportedRates_.empty()) {
-                // Single fixed rate
-                uint32_t rate = 0;
-                if (dSub == 2) { // UAC 1.0
-                    rate = desc[pos + 7] | (desc[pos + 8] << 8) | (desc[pos + 9] << 16);
-                } else { // UAC 2.0
-                    rate = desc[pos + 7] | (desc[pos + 8] << 8) |
-                           (desc[pos + 9] << 16) | (desc[pos + 10] << 24);
-                }
-
-                if (rate > 0) {
-                    char buf[32];
-                    snprintf(buf, sizeof(buf), "%u", rate);
-                    supportedRates_ = buf;
-                }
-            } else {
-                // Already have a value, this might be an additional format
-                char buf[32];
-                uint32_t rate = 0;
-                if (dSub == 2) {
-                    rate = desc[pos + 7] | (desc[pos + 8] << 8) | (desc[pos + 9] << 16);
-                } else {
-                    rate = desc[pos + 7] | (desc[pos + 8] << 8) |
-                           (desc[pos + 9] << 16) | (desc[pos + 10] << 24);
-                }
-                if (rate > 0) {
-                    snprintf(buf, sizeof(buf), " %u", rate);
-                    supportedRates_ += buf;
+            if (!isUac2_) {
+                // UAC1: read bSamFreqType then N × 3-byte tSamFreq entries.
+                uint8_t nRates = desc[pos + 7];
+                int base = pos + 8;
+                for (int i = 0; i < nRates && base + i * 3 + 2 < len; ++i) {
+                    uint32_t rate = desc[base + i * 3]
+                                  | (desc[base + i * 3 + 1] << 8)
+                                  | (desc[base + i * 3 + 2] << 16);
+                    // sanity: valid audio sample rate range
+                    if (rate >= 8000 && rate <= 768000) {
+                        char buf[32];
+                        snprintf(buf, sizeof(buf), "%s%u",
+                                 supportedRates_.empty() ? "" : " ", rate);
+                        supportedRates_ += buf;
+                    }
                 }
             }
+            // UAC2: nothing here — rates come from clock source ranges.
         }
 
         pos += (dLen > 0) ? dLen : 1;
@@ -1219,38 +1206,27 @@ void UsbAudioDriver::parseAltCandidates() {
         case UAC2_CS_INTERFACE:  // 0x24 锟?class-specific interface descriptor
             if (inStreamingIface && dLen >= 3) {
                 uint8_t dSub = desc[pos + 2];
-                // UAC 1.0/2.0 both use subtype 0x02 for FORMAT_TYPE descriptors.
+                // FORMAT_TYPE = subtype 0x02 in BOTH UAC1 and UAC2.
                 // subtype 0x01 inside AudioStreaming is AS_GENERAL (different layout!).
                 if (dSub == 0x02 && dLen >= 6) {
                     inFormatDesc = true;
-                    if (dLen >= 6) {
-                        // UAC2 FORMAT_TYPE (dLen=6): pos+3=bFormatType pos+4=bSubslotSize pos+5=bBitResolution
-                        // Some DACs have dLen=6 with only subslot+bitRes at +4/+5
-                        // Detect layout: if desc[pos+4] > 8 it's bBitResolution, shift by one
-                        int subOff = 4, resOff = 5;
-                        uint8_t val4 = desc[pos + 4];
-                        uint8_t val5 = (dLen > 5) ? desc[pos + 5] : 0;
-                        if (val4 > 8 && val4 <= 32 && (val5 == 0 || val5 > 32)) {
-                            // val4 looks like bBitResolution, val5 is garbage → shift
-                            subOff = 3; resOff = 4;
+                    if (isUac2_) {
+                        // UAC2 FORMAT_TYPE: +3=bFormatType +4=bSubslotSize +5=bBitResolution
+                        curSubslot = desc[pos + 4];
+                        curRes = desc[pos + 5];
+                    } else {
+                        // UAC1 FORMAT_TYPE: +4=bNrChannels +5=bSubframeSize(subslot)
+                        //                  +6=bBitResolution +7=bSamFreqType +8=tSamFreq[N] (3B each)
+                        curChannels = desc[pos + 4];
+                        curSubslot = desc[pos + 5];
+                        curRes = desc[pos + 6];
+                        uint8_t nRates = desc[pos + 7];
+                        // multi-rate alt (bSamFreqType>1): leave rate=0 → selectAltForRate
+                        // won't filter by rate; actual rate switched via SET_CUR (UAC1 has
+                        // no clock entity, so no GET_MIN/GET_MAX ranges exist).
+                        if (nRates == 1 && dLen >= 11) {
+                            curRate = desc[pos + 8] | (desc[pos + 9] << 8) | (desc[pos + 10] << 16);
                         }
-                        if (dLen > subOff) curSubslot = desc[pos + subOff];
-                        if (dLen > resOff) curRes = desc[pos + resOff];
-                        // If subslot looks like bit resolution (16/24/32), derive from it
-                        if (curSubslot > 8 && curSubslot <= 32) {
-                            curRes = curSubslot;
-                            curSubslot = (curSubslot + 7) / 8;
-                        }
-                    }
-                    // tSamFreq: 3 bytes UAC1 (offset 7-9), 4 bytes UAC2 (offset 7-10)
-                    if (dLen >= 10) {
-                        uint32_t sr = desc[pos + 7] | (desc[pos + 8] << 8);
-                        if (isUac2_) {
-                            sr |= (desc[pos + 9] << 16) | (desc[pos + 10] << 24);
-                        } else {
-                            sr |= (desc[pos + 9] << 16);
-                        }
-                        curRate = (int)sr;
                     }
                 }
             }
@@ -1334,7 +1310,7 @@ void UsbAudioDriver::parseAltCandidates() {
 
 void UsbAudioDriver::parseClockRanges() {
     clockRanges_.clear();
-    if (!isUac2_ || fd_ < 0) return;
+    if (fd_ < 0) return;
 
     // Gather unique clock IDs from candidates
     std::vector<int> clockIds;

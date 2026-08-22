@@ -1128,6 +1128,12 @@ static std::atomic<int64_t> g_decoderPositionUs{0};
 static std::thread g_decoderThread;
 static std::mutex g_decoderMutex;
 static std::condition_variable g_decoderCv;
+// 【V8.3】decoder 生命周期锁：串行化 nativeOpen/nativeOpenFd/nativeStop/nativePlay/nativeSeekTo
+// 对 g_decoderExtractor/g_decoderCodec/g_decoderThread 全局单例指针的 join/delete/create 操作。
+// 根因：快速切歌时「切歌后台线程」与「主线程 fallback stop 回调」并发 join 同一 std::thread、
+// delete 同一 codec/extractor，导致 use-after-free(SIGSEGV) + 重复 configure/start(SIGABRT)。
+// 此锁不与 g_streamMutex 反序嵌套（所有持锁顺序恒为 lifecycle → stream）。
+static std::mutex g_decoderLifecycleMutex;
 static std::vector<float> g_convertBuffer;
 static std::atomic<bool> g_decoderIsFloat{false};  // 【V7.16】decoder output format
 // 【V7.x】解码器实际输出编码（MediaFormat PCM_ENCODING）。AAC/M4A 的硬件解码器
@@ -1479,6 +1485,7 @@ JNIEXPORT void JNICALL Java_com_sdw_music_player_OboeAudioSink_nativeSetSinkEqAl
 JNIEXPORT jboolean JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
                                                    jstring filePath) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     const char *path = env->GetStringUTFChars(filePath, nullptr);
     if (!path) return false;
     LOGI("OboeDirectPlayer: opening %s", path);
@@ -1486,11 +1493,13 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
     g_decoderStopRequested.store(true);
     g_decoderPaused.store(false);
     g_decoderCv.notify_all();
-    // Stop codec FIRST to unblock pending dequeue calls, then join thread
+    // 【V8.3】先 join 解码线程再 stop codec。旧顺序"先 stop 再 join"会让正在
+    // readSampleData 的线程的 codec input buffer 被 stop 释放 → use-after-free SIGSEGV。
+    // 解码线程 dequeue 超时仅 5ms，先 join 能快速返回，且此时 codec/extractor 仍存活。
+    if (g_decoderThread.joinable()) g_decoderThread.join();
     if (g_decoderCodec) {
         AMediaCodec_stop(g_decoderCodec);
     }
-    if (g_decoderThread.joinable()) g_decoderThread.join();
     std::lock_guard<std::mutex> lock(g_streamMutex);
 
     if (g_decoderCodec) {
@@ -1796,16 +1805,17 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
 JNIEXPORT jboolean JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thiz,
                                                       jint fd, jlong offset, jlong length) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     LOGI("OboeDirectPlayer: opening FD %d offset=%lld length=%lld", fd, (long long)offset, (long long)length);
 
     g_decoderStopRequested.store(true);
     g_decoderPaused.store(false);
     g_decoderCv.notify_all();
-    // Stop codec FIRST to unblock pending dequeue calls, then join thread
+    // 【V8.3】先 join 解码线程再 stop codec（修复 use-after-free SIGSEGV）
+    if (g_decoderThread.joinable()) g_decoderThread.join();
     if (g_decoderCodec) {
         AMediaCodec_stop(g_decoderCodec);
     }
-    if (g_decoderThread.joinable()) g_decoderThread.join();
     std::lock_guard<std::mutex> lock(g_streamMutex);
     
     // 【V7.28】进度追踪变量清零（修复每曲累积偏移 bug）
@@ -2096,6 +2106,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
 // --- Playback control ---
 JNIEXPORT jboolean JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativePlay(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     std::lock_guard<std::mutex> lock(g_streamMutex);
     if (!g_outputStream || !g_decoderCodec || !g_decoderExtractor) {
         LOGE("nativePlay: not opened");
@@ -2152,6 +2163,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeResume(JNIEnv *env, jobject thi
 JNIEXPORT void JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeSeekTo(JNIEnv *env, jobject thiz,
                                                      jlong positionUs) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     LOGI("OboeDirectPlayer: seekTo %lld us", (long long)positionUs);
     g_decoderPaused.store(true);
     if (g_ringBuffer) g_ringBuffer->clear();
@@ -2168,15 +2180,16 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSeekTo(JNIEnv *env, jobject thi
 
 JNIEXPORT void JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeStop(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     LOGI("OboeDirectPlayer: stopping");
     g_decoderStopRequested.store(true);
     g_decoderPaused.store(false);
     g_decoderCv.notify_all();
-    // Stop codec FIRST to unblock pending dequeueInputBuffer/OutputBuffer, then join
+    // 【V8.3】先 join 解码线程再 stop codec（修复 use-after-free SIGSEGV）
+    if (g_decoderThread.joinable()) g_decoderThread.join();
     if (g_decoderCodec) {
         AMediaCodec_stop(g_decoderCodec);
     }
-    if (g_decoderThread.joinable()) g_decoderThread.join();
     std::lock_guard<std::mutex> lock(g_streamMutex);
     if (g_outputStream) {
         g_outputStream->requestStop();

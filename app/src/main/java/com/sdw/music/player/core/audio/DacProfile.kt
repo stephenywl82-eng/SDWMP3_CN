@@ -102,10 +102,30 @@ data class DacProfile(
             featureUnitId = 16, featureUnitChannel = 1, featureUnitChannels = 2,
             featureUnitMinDb = -65.25f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.38f)
 
+        /** Qudelix-5K (0A12:4007) — UAC1 synchronous DAC/AMP.
+         *  Single alt=1 AudioStreaming iface, ISO OUT ep=0x03 mps=576 (full-speed 1ms).
+         *  mps=576 == 96kHz × 24bit × 2ch → wire format is 24-bit S24_3LE.
+         *  No explicit feedback endpoint (0x81/0x89 are HID interrupt) → synchronous,
+         *  streamLoop's "no feedback = maintain timing" path fits.
+         *  Sample rate switched via SET_CUR (single alt, not multi-alt).
+         *  Supports 44.1/48/88.2/96 kHz. Hand-rolled USB Host Exclusive. */
+        val QUDELIX_5K = DacProfile(0x0A12, 0x4007, "Qudelix-5K USB DAC",
+            useSystemRoute = false, lacks44k1Clock = false, wireBits = 24)
+
+        /** Moondrop Chu II DSP (31B2:0113) — UAC1 synchronous DSP IEM.
+         *  Multi-alt AudioStreaming OUT iface (id=2):
+         *    alt=1 → ep=0x04 OUT mps=388 (96kHz 16bit 2ch)
+         *    alt=2 → ep=0x04 OUT mps=582 (96kHz 24bit 2ch)
+         *  iface id=1 (ep=0x84 IN) is the mic/record interface, iface id=3 is HID
+         *  (DSP control). Wire format 24-bit S24_3LE. Sample rate via SET_CUR.
+         *  Hand-rolled USB Host Exclusive. */
+        val CHU2_DSP = DacProfile(0x31B2, 0x0113, "Moondrop Chu II DSP",
+            useSystemRoute = false, lacks44k1Clock = false, wireBits = 24)
+
         // ── Lookup ─────────────────────────────────────────────
 
         private val byKey: Map<Pair<Int, Int>, DacProfile> = listOf(
-            TTGK_REFERENCE, TTGK_NOTE, VID2972_0047, HIFI_A001, REALTEK_4BA6
+            TTGK_REFERENCE, TTGK_NOTE, VID2972_0047, HIFI_A001, REALTEK_4BA6, QUDELIX_5K, CHU2_DSP
         ).associateBy { it.vid to it.pid }
 
         /** Look up a known profile, or return a generic safe default (system-route). */

@@ -8,12 +8,14 @@ import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -28,6 +30,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
@@ -437,7 +440,14 @@ fun SongListScreen(
                         stickyHeader {
                             Surface(
                                 color = MaterialTheme.colorScheme.background,
-                                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp)
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 2.dp)
+                                    .pointerInput(letter) {
+                                        detectTapGestures(onDoubleTap = {
+                                            scope.launch { listState.animateScrollToItem(0) }
+                                        })
+                                    }
                             ) {
                                 Text(letter.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 4.dp))
                             }
@@ -584,7 +594,14 @@ private fun TabletSongListContent(
                 stickyHeader {
                     Surface(
                         color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp)
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 2.dp)
+                            .pointerInput(letter) {
+                                detectTapGestures(onDoubleTap = {
+                                    scope.launch { listState.animateScrollToItem(0) }
+                                })
+                            }
                     ) {
                         Text(letter.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(vertical = 4.dp))
                     }
@@ -808,7 +825,30 @@ fun MiniPlayer(
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.surface)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
+            .shadow(
+                elevation = 18.dp,
+                shape = RoundedCornerShape(20.dp),
+                ambientColor = Color.Black.copy(alpha = 0.30f),
+                spotColor = Color.Black.copy(alpha = 0.40f)
+            )
+            .clip(RoundedCornerShape(20.dp))
+            .background(
+                Brush.verticalGradient(
+                    0.0f to MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    0.35f to MaterialTheme.colorScheme.surface,
+                    1.0f to MaterialTheme.colorScheme.surface
+                )
+            )
+            .border(
+                width = 1.dp,
+                brush = Brush.verticalGradient(
+                    0.0f to accentColor.copy(alpha = 0.55f),
+                    0.35f to MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f),
+                    1.0f to MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+                ),
+                shape = RoundedCornerShape(20.dp)
+            )
             .clickable(interactionSource = interactionSource, indication = null) { onClick() }
             .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
     ) {

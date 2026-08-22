@@ -120,6 +120,8 @@
 <string name="settings_open_failed">Failed to open: %1$s</string>
 <string name="settings_about">About</string>
 <string name="settings_about_name">Moto Music Premium</string>
+<string name="settings_dev_group">Developer Group</string>
+<string name="settings_dev_group_desc">Click to join our Telegram community</string>
 <string name="songlist_search_placeholder">Search…</string>
 <string name="songlist_song_count">%1$d songs</string>
 <string name="songlist_close_details">Close details</string>

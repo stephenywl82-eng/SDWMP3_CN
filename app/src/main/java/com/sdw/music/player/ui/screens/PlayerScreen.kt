@@ -405,12 +405,12 @@ fun PlayerScreen(
         if (coverColorBgEnabled) {
             val coverUri = state.currentSongAlbumArt
             if (coverUri?.isNotBlank() == true) {
-                // 封面模糊背景：适度放大 + 大半径模糊，保留色块存在感又抹平细节
+                // 封面模糊背景：小半径模糊保留图案轮廓，高透明度让颜色充分透出
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
                         .scale(1.35f)
-                        .blur(120.dp),
+                        .blur(28.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Image(
@@ -418,28 +418,19 @@ fun PlayerScreen(
                         contentDescription = null,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop,
-                        alpha = 0.28f
+                        alpha = 0.65f
                     )
                 }
             }
-            // 氛围渐变：accent 光晕 radius 覆盖全屏（避免竖屏下出现环形条纹）+ 上下柔和压暗
+            // 氛围渐变：上下柔和压暗（中间透出封面，无亮带无光环）
             Canvas(modifier = Modifier.fillMaxSize()) {
-                drawRect(
-                    Brush.radialGradient(
-                        0.0f to accentColor.copy(alpha = 0.12f),
-                        0.55f to accentColor.copy(alpha = 0.03f),
-                        1.0f to Color.Transparent,
-                        center = Offset(size.width / 2f, size.height * 0.4f),
-                        radius = size.maxDimension * 0.75f
-                    )
-                )
                 drawRect(
                     Brush.verticalGradient(
                         0.0f to Color.Black.copy(alpha = 0.55f),
-                        0.25f to Color.Black.copy(alpha = 0.18f),
-                        0.55f to Color.Black.copy(alpha = 0.22f),
-                        0.78f to Color.Black.copy(alpha = 0.38f),
-                        1.0f to Color.Black.copy(alpha = 0.65f)
+                        0.20f to Color.Black.copy(alpha = 0.10f),
+                        0.50f to Color.Black.copy(alpha = 0.03f),
+                        0.82f to Color.Black.copy(alpha = 0.15f),
+                        1.0f to Color.Black.copy(alpha = 0.55f)
                     )
                 )
             }

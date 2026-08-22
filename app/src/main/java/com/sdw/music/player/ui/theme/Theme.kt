@@ -6,6 +6,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
@@ -67,7 +68,7 @@ fun SDWMusicTheme(
     val context = LocalContext.current
 
     val colorScheme = when {
-        // 浅色模式：优先动态浅色，回退静态浅色
+        // 浅色模式：Material You 动态取色，回退静态浅色
         lightMode && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
             try {
                 dynamicLightColorScheme(context)
@@ -76,7 +77,20 @@ fun SDWMusicTheme(
             }
         }
         lightMode -> SDWLightColorScheme
-        // 深色模式：固定纯黑静态配色（CDJ-3000 风格），不做动态取色
+        // 深色模式：Material You 动态取色（主色跟随壁纸），但背景仍保持纯黑（CDJ-3000 风格）
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
+            try {
+                dynamicDarkColorScheme(context).copy(
+                    background = DarkBg,
+                    surface = DarkCard,
+                    surfaceVariant = DarkSurface,
+                    onBackground = TextPrimary,
+                    onSurface = TextPrimary
+                )
+            } catch (e: Exception) {
+                SDWDarkColorScheme
+            }
+        }
         else -> SDWDarkColorScheme
     }
 

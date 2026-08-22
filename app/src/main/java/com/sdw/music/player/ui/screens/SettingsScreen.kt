@@ -35,6 +35,7 @@ import com.sdw.music.player.core.audio.UsbDacManager
 import com.sdw.music.player.ui.theme.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.sdw.music.player.BuildConfig
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -772,7 +773,25 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 SettingsItem(
                     icon = Icons.Default.Info,
                     title = stringResource(R.string.settings_about_name),
-                    subtitle = "v8.0 | Developed by Stephen Yu"
+                    subtitle = "v${BuildConfig.VERSION_NAME} | Developed by Stephen Yu"
+                )
+            }
+            item {
+                SettingsItem(
+                    icon = Icons.Default.Forum,
+                    title = stringResource(R.string.settings_dev_group),
+                    subtitle = stringResource(R.string.settings_dev_group_desc),
+                    onClick = {
+                        try {
+                            val intent = android.content.Intent(
+                                android.content.Intent.ACTION_VIEW,
+                                android.net.Uri.parse("https://t.me/motomuiscplayer")
+                            )
+                            context.startActivity(intent)
+                        } catch (e: Exception) {
+                            android.util.Log.e("Settings", "open tg failed", e)
+                        }
+                    }
                 )
             }
             item {
@@ -786,9 +805,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
 private fun SettingsSectionTitle(title: String) {
     Text(
         title,
-        color = MaterialTheme.colorScheme.primary,
-        style = MaterialTheme.typography.labelSmall,
-        modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp)
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        style = MaterialTheme.typography.labelMedium,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.padding(start = 20.dp, top = 20.dp, bottom = 8.dp)
     )
 }
 
@@ -850,12 +870,13 @@ private fun SettingsSwitchItem(
 
 @Composable
 private fun SettingsDivider() {
-    Spacer(Modifier.height(4.dp))
+    Spacer(Modifier.height(12.dp))
     androidx.compose.material3.HorizontalDivider(
-        modifier = Modifier.padding(start = 54.dp, end = 16.dp),
-        color = DividerColor
+        modifier = Modifier.padding(start = 20.dp, end = 20.dp),
+        thickness = 0.5.dp,
+        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
     )
-    Spacer(Modifier.height(4.dp))
+    Spacer(Modifier.height(12.dp))
 }
 
 @Composable

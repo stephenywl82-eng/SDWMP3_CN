@@ -153,8 +153,15 @@ private fun VuMixer(sub: Float, bass: Float, mid: Float, high: Float,
     // [v6.0.15] Own 60fps frame clock — decouples from FFT polling (80ms),
     // keeps peak-fall animation smooth even when Edge Glow is off.
     var tick by remember { mutableLongStateOf(0L) }
+    val activeNow by rememberUpdatedState(isActive)
     LaunchedEffect(Unit) {
         while (true) {
+            // 空闲且峰值已衰减到底 → 停止 60fps 帧时钟，低频轮询等待重新激活（省电）
+            val anyPeak = peaks.any { it > 0.04f }
+            if (!activeNow && !anyPeak) {
+                kotlinx.coroutines.delay(120)
+                continue
+            }
             withFrameMillis { tick = it }
         }
     }
@@ -192,9 +199,10 @@ private fun VuMixer(sub: Float, bass: Float, mid: Float, high: Float,
             val half = stripW / 2f - 1.dp.toPx()
             // Color: use Android native HSV→ARGB (faster than Compose Color.hsl)
             val hCol = stripHues[i]
-            val stripAlpha = (0.15f + v * 0.7f).coerceIn(0f, 1f)
-            val stripColor = colorFromHsv(hCol, 0.55f + v * 0.35f, 0.45f + v * 0.5f, stripAlpha)
-            val peakColor = colorFromHsv(hCol, 0.55f + pk * 0.35f, 0.6f + pk * 0.4f, (0.85f + pk * 0.15f).coerceAtMost(1f))
+            // 提高灯柱亮度：value 基线 0.45→0.75、alpha 基线 0.15→0.45，峰值逼近全亮
+            val stripAlpha = (0.45f + v * 0.55f).coerceIn(0f, 1f)
+            val stripColor = colorFromHsv(hCol, 0.55f + v * 0.35f, 0.75f + v * 0.25f, stripAlpha)
+            val peakColor = colorFromHsv(hCol, 0.55f + pk * 0.35f, 0.85f + pk * 0.15f, (0.95f + pk * 0.05f).coerceAtMost(1f))
             // Main strip
             val lh = (v * h).coerceAtLeast(0f)
             if (lh > 1f) drawRoundRect(stripColor, Offset(x, h - lh), Size(half, lh), CornerRadius(cr, cr))
@@ -205,7 +213,7 @@ private fun VuMixer(sub: Float, bass: Float, mid: Float, high: Float,
             // Right channel (slightly dimmer)
             val rv = v * 0.92f
             val rh = (rv * h).coerceAtLeast(0f)
-            val rc = colorFromHsv(hCol, 0.55f + rv * 0.35f, 0.45f + rv * 0.5f, stripAlpha * 0.85f)
+            val rc = colorFromHsv(hCol, 0.55f + rv * 0.35f, 0.75f + rv * 0.25f, stripAlpha * 0.9f)
             val rx = x + stripW / 2f + 1.dp.toPx()
             if (rh > 1f) drawRoundRect(rc, Offset(rx, h - rh), Size(half, rh), CornerRadius(cr, cr))
             val rpk = (pk * 0.92f).coerceIn(0f, 1f)

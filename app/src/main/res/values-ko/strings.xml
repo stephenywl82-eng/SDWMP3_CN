@@ -120,6 +120,8 @@
 <string name="settings_open_failed">열지 못했습니다: %1$s</string>
 <string name="settings_about">정보</string>
 <string name="settings_about_name">Moto Music Premium</string>
+<string name="settings_dev_group">Developer Group</string>
+<string name="settings_dev_group_desc">Click to join our Telegram community</string>
 <string name="songlist_search_placeholder">검색…</string>
 <string name="songlist_song_count">%1$d곡</string>
 <string name="songlist_close_details">세부 정보 닫기</string>

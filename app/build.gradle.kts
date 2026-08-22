@@ -93,6 +93,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
         // prefab disabled: oboe is linked via the prebuilt liboboe.so in jniLibs
         // (the published oboe 1.8.0 prefab only carries NDK r21 artifacts and
         // rejects newer NDKs). Keep the oboe dependency for completeness but do

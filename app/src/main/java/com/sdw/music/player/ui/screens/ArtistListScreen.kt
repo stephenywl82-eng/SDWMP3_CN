@@ -15,21 +15,16 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import kotlinx.coroutines.launch
 import com.sdw.music.player.Song
 import com.sdw.music.player.splitArtists
 import com.sdw.music.player.ui.components.AlphabetIndexBar
-import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.ArtistAvatar
 import com.sdw.music.player.ui.theme.*
 import com.sdw.music.player.util.PinyinUtils
 import androidx.compose.ui.res.stringResource
@@ -44,31 +39,40 @@ fun ArtistListScreen(
     onArtistClick: (String) -> Unit,
     onNavigateBack: () -> Unit
 ) {
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearching by remember { mutableStateOf(false) }
+
+    // 把每首歌的 artist 拆成多个独立歌手，各自归组（一首歌可能同时出现在多个歌手名下）
     val allArtists = remember(songs) {
-        // 把每首歌的 artist 拆成多个独立歌手，各自归组（一首歌可能同时出现在多个歌手名下）
         val map = mutableMapOf<String, MutableList<Song>>()
         songs.forEach { song ->
             splitArtists(song.artist.ifBlank { "Unknown Artist" }).forEach { name ->
                 map.getOrPut(name) { mutableListOf() }.add(song)
             }
         }
-        map.mapValues { (_, v) -> v to v.firstOrNull()?.albumArtUri.orEmpty() }
+        map.mapValues { (_, v) -> v }
             .toList()
             .sortedBy { it.first.lowercase() }
     }
 
-    val indexLetters = remember(allArtists) {
+    // 搜索过滤（按歌手名）
+    val filteredArtists = remember(allArtists, searchQuery) {
+        if (searchQuery.isBlank()) allArtists
+        else allArtists.filter { (name, _) -> name.contains(searchQuery, ignoreCase = true) }
+    }
+
+    val indexLetters = remember(filteredArtists) {
         val seen = mutableSetOf<Char>()
         val result = mutableListOf<String>()
-        allArtists.forEach { (name, _) ->
+        filteredArtists.forEach { (name, _) ->
             val ch = PinyinUtils.getInitial(name)
             if (seen.add(ch)) result += ch.toString()
         }
         result.sortedBy { it[0] }.toList()
     }
 
-    val grouped = remember(allArtists) {
-        allArtists.groupBy { PinyinUtils.getInitial(it.first).toString() }
+    val grouped = remember(filteredArtists) {
+        filteredArtists.groupBy { PinyinUtils.getInitial(it.first).toString() }
             .toSortedMap()
     }
 
@@ -97,10 +101,38 @@ fun ArtistListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.title_artists), color = MaterialTheme.colorScheme.onBackground) },
+                title = {
+                    if (isSearching) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = { Text(stringResource(R.string.songlist_search_placeholder), color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color.Transparent,
+                                unfocusedBorderColor = Color.Transparent,
+                                cursorColor = MaterialTheme.colorScheme.tertiary
+                            )
+                        )
+                    } else {
+                        Text(stringResource(R.string.title_artists), color = MaterialTheme.colorScheme.onBackground)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                },
+                actions = {
+                    if (isSearching) {
+                        IconButton(onClick = { isSearching = false; searchQuery = "" }) {
+                            Icon(Icons.Default.Close, stringResource(R.string.songlist_close_search), tint = MaterialTheme.colorScheme.onSurface)
+                        }
+                    } else {
+                        IconButton(onClick = { isSearching = true }) {
+                            Icon(Icons.Default.Search, stringResource(R.string.action_search), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
@@ -129,11 +161,10 @@ fun ArtistListScreen(
                         )
                     } else {
                         val (artistName, artistData) = data as Pair<String, Any>
-                        val pair = artistData as Pair<List<Song>, String>
+                        val songsList = artistData as List<Song>
                         ArtistItem(
                             artistName = artistName,
-                            songCount = pair.first.size,
-                            coverUri = pair.second,
+                            songCount = songsList.size,
                             onClick = { onArtistClick(artistName) }
                         )
                     }
@@ -162,7 +193,6 @@ fun ArtistListScreen(
 private fun ArtistItem(
     artistName: String,
     songCount: Int,
-    coverUri: String,
     onClick: () -> Unit
 ) {
     Row(
@@ -173,28 +203,11 @@ private fun ArtistItem(
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // Circular artist avatar with cover or default
-        Box(
-            modifier = Modifier.size(52.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
-            contentAlignment = Alignment.Center
-        ) {
-            // DefaultCoverImage underneath, actual cover on top
-            DefaultCoverImage(
-                songTitle = artistName,
-                songArtist = "",
-                modifier = Modifier.fillMaxSize(),
-                shape = CircleShape
-            )
-            if (coverUri.isNotBlank()) {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(coverUri).size(256).crossfade(true).build(),
-                    contentDescription = artistName,
-                    modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop
-                )
-            }
-        }
+        // 首字母炫彩头像：渐变 + 玻璃高光 + 描边（不用封面）
+        ArtistAvatar(
+            artistName = artistName,
+            size = 52.dp
+        )
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(

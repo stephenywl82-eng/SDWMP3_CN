@@ -120,6 +120,8 @@
 <string name="settings_open_failed">打开失败: %1$s</string>
 <string name="settings_about">关于</string>
 <string name="settings_about_name">Moto Music Premium</string>
+<string name="settings_dev_group">开发者沟通群</string>
+<string name="settings_dev_group_desc">点击加入我们的 Telegram 社区</string>
 <string name="songlist_search_placeholder">搜索...</string>
 <string name="songlist_song_count">%1$d 首歌曲</string>
 <string name="songlist_close_details">关闭详情</string>

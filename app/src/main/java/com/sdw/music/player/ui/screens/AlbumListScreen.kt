@@ -11,6 +11,8 @@ import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -43,9 +45,18 @@ fun AlbumListScreen(
     onAlbumClick: (String) -> Unit,
     onNavigateBack: () -> Unit
 ) {
+    var searchQuery by remember { mutableStateOf("") }
+    var isSearching by remember { mutableStateOf(false) }
+
+    // 搜索过滤（按专辑名）
+    val filteredAlbums = remember(albums, searchQuery) {
+        if (searchQuery.isBlank()) albums
+        else albums.filter { (name, _) -> name.contains(searchQuery, ignoreCase = true) }
+    }
+
     // Sort by pinyin, then group by first letter
-    val grouped = remember(albums) {
-        albums.sortedBy { (name, _) -> name.lowercase() }
+    val grouped = remember(filteredAlbums) {
+        filteredAlbums.sortedBy { (name, _) -> name.lowercase() }
             .groupBy { PinyinUtils.getInitial(it.first).toString() }
             .toSortedMap()
     }
@@ -81,10 +92,38 @@ fun AlbumListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(stringResource(R.string.title_albums), color = MaterialTheme.colorScheme.onBackground) },
+                title = {
+                    if (isSearching) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            placeholder = { Text(stringResource(R.string.songlist_search_placeholder), color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color.Transparent,
+                                unfocusedBorderColor = Color.Transparent,
+                                cursorColor = MaterialTheme.colorScheme.tertiary
+                            )
+                        )
+                    } else {
+                        Text(stringResource(R.string.title_albums), color = MaterialTheme.colorScheme.onBackground)
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    }
+                },
+                actions = {
+                    if (isSearching) {
+                        IconButton(onClick = { isSearching = false; searchQuery = "" }) {
+                            Icon(Icons.Default.Close, stringResource(R.string.songlist_close_search), tint = MaterialTheme.colorScheme.onSurface)
+                        }
+                    } else {
+                        IconButton(onClick = { isSearching = true }) {
+                            Icon(Icons.Default.Search, stringResource(R.string.action_search), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
                     }
                 },
                 colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)

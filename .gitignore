@@ -33,6 +33,10 @@ Thumbs.db
 # !app/build/outputs/mapping/
 gradle/wrapper/gradle.zip
 
+# --- Local native build & backup scratch (never commit) ---
+cpp_build_v83/
+backup_*/
+
 # --- Root-level scratch/debug files (added for clean git backup) ---
 *.txt
 *.log

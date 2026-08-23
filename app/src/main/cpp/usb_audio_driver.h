@@ -129,6 +129,23 @@ public:
     bool isDspEnabled() const { return dspEqEnabled_.load(std::memory_order_acquire); }
     void setDspEq5Band(const float* gainsDb, const float* freqsHz, int len);
     void resetDspEq5Band();
+    // 【V8.2】MSEB 10-band subjective EQ（独立实例，与 Oboe 共享 Biquad + crossfade）
+    void setMseb10Band(const float* gainsDb, const float* freqsHz, const float* qs, int len);
+    void resetMseb10Band();
+    // 【V8.3】AutoEQ 10-band 耳机修正（任意频点 + PK/HS/LS 类型），与 MSEB 并存叠加（打底）。
+    void setAutoEq10Band(const float* gainsDb, const float* freqsHz, const float* qs,
+                         const int* types, int len, float preampDb);
+    void resetAutoEq();
+    // 【V8.3】M/S 声场（跨声道矩阵）
+    void setMsStage(float soundstage, float imaging);
+    void resetMsStage();
+    // 【V8.3】瞬态整形（impulseResponse 维度映射，-1..+1）
+    void setTransient(float amount);
+    void resetTransient();
+    // 【V8.3】动态压缩（master bus 向下压缩器，stereo-linked）
+    void setCompressorEnabled(bool en);
+    void setCompressorParams(float thresholdDb, float ratio, float attackMs, float releaseMs, float makeupDb);
+    void resetCompressor();
     // Kotlin 层注入 Salt-verified 的 FU 参数（通用探测失败时兜底，quirk 表已上移到 DacProfile.kt）
     void setFeatureUnitOverride(int unitId, int channel, int channels,
                                 float minDb, float maxDb, float resDb);
@@ -216,6 +233,62 @@ private:
     BiquadFilter dspEqBand3L_, dspEqBand3R_;
     BiquadFilter dspEqBand4L_, dspEqBand4R_;
     BiquadFilter dspEqBand5L_, dspEqBand5R_;
+    // 【V8.2】MSEB 10-band instances（独立于 5 段图形 EQ）
+    BiquadFilter msebBand1L_, msebBand1R_;
+    BiquadFilter msebBand2L_, msebBand2R_;
+    BiquadFilter msebBand3L_, msebBand3R_;
+    BiquadFilter msebBand4L_, msebBand4R_;
+    BiquadFilter msebBand5L_, msebBand5R_;
+    BiquadFilter msebBand6L_, msebBand6R_;
+    BiquadFilter msebBand7L_, msebBand7R_;
+    BiquadFilter msebBand8L_, msebBand8R_;
+    BiquadFilter msebBand9L_, msebBand9R_;
+    BiquadFilter msebBand10L_, msebBand10R_;
+    std::atomic<bool> mseb10Enabled_{false};
+    float msebPreGain_ = 1.0f;
+    // 【V8.3】上次提交的 10 段增益，用于跳过未变化 band 的 crossfade。
+    float lastMsebGains_[10] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f,
+                                 999.0f, 999.0f, 999.0f, 999.0f, 999.0f };
+    // 【V8.3】AutoEQ 10-band instances（任意频点，独立于 MSEB / 5段图形 EQ）。
+    BiquadFilter autoEqBand1L_, autoEqBand1R_;
+    BiquadFilter autoEqBand2L_, autoEqBand2R_;
+    BiquadFilter autoEqBand3L_, autoEqBand3R_;
+    BiquadFilter autoEqBand4L_, autoEqBand4R_;
+    BiquadFilter autoEqBand5L_, autoEqBand5R_;
+    BiquadFilter autoEqBand6L_, autoEqBand6R_;
+    BiquadFilter autoEqBand7L_, autoEqBand7R_;
+    BiquadFilter autoEqBand8L_, autoEqBand8R_;
+    BiquadFilter autoEqBand9L_, autoEqBand9R_;
+    BiquadFilter autoEqBand10L_, autoEqBand10R_;
+    std::atomic<bool> autoEqEnabled_{false};
+    float autoEqPreGain_ = 1.0f;
+    float curAutoEqPreGain_ = 1.0f;
+    float lastAutoEqGains_[10] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f,
+                                   999.0f, 999.0f, 999.0f, 999.0f, 999.0f };
+    // 【V8.3】M/S 声场（跨声道矩阵）
+    std::atomic<bool> msEnabled_{false};
+    std::atomic<float> msWidth_{1.0f};
+    std::atomic<float> msCenter_{1.0f};
+    float curMsWidth_ = 1.0f;
+    float curMsCenter_ = 1.0f;
+    // 【V8.3】瞬态整形（时域，非 EQ）——双时间常数包络跟随器。
+    std::atomic<float> transientAmount_{0.0f};
+    std::atomic<bool> transientEnabled_{false};
+    float curTransientAmount_ = 0.0f;
+    float tsFastEnvL_ = 0.0f, tsSlowEnvL_ = 0.0f;
+    float tsFastEnvR_ = 0.0f, tsSlowEnvR_ = 0.0f;
+    // 【V8.3】动态压缩（master bus 向下压缩器，stereo-linked）
+    std::atomic<bool> compressorEnabled_{false};
+    float compThresholdDb_ = -18.0f;
+    float compRatio_ = 2.0f;
+    float compAttackMs_ = 10.0f;
+    float compReleaseMs_ = 120.0f;
+    float compMakeupDb_ = 0.0f;
+    float compAttackCoeff_ = 0.0f;
+    float compReleaseCoeff_ = 0.0f;
+    float compMakeupLinear_ = 1.0f;
+    float compEnvDb_ = -120.0f;
+    float compGrDb_ = 0.0f;
     std::atomic<int> writePos_{0};
     std::atomic<int> readPos_{0};
 

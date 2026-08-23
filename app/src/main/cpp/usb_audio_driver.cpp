@@ -458,7 +458,8 @@ void UsbAudioDriver::setDspEq5Band(const float* gainsDb, const float* freqsHz, i
         float gainDb = (i < len) ? gainsDb[i] : 0.0f;
         float freqHz = (freqsHz && i < len) ? freqsHz[i] : kDacEq5BandDefaultFreqs[i];
         float Q = 1.4f;
-        bandsL[i]->reset(); bandsR[i]->reset();
+        // 【V8.2】no reset() on live gain change — process() SMOOTH ramp handles the
+        // transition; clearing IIR state causes a click (哗哗声 on slider drag).
         if (fabsf(gainDb) < 0.1f) {
             bandsL[i]->setFlat(); bandsR[i]->setFlat();
         } else {
@@ -488,6 +489,191 @@ void UsbAudioDriver::resetDspEq5Band() {
     LOGI("DAC EQ 5-band reset (flat)");
 }
 
+// 【V8.2】MSEB 10-band subjective EQ — independent instances, crossfade on coeff change.
+void UsbAudioDriver::setMseb10Band(const float* gainsDb, const float* freqsHz, const float* qs, int len) {
+    if (!gainsDb || len <= 0) return;
+    std::lock_guard<std::mutex> eqLock(dspEqMutex_);
+    float sr = static_cast<float>(sampleRate_ > 0 ? sampleRate_ : 48000);
+
+    BiquadFilter* bandsL[10] = { &msebBand1L_, &msebBand2L_, &msebBand3L_, &msebBand4L_, &msebBand5L_,
+                                 &msebBand6L_, &msebBand7L_, &msebBand8L_, &msebBand9L_, &msebBand10L_ };
+    BiquadFilter* bandsR[10] = { &msebBand1R_, &msebBand2R_, &msebBand3R_, &msebBand4R_, &msebBand5R_,
+                                 &msebBand6R_, &msebBand7R_, &msebBand8R_, &msebBand9R_, &msebBand10R_ };
+
+    for (int i = 0; i < 10; i++) {
+        float gainDb = (i < len) ? gainsDb[i] : 0.0f;
+        float freqHz = (freqsHz && i < len && freqsHz[i] > 0.0f) ? freqsHz[i] : 1000.0f;
+        float Q = (qs && i < len && qs[i] > 0.0f) ? qs[i] : 1.0f;
+        // 【V8.3】只在增益真正变化时更新 + crossfade；未变 band 跳过。
+        if (fabsf(gainDb - lastMsebGains_[i]) < 0.01f) continue;
+        lastMsebGains_[i] = gainDb;
+        if (fabsf(gainDb) < 0.1f) {
+            bandsL[i]->setFlat(); bandsR[i]->setFlat();
+        } else if (freqHz < 250.0f) {
+            // 【V8.3 ringing 根治】低频段用 low-shelf（无共振峰、无 ringing）。
+            bandsL[i]->setLowShelf(sr, freqHz, gainDb, 0.707f);
+            bandsR[i]->setLowShelf(sr, freqHz, gainDb, 0.707f);
+        } else {
+            bandsL[i]->setPeaking(sr, freqHz, gainDb, Q);
+            bandsR[i]->setPeaking(sr, freqHz, gainDb, Q);
+        }
+    }
+
+    // 【V8.3 去限幅后 preGain 裕度】低频 low-shelf（32/60/120Hz）在 30Hz 以下几乎全部叠加，
+    // 只用最大单 band 增益补偿会低估级联总增益，密集鼓声满幅时叠加超 1.0 触发最终硬限幅。
+    // 按正增益总和补偿（保守，避免级联削波）。
+    float sumPosGain = 0.0f;
+    for (int i = 0; i < len && i < 10; i++) if (gainsDb[i] > 0.0f) sumPosGain += gainsDb[i];
+    msebPreGain_ = powf(10.0f, (-sumPosGain) / 20.0f);
+
+    mseb10Enabled_.store(true, std::memory_order_release);
+    LOGI("DAC MSEB 10-band applied: [%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f] dB preGain=%.3f",
+         (len > 0 ? gainsDb[0] : 0.0f), (len > 1 ? gainsDb[1] : 0.0f),
+         (len > 2 ? gainsDb[2] : 0.0f), (len > 3 ? gainsDb[3] : 0.0f),
+         (len > 4 ? gainsDb[4] : 0.0f), (len > 5 ? gainsDb[5] : 0.0f),
+         (len > 6 ? gainsDb[6] : 0.0f), (len > 7 ? gainsDb[7] : 0.0f),
+         (len > 8 ? gainsDb[8] : 0.0f), (len > 9 ? gainsDb[9] : 0.0f), msebPreGain_);
+}
+
+void UsbAudioDriver::resetMseb10Band() {
+    std::lock_guard<std::mutex> eqLock(dspEqMutex_);
+    BiquadFilter* bandsL[10] = { &msebBand1L_, &msebBand2L_, &msebBand3L_, &msebBand4L_, &msebBand5L_,
+                                 &msebBand6L_, &msebBand7L_, &msebBand8L_, &msebBand9L_, &msebBand10L_ };
+    BiquadFilter* bandsR[10] = { &msebBand1R_, &msebBand2R_, &msebBand3R_, &msebBand4R_, &msebBand5R_,
+                                 &msebBand6R_, &msebBand7R_, &msebBand8R_, &msebBand9R_, &msebBand10R_ };
+    for (int i = 0; i < 10; i++) { bandsL[i]->reset(); bandsR[i]->reset(); bandsL[i]->setFlat(); bandsR[i]->setFlat(); }
+    for (int i = 0; i < 10; i++) lastMsebGains_[i] = 999.0f;  // 强制下次重新应用
+    mseb10Enabled_.store(false, std::memory_order_release);
+    msebPreGain_ = 1.0f;
+    LOGI("DAC MSEB 10-band reset (flat)");
+}
+
+// 【V8.3】AutoEQ 10-band 耳机修正 — 任意频点 + PK/HS/LS 类型，与 MSEB 并存叠加（打底）。
+void UsbAudioDriver::setAutoEq10Band(const float* gainsDb, const float* freqsHz, const float* qs,
+                                     const int* types, int len, float preampDb) {
+    if (!gainsDb || len <= 0) return;
+    std::lock_guard<std::mutex> eqLock(dspEqMutex_);
+    float sr = static_cast<float>(sampleRate_ > 0 ? sampleRate_ : 48000);
+
+    BiquadFilter* bandsL[10] = { &autoEqBand1L_, &autoEqBand2L_, &autoEqBand3L_, &autoEqBand4L_, &autoEqBand5L_,
+                                 &autoEqBand6L_, &autoEqBand7L_, &autoEqBand8L_, &autoEqBand9L_, &autoEqBand10L_ };
+    BiquadFilter* bandsR[10] = { &autoEqBand1R_, &autoEqBand2R_, &autoEqBand3R_, &autoEqBand4R_, &autoEqBand5R_,
+                                 &autoEqBand6R_, &autoEqBand7R_, &autoEqBand8R_, &autoEqBand9R_, &autoEqBand10R_ };
+
+    for (int i = 0; i < 10; i++) {
+        float gainDb = (i < len) ? gainsDb[i] : 0.0f;
+        float freqHz = (freqsHz && i < len && freqsHz[i] > 0.0f) ? freqsHz[i] : 1000.0f;
+        float Q = (qs && i < len && qs[i] > 0.0f) ? qs[i] : 1.0f;
+        // 注意：AutoEQ 是任意频点，不能像 MSEB 那样只按增益去重（同增益不同频率会被误跳）。
+        // AutoEQ 切换预设是低频操作（非实时拖滑块），直接全量设置，与 Oboe 侧一致。
+        if (fabsf(gainDb) < 0.01f) {
+            bandsL[i]->setFlat(); bandsR[i]->setFlat();
+            continue;
+        }
+        int type = (types && i < len) ? types[i] : 0;
+        if (type == 1) {  // HighShelf
+            bandsL[i]->setHighShelf(sr, freqHz, gainDb, Q);
+            bandsR[i]->setHighShelf(sr, freqHz, gainDb, Q);
+        } else if (type == 2) {  // LowShelf
+            bandsL[i]->setLowShelf(sr, freqHz, gainDb, Q);
+            bandsR[i]->setLowShelf(sr, freqHz, gainDb, Q);
+        } else {  // Peaking
+            if (freqHz < 250.0f) {
+                // 【V8.3 ringing 根治】低频 Peaking 切 low-shelf（无共振峰、无 ringing）。
+                bandsL[i]->setLowShelf(sr, freqHz, gainDb, 0.707f);
+                bandsR[i]->setLowShelf(sr, freqHz, gainDb, 0.707f);
+            } else {
+                bandsL[i]->setPeaking(sr, freqHz, gainDb, Q);
+                bandsR[i]->setPeaking(sr, freqHz, gainDb, Q);
+            }
+        }
+    }
+
+    autoEqPreGain_ = powf(10.0f, preampDb / 20.0f);
+    autoEqEnabled_.store(true, std::memory_order_release);
+    LOGI("DAC AutoEQ 10-band applied: preamp=%.1fdB", preampDb);
+}
+
+void UsbAudioDriver::resetAutoEq() {
+    std::lock_guard<std::mutex> eqLock(dspEqMutex_);
+    BiquadFilter* bandsL[10] = { &autoEqBand1L_, &autoEqBand2L_, &autoEqBand3L_, &autoEqBand4L_, &autoEqBand5L_,
+                                 &autoEqBand6L_, &autoEqBand7L_, &autoEqBand8L_, &autoEqBand9L_, &autoEqBand10L_ };
+    BiquadFilter* bandsR[10] = { &autoEqBand1R_, &autoEqBand2R_, &autoEqBand3R_, &autoEqBand4R_, &autoEqBand5R_,
+                                 &autoEqBand6R_, &autoEqBand7R_, &autoEqBand8R_, &autoEqBand9R_, &autoEqBand10R_ };
+    for (int i = 0; i < 10; i++) { bandsL[i]->reset(); bandsR[i]->reset(); bandsL[i]->setFlat(); bandsR[i]->setFlat(); }
+    for (int i = 0; i < 10; i++) lastAutoEqGains_[i] = 999.0f;  // 强制下次重新应用
+    autoEqEnabled_.store(false, std::memory_order_release);
+    autoEqPreGain_ = 1.0f;
+    curAutoEqPreGain_ = 1.0f;
+    LOGI("DAC AutoEQ 10-band reset (flat)");
+}
+
+// 【V8.3】M/S 声场 — 跨声道矩阵（soundstage -> S 宽度，imaging -> M 中心）。
+void UsbAudioDriver::setMsStage(float soundstage, float imaging) {
+    float width = 1.0f + soundstage * 0.08f;
+    float center = 1.0f + imaging * 0.06f;
+    if (width < 0.1f) width = 0.1f;
+    if (center < 0.1f) center = 0.1f;
+    msWidth_.store(width, std::memory_order_release);
+    msCenter_.store(center, std::memory_order_release);
+    bool active = (fabsf(soundstage) > 0.01f || fabsf(imaging) > 0.01f);
+    msEnabled_.store(active, std::memory_order_release);
+    LOGI("DAC M/S stage: width=%.3f center=%.3f enabled=%s", width, center, active ? "YES" : "NO");
+}
+
+void UsbAudioDriver::resetMsStage() {
+    msWidth_.store(1.0f, std::memory_order_release);
+    msCenter_.store(1.0f, std::memory_order_release);
+    msEnabled_.store(false, std::memory_order_release);
+    LOGI("DAC M/S stage reset (unity)");
+}
+
+// 【V8.3】瞬态整形——impulseResponse 维度映射（amount=-1..+1）。
+void UsbAudioDriver::setTransient(float amount) {
+    float a = amount;
+    if (a > 1.0f) a = 1.0f;
+    if (a < -1.0f) a = -1.0f;
+    transientAmount_.store(a, std::memory_order_release);
+    bool active = fabsf(a) > 0.001f;
+    transientEnabled_.store(active, std::memory_order_release);
+    if (!active) { tsFastEnvL_ = tsSlowEnvL_ = tsFastEnvR_ = tsSlowEnvR_ = 0.0f; }
+    LOGI("DAC transient shaper: amount=%.3f enabled=%s", a, active ? "YES" : "NO");
+}
+
+void UsbAudioDriver::resetTransient() {
+    transientAmount_.store(0.0f, std::memory_order_release);
+    transientEnabled_.store(false, std::memory_order_release);
+    tsFastEnvL_ = tsSlowEnvL_ = tsFastEnvR_ = tsSlowEnvR_ = 0.0f;
+    LOGI("DAC transient shaper reset");
+}
+
+// 【V8.3】动态压缩——master bus 向下压缩器（stereo-linked，dB 域峰值检测 + 软拐点）。
+void UsbAudioDriver::setCompressorEnabled(bool en) {
+    compressorEnabled_.store(en, std::memory_order_release);
+    if (!en) resetCompressor();
+    LOGI("DAC compressor %s", en ? "enabled" : "disabled");
+}
+
+void UsbAudioDriver::setCompressorParams(float thresholdDb, float ratio, float attackMs, float releaseMs, float makeupDb) {
+    compThresholdDb_ = thresholdDb;
+    compRatio_ = ratio < 1.0f ? 1.0f : ratio;
+    compAttackMs_ = attackMs < 0.1f ? 0.1f : attackMs;
+    compReleaseMs_ = releaseMs < 1.0f ? 1.0f : releaseMs;
+    compMakeupDb_ = makeupDb;
+    float sr = (float)(sampleRate_ > 0 ? sampleRate_ : 48000);
+    compAttackCoeff_ = expf(-1.0f / (sr * compAttackMs_ / 1000.0f));
+    compReleaseCoeff_ = expf(-1.0f / (sr * compReleaseMs_ / 1000.0f));
+    compMakeupLinear_ = powf(10.0f, compMakeupDb_ / 20.0f);
+    LOGI("DAC compressor params: thr=%.1f ratio=%.1f atk=%.1f rel=%.1f makeup=%.1f",
+         thresholdDb, ratio, attackMs, releaseMs, makeupDb);
+}
+
+void UsbAudioDriver::resetCompressor() {
+    compEnvDb_ = -120.0f;
+    compGrDb_ = 0.0f;
+    LOGI("DAC compressor reset");
+}
+
 // 鈹€鈹€ pushPcm 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
@@ -498,6 +684,13 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
     int totalWritten = 0;
     const float* src = data;
     int remaining = frameCount;
+
+    // 【V8.3】瞬态整形包络系数（预计算，基于当前采样率）。
+    const float tsSr = (float)sampleRate_;
+    const float tsAtkFast = 1.0f - expf(-1.0f / (tsSr * 0.001f));   // 1ms
+    const float tsRelFast = 1.0f - expf(-1.0f / (tsSr * 0.015f));   // 15ms
+    const float tsAtkSlow = 1.0f - expf(-1.0f / (tsSr * 0.015f));   // 15ms
+    const float tsRelSlow = 1.0f - expf(-1.0f / (tsSr * 0.080f));   // 80ms
 
     while (remaining > 0) {
         int wp = writePos_.load(std::memory_order_acquire);
@@ -512,41 +705,128 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
         }
 
         int chunk = remaining < avail ? remaining : avail;
-        int samples = chunk * 2; // stereo
         const int mask = kRingFrames * 2 - 1; // power-of-2 assumption
 
-        // DAC-path 5-band EQ (MSEB / graphic EQ), same Biquad algo as Oboe.
-        // Disabled => pure pass-through (bit-perfect preserved).
+        // DAC-path EQ（AutoEQ 打底 + MSEB 叠加 / 5段图形），same Biquad algo as Oboe。
+        // Disabled => pure pass-through (bit-perfect preserved)。
+        bool autoEqOn = autoEqEnabled_.load(std::memory_order_acquire);
+        bool msebOn = mseb10Enabled_.load(std::memory_order_acquire);
         bool dspOn = dspEqEnabled_.load(std::memory_order_acquire);
         float targetPreGain = 1.0f;
-        if (dspOn) {
-            std::unique_lock<std::mutex> eqLock(dspEqMutex_, std::try_to_lock);
-            if (eqLock.owns_lock()) targetPreGain = dspEqPreGain_;
-            else dspOn = false;  // coeffs mid-update: skip EQ this chunk, don't block decode thread
+        if (autoEqOn || msebOn || dspOn) {
+            // 【V8.2 hiby】blocking lock: setters hold dspEqMutex_ only for
+            // microseconds of pure math, so the decode thread can safely wait for
+            // coeff commit instead of dropping EQ for a whole chunk (which caused
+            // a processed<->pass-through timbre step = audible crackle).
+            std::lock_guard<std::mutex> eqLock(dspEqMutex_);
+            // 各开模块的 preGain 相乘（都是 ≤1 衰减系数，叠加后一起补偿）。
+            targetPreGain = 1.0f;
+            if (autoEqOn) targetPreGain *= autoEqPreGain_;
+            if (msebOn)   targetPreGain *= msebPreGain_;
+            if (dspOn && !msebOn) targetPreGain *= dspEqPreGain_;
         }
 
         // [zipper-noise fix] fade pre-gain toward target per-sample (same SMOOTH as
-        // BiquadFilter). MSEB slider changes (dspEqPreGain_ jump) no longer step the
+        // BiquadFilter). MSEB slider changes (preGain jump) no longer step the
         // output level instantly -> eliminates the crackle/hiss heard while adjusting live.
         const float PREGAIN_SMOOTH = 0.05f;
         float preGain = curDspPreGain_;
-        for (int i = 0; i < samples; ++i) {
+        bool msOn = msEnabled_.load(std::memory_order_acquire);
+        float msW = curMsWidth_, msC = curMsCenter_;
+        float msTargetW = msWidth_.load(std::memory_order_acquire);
+        float msTargetC = msCenter_.load(std::memory_order_acquire);
+        for (int f = 0; f < chunk; ++f) {
             preGain += (targetPreGain - preGain) * PREGAIN_SMOOTH;
-            int idx = ((wp * 2) + i) & mask;
-            float s = src[i];
-            if (dspOn) {
-                if ((i & 1) == 0) {
-                    s = dspEqBand5L_.process(dspEqBand4L_.process(dspEqBand3L_.process(dspEqBand2L_.process(dspEqBand1L_.process(s * preGain)))));
-                } else {
-                    s = dspEqBand5R_.process(dspEqBand4R_.process(dspEqBand3R_.process(dspEqBand2R_.process(dspEqBand1R_.process(s * preGain)))));
+            float sL = src[f * 2] * preGain;
+            float sR = src[f * 2 + 1] * preGain;
+
+            // AutoEQ 打底（耳机修正，任意频点），可与其他并存叠加。
+            if (autoEqOn) {
+                sL = autoEqBand1L_.process(sL); sL = autoEqBand2L_.process(sL); sL = autoEqBand3L_.process(sL); sL = autoEqBand4L_.process(sL); sL = autoEqBand5L_.process(sL);
+                sL = autoEqBand6L_.process(sL); sL = autoEqBand7L_.process(sL); sL = autoEqBand8L_.process(sL); sL = autoEqBand9L_.process(sL); sL = autoEqBand10L_.process(sL);
+                sR = autoEqBand1R_.process(sR); sR = autoEqBand2R_.process(sR); sR = autoEqBand3R_.process(sR); sR = autoEqBand4R_.process(sR); sR = autoEqBand5R_.process(sR);
+                sR = autoEqBand6R_.process(sR); sR = autoEqBand7R_.process(sR); sR = autoEqBand8R_.process(sR); sR = autoEqBand9R_.process(sR); sR = autoEqBand10R_.process(sR);
+            }
+            // MSEB 叠加（主观调音）——优先于 5段图形 EQ。
+            if (msebOn) {
+                sL = msebBand1L_.process(sL);
+                sL = msebBand2L_.process(sL); sL = msebBand3L_.process(sL); sL = msebBand4L_.process(sL); sL = msebBand5L_.process(sL);
+                sL = msebBand6L_.process(sL); sL = msebBand7L_.process(sL); sL = msebBand8L_.process(sL); sL = msebBand9L_.process(sL); sL = msebBand10L_.process(sL);
+                sR = msebBand1R_.process(sR);
+                sR = msebBand2R_.process(sR); sR = msebBand3R_.process(sR); sR = msebBand4R_.process(sR); sR = msebBand5R_.process(sR);
+                sR = msebBand6R_.process(sR); sR = msebBand7R_.process(sR); sR = msebBand8R_.process(sR); sR = msebBand9R_.process(sR); sR = msebBand10R_.process(sR);
+            } else if (dspOn) {
+                sL = dspEqBand5L_.process(dspEqBand4L_.process(dspEqBand3L_.process(dspEqBand2L_.process(dspEqBand1L_.process(sL)))));
+                sR = dspEqBand5R_.process(dspEqBand4R_.process(dspEqBand3R_.process(dspEqBand2R_.process(dspEqBand1R_.process(sR)))));
+            }
+
+            // 【V8.3】M/S 声场（跨声道矩阵，仅当开启）——独立于 EQ，可单独开关。
+            if (msOn) {
+                msW += (msTargetW - msW) * PREGAIN_SMOOTH;
+                msC += (msTargetC - msC) * PREGAIN_SMOOTH;
+                float mid = (sL + sR) * 0.5f;
+                float side = (sL - sR) * 0.5f;
+                sL = mid * msC + side * msW;
+                sR = mid * msC - side * msW;
+            }
+
+            // 【V8.3】瞬态整形（时域，双时间常数包络跟随器）——M/S 之后、写入 ring 之前。
+            if (transientEnabled_.load(std::memory_order_acquire)) {
+                curTransientAmount_ += (transientAmount_.load(std::memory_order_acquire) - curTransientAmount_) * PREGAIN_SMOOTH;
+                float amt = curTransientAmount_;
+                if (fabsf(amt) > 0.001f) {
+                    float aL = fabsf(sL);
+                    tsFastEnvL_ += (aL - tsFastEnvL_) * (aL > tsFastEnvL_ ? tsAtkFast : tsRelFast);
+                    tsSlowEnvL_ += (aL - tsSlowEnvL_) * (aL > tsSlowEnvL_ ? tsAtkSlow : tsRelSlow);
+                    float transL = tsFastEnvL_ - tsSlowEnvL_;
+                    float gainL = 1.0f + amt * transL * 4.0f;
+                    if (gainL < 0.05f) gainL = 0.05f;
+                    if (gainL > 4.0f) gainL = 4.0f;
+                    sL *= gainL;
+                    float aR = fabsf(sR);
+                    tsFastEnvR_ += (aR - tsFastEnvR_) * (aR > tsFastEnvR_ ? tsAtkFast : tsRelFast);
+                    tsSlowEnvR_ += (aR - tsSlowEnvR_) * (aR > tsSlowEnvR_ ? tsAtkSlow : tsRelSlow);
+                    float transR = tsFastEnvR_ - tsSlowEnvR_;
+                    float gainR = 1.0f + amt * transR * 4.0f;
+                    if (gainR < 0.05f) gainR = 0.05f;
+                    if (gainR > 4.0f) gainR = 4.0f;
+                    sR *= gainR;
                 }
             }
-            ringBuffer_[idx] = s;
+
+            // 【V8.3】动态压缩（master bus，stereo-linked）——瞬态整形之后、写 ring 之前。
+            if (compressorEnabled_.load(std::memory_order_acquire)) {
+                float peak = fmaxf(fabsf(sL), fabsf(sR));
+                float peakDb = 20.0f * log10f(peak + 1e-12f);
+                if (peakDb > compEnvDb_) {
+                    compEnvDb_ += (1.0f - compAttackCoeff_) * (peakDb - compEnvDb_);
+                } else {
+                    compEnvDb_ += (1.0f - compReleaseCoeff_) * (peakDb - compEnvDb_);
+                }
+                float over = compEnvDb_ - compThresholdDb_;
+                float halfKnee = 3.0f; // knee=6dB
+                float slope = 1.0f - 1.0f / compRatio_;
+                float targetGr;
+                if (over <= -halfKnee) targetGr = 0.0f;
+                else if (over >= halfKnee) targetGr = over * slope;
+                else { float t = over + halfKnee; targetGr = (t * t) / 12.0f * slope; }
+                if (targetGr < compGrDb_) compGrDb_ += (1.0f - compAttackCoeff_) * (targetGr - compGrDb_);
+                else compGrDb_ += (1.0f - compReleaseCoeff_) * (targetGr - compGrDb_);
+                float g = powf(10.0f, -compGrDb_ / 20.0f) * compMakeupLinear_;
+                sL *= g;
+                sR *= g;
+            }
+
+            int base = (wp * 2) + f * 2;
+            ringBuffer_[base & mask] = sL;
+            ringBuffer_[(base + 1) & mask] = sR;
         }
         curDspPreGain_ = preGain;
+        curMsWidth_ = msW;
+        curMsCenter_ = msC;
 
         writePos_.store((wp + chunk) % kRingFrames, std::memory_order_release);
-        src += samples;
+        src += chunk * 2;
         remaining -= chunk;
         totalWritten += chunk;
     }
@@ -1078,7 +1358,11 @@ void UsbAudioDriver::parseSupportedRates() {
     }
 
     if (supportedRates_.empty()) {
-        supportedRates_ = "only 48000"; // default assumption
+        // UAC2: rates live in Clock Source (not FORMAT_TYPE). If firmware doesn't
+        // expose GET_RANGE, we can't read the real list — be honest instead of
+        // pretending "only 48000" (which misled audiophiles into thinking the
+        // DAC only does 48k). Actual rate switching still works via SET_CUR.
+        supportedRates_ = isUac2_ ? "unknown (clock ranges not exposed)" : "only 48000";
     }
 
     LOGI("Supported sample rates: %s", supportedRates_.c_str());
@@ -1312,6 +1596,29 @@ void UsbAudioDriver::parseClockRanges() {
     clockRanges_.clear();
     if (fd_ < 0) return;
 
+    // UAC1: no clock source entity — sample rates live in FORMAT_TYPE tSamFreq,
+    // already parsed into supportedRates_ by parseSupportedRates(). Build
+    // single-point ranges from them (exclude placeholder strings).
+    if (!isUac2_) {
+        std::string rates = supportedRates_;
+        if (!rates.empty() && rates != "unknown (cannot read descriptor)" && rates != "only 48000") {
+            std::string token;
+            for (size_t i = 0; i <= rates.size(); ++i) {
+                if (i == rates.size() || rates[i] == ' ') {
+                    if (!token.empty()) {
+                        int rate = atoi(token.c_str());
+                        if (rate > 0) clockRanges_.push_back({rate, rate, 0, 0});
+                        token.clear();
+                    }
+                } else if (rates[i] >= '0' && rates[i] <= '9') {
+                    token += rates[i];
+                }
+            }
+        }
+        LOGI("parseClockRanges: %zu ranges (UAC1 tSamFreq)", clockRanges_.size());
+        return;
+    }
+
     // Gather unique clock IDs from candidates
     std::vector<int> clockIds;
     for (auto& c : altCandidates_) {
@@ -1363,27 +1670,11 @@ void UsbAudioDriver::parseClockRanges() {
         }
     }
 
-    if (clockRanges_.empty()) {
-        LOGW("getRange empty, using tSamFreq fallback");
-        std::string rates = supportedRates_;
-        if (!rates.empty() && rates != "unknown (cannot read descriptor)") {
-            int cid = clockIds.empty() ? 0 : clockIds[0];
-            std::string token;
-            for (size_t i = 0; i <= rates.size(); ++i) {
-                if (i == rates.size() || rates[i] == ' ') {
-                    if (!token.empty()) {
-                        int rate = atoi(token.c_str());
-                        if (rate > 0) clockRanges_.push_back({rate, rate, 0, cid});
-                        token.clear();
-                    }
-                } else if (rates[i] >= '0' && rates[i] <= '9') {
-                    token += rates[i];
-                }
-            }
-        }
-    }
-
-    LOGI("parseClockRanges: %zu ranges", clockRanges_.size());
+    // UAC2: no tSamFreq fallback. If GET_RANGE fails (firmware like TTGK that
+    // doesn't implement GET_MIN/GET_MAX), leave clockRanges_ empty so
+    // selectAltForRate skips the rate gate and picks alt by subslot; the rate
+    // is then switched via SET_CUR in start().
+    LOGI("parseClockRanges: %zu ranges (UAC2 clock source)", clockRanges_.size());
 }
 
 // ===========================================================================

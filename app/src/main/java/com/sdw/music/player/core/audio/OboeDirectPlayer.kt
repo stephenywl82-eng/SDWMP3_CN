@@ -105,13 +105,22 @@ class OboeDirectPlayer(private val context: Context) {
     private external fun nativeIsSineTestRunning(): Boolean          // 【V7.24】
     private external fun nativeGetDspDisabledSamples(): Long        // 【V7.08】DSPClose时的采样数
 
-    // 【V7.0】Cat Mode
-    private external fun nativeSetDspMode(mode: Int)
-    private external fun nativeGetDspMode(): Int
     // 【V7.80】5段图形Equalizer预设 JNI
     private external fun nativeSetDspEq5Band(gainsDb: FloatArray, freqsHz: FloatArray?)
     private external fun nativeResetDspEq5Band()
     private external fun nativeSetMsebActive(active: Boolean)  // 【V7.200】MSEB激活保护标志
+    // 【V8.2】MSEB 10-band subjective EQ JNI
+    private external fun nativeSetMseb10Band(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray)
+    private external fun nativeResetMseb10Band()
+    // 【V8.3】M/S 声场 JNI
+    private external fun nativeSetMsStage(soundstage: Float, imaging: Float)
+    private external fun nativeResetMsStage()
+    // 【V8.3】瞬态整形 JNI
+    private external fun nativeSetTransient(amount: Float)
+    private external fun nativeResetTransient()
+    // 【V8.3】动态压缩 JNI（Master Bus Compressor）
+    private external fun nativeSetCompressorEnabled(enabled: Boolean)
+    private external fun nativeSetCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float)
     // 【V7.86】AutoEQ 10-band JNI
     private external fun nativeSetAutoEq10Band(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray, filterTypes: IntArray, preampDb: Float)
     private external fun nativeResetAutoEq()
@@ -512,49 +521,6 @@ class OboeDirectPlayer(private val context: Context) {
     }
 
     // ============================================================================
-    // 【V7.0】Cat Mode
-    // ============================================================================
-
-    enum class DspMode(val value: Int, val displayName: String) {
-        OFF(-1, "关闭"),
-        STEVEN_SPECIAL(0, "Steven Special"),
-        CAT_MODE(1, "🐱 Cat Mode")
-    }
-
-    /**
-     * Settings DSP Mode
-     * 0 = Steven Special（高音柔和 -6dB，15kHz 极高频保护 -2dB）
-     * 1 = 🐱 Cat Mode（低频 +3dB@250Hz，极高频保护 -2dB@15kHz）
-     */
-    fun setDspMode(mode: DspMode) {
-        try {
-            nativeSetDspMode(mode.value)
-            Log.i(TAG, "DSP Mode set: ${mode.displayName}")
-        } catch (e: Exception) {
-            Log.e(TAG, "setDspMode error: ${e.message}")
-        }
-    }
-
-    fun getDspMode(): DspMode {
-        return try {
-            val v = nativeGetDspMode()
-            when (v) {
-                -1 -> DspMode.OFF
-                1 -> DspMode.CAT_MODE
-                else -> DspMode.STEVEN_SPECIAL
-            }
-        } catch (_: Exception) {
-            DspMode.OFF
-        }
-    }
-
-    /** 快捷切换Cat Mode */
-    fun toggleCatMode() {
-        val current = getDspMode()
-        setDspMode(if (current == DspMode.CAT_MODE) DspMode.STEVEN_SPECIAL else DspMode.CAT_MODE)
-    }
-
-    // ============================================================================
     // 【V7.80】5段图形Equalizer预设
     // ============================================================================
 
@@ -583,6 +549,61 @@ class OboeDirectPlayer(private val context: Context) {
     fun setMsebActive(active: Boolean) {
         try {
             nativeSetMsebActive(active)
+        } catch (_: Exception) {}
+    }
+
+    // 【V8.2】MSEB 10-band subjective EQ（11 主观维度 → 10 biquads，crossfade 无感切换）
+    fun setMseb10Band(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray) {
+        try {
+            nativeSetMseb10Band(gainsDb, freqsHz, qValues)
+            Log.i(TAG, "MSEB 10-band applied")
+        } catch (e: Exception) {
+            Log.e(TAG, "setMseb10Band error: ${e.message}")
+        }
+    }
+
+    fun resetMseb10Band() {
+        try {
+            nativeResetMseb10Band()
+        } catch (_: Exception) {}
+    }
+
+    // 【V8.3】M/S 声场（跨声道矩阵）
+    fun setMsStage(soundstage: Float, imaging: Float) {
+        try {
+            nativeSetMsStage(soundstage, imaging)
+        } catch (_: Exception) {}
+    }
+
+    fun resetMsStage() {
+        try {
+            nativeResetMsStage()
+        } catch (_: Exception) {}
+    }
+
+    // 【V8.3】瞬态整形（impulseResponse 维度映射，-1..+1）
+    fun setTransient(amount: Float) {
+        try {
+            nativeSetTransient(amount)
+        } catch (_: Exception) {}
+    }
+
+    fun resetTransient() {
+        try {
+            nativeResetTransient()
+        } catch (_: Exception) {}
+    }
+
+    // 【V8.3】动态压缩（Master Bus Compressor，独立全局模块）
+    fun setCompressorEnabled(enabled: Boolean) {
+        try {
+            nativeSetCompressorEnabled(enabled)
+        } catch (_: Exception) {}
+    }
+
+    fun setCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float) {
+        try {
+            nativeSetCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb)
         } catch (_: Exception) {}
     }
 
@@ -683,7 +704,6 @@ class OboeDirectPlayer(private val context: Context) {
         val dspDisabled = getDspDisabledSampleCount()
         val prepared = isPrepared
         val playing = isPlaying
-        val mode = getDspMode().displayName
         
         val status = when {
             callbacks == 0L -> "\uD83D\uDD34 Oboe回调从未触发（音频系统异常）"
@@ -702,7 +722,6 @@ class OboeDirectPlayer(private val context: Context) {
             appendLine("  DSPClose采样: $dspDisabled")
             appendLine("  削波比例: ${"%.2f".format(clipRatio * 100)}%")
             appendLine("  准备状态: $prepared, Playing: $playing")
-            appendLine("  DSP模式: $mode")
             appendLine("  Native库加载: $nativeLibLoaded")
             appendLine("  流错误码: ${getStreamError()}")
             appendLine("")

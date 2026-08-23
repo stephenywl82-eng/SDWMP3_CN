@@ -17,6 +17,7 @@
 #include <media/NdkMediaExtractor.h>
 #include <media/NdkMediaFormat.h>
 #include <unistd.h>
+#include "biquad_filter.h"
 #include <sys/stat.h>
 #define LOG_TAG "OboeBridge"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -129,154 +130,7 @@ private:
     std::atomic<int> write_pos_;
     std::atomic<int> read_pos_;
 };
-// ============================================================================
-// Biquad Filter — RBJ Cookbook implementation (double-precision coefficients + states)
-// Supports: High-Shelf, Peaking, Low-Shelf, High-Pass, Low-Pass
-// 【V7.200】State registers (x1/x2/y1/y2) and coefficient storage use double to eliminate
-// 24-bit mantissa quantization noise accumulation across cascaded IIR stages.
-// process() multiply-add core stays float (ARM NEON 4×f32 SIMD), with float↔double
-// conversion at state read/write boundaries — zero throughput penalty on ARMv8-A.
-// Denormal protection is hardware FTZ (FPCR FZ+DN), enabled once in nativeOpen.
-// ==============================================================================
-class BiquadFilter {
-public:
-    enum FilterType {
-        FLAT = 0,
-        HIGH_SHELF = 1,
-        PEAKING = 2,
-        LOW_SHELF = 3,
-        HIGH_PASS = 4,
-        LOW_PASS = 5
-    };
-    void setHighShelf(float sampleRate, float cutoffHz, float dbGain, float Q) {
-        double A = pow(10.0, (double)dbGain / 40.0);
-        double w0 = 2.0 * M_PI * cutoffHz / sampleRate;
-        double cosw0 = cos(w0);
-        double sinw0 = sin(w0);
-        double alpha = sinw0 / (2.0 * Q);
-        double twoSqrtAalpha = 2.0 * sqrt(A) * alpha;
-        double b0 = A * ((A + 1.0) + (A - 1.0) * cosw0 + twoSqrtAalpha);
-        double b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cosw0);
-        double b2 = A * ((A + 1.0) + (A - 1.0) * cosw0 - twoSqrtAalpha);
-        double a0 = (A + 1.0) - (A - 1.0) * cosw0 + twoSqrtAalpha;
-        double a1 =  2.0 * ((A - 1.0) - (A + 1.0) * cosw0);
-        double a2 = (A + 1.0) - (A - 1.0) * cosw0 - twoSqrtAalpha;
-        setCoefficients(b0, b1, b2, a0, a1, a2);
-    }
-    void setPeaking(float sampleRate, float centerHz, float dbGain, float Q) {
-        double A = pow(10.0, (double)dbGain / 40.0);
-        double w0 = 2.0 * M_PI * centerHz / sampleRate;
-        double cosw0 = cos(w0);
-        double sinw0 = sin(w0);
-        double alpha = sinw0 / (2.0 * Q);
-        double b0 = 1.0 + alpha * A;
-        double b1 = -2.0 * cosw0;
-        double b2 = 1.0 - alpha * A;
-        double a0 = 1.0 + alpha / A;
-        double a1 = -2.0 * cosw0;
-        double a2 = 1.0 - alpha / A;
-        setCoefficients(b0, b1, b2, a0, a1, a2);
-    }
-    void setLowShelf(float sampleRate, float cutoffHz, float dbGain, float Q) {
-        double A = pow(10.0, (double)dbGain / 40.0);
-        double w0 = 2.0 * M_PI * cutoffHz / sampleRate;
-        double cosw0 = cos(w0);
-        double sinw0 = sin(w0);
-        double alpha = sinw0 / (2.0 * Q);
-        double twoSqrtAalpha = 2.0 * sqrt(A) * alpha;
-        double b0 = A * ((A + 1.0) - (A - 1.0) * cosw0 + twoSqrtAalpha);
-        double b1 =  2.0 * A * ((A - 1.0) - (A + 1.0) * cosw0);
-        double b2 = A * ((A + 1.0) - (A - 1.0) * cosw0 - twoSqrtAalpha);
-        double a0 = (A + 1.0) + (A - 1.0) * cosw0 + twoSqrtAalpha;
-        double a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cosw0);
-        double a2 = (A + 1.0) + (A - 1.0) * cosw0 - twoSqrtAalpha;
-        setCoefficients(b0, b1, b2, a0, a1, a2);
-    }
-    void setBandPass(float sampleRate, float centerHz, float Q) {
-        double w0 = 2.0 * M_PI * centerHz / sampleRate;
-        double cosw0 = cos(w0);
-        double sinw0 = sin(w0);
-        double alpha = sinw0 / (2.0 * Q);
-        double b0 = alpha;
-        double b1 = 0.0;
-        double b2 = -alpha;
-        double a0 = 1.0 + alpha;
-        double a1 = -2.0 * cosw0;
-        double a2 = 1.0 - alpha;
-        setCoefficients(b0, b1, b2, a0, a1, a2);
-    }
-    void setLowPass(float sampleRate, float cutoffHz, float Q) {
-        double w0 = 2.0 * M_PI * cutoffHz / sampleRate;
-        double cosw0 = cos(w0);
-        double sinw0 = sin(w0);
-        double alpha = sinw0 / (2.0 * Q);
-        double b0 = (1.0 - cosw0) * 0.5;
-        double b1 = 1.0 - cosw0;
-        double b2 = (1.0 - cosw0) * 0.5;
-        double a0 = 1.0 + alpha;
-        double a1 = -2.0 * cosw0;
-        double a2 = 1.0 - alpha;
-        setCoefficients(b0, b1, b2, a0, a1, a2);
-    }
-    void setFlat() {
-        norm_b0_ = 1.0; norm_b1_ = 0.0; norm_b2_ = 0.0;
-        norm_a1_ = 0.0; norm_a2_ = 0.0;
-        cur_b0_ = 1.0; cur_b1_ = 0.0; cur_b2_ = 0.0;
-        cur_a1_ = 0.0; cur_a2_ = 0.0;
-        reset();
-    }
-    // Process single sample — float multiply-add core (NEON 4×f32 SIMD),
-    // double state registers for quantization-noise-free IIR feedback
-    float process(float input) {
-        const float SMOOTH = 0.05f;
-        cur_b0_ += (norm_b0_ - cur_b0_) * (double)SMOOTH;
-        cur_b1_ += (norm_b1_ - cur_b1_) * (double)SMOOTH;
-        cur_b2_ += (norm_b2_ - cur_b2_) * (double)SMOOTH;
-        cur_a1_ += (norm_a1_ - cur_a1_) * (double)SMOOTH;
-        cur_a2_ += (norm_a2_ - cur_a2_) * (double)SMOOTH;
 
-        // Cast coefficients to float for the 5× FMADD pipeline (NEON fmla v0.4s)
-        float b0f = (float)cur_b0_, b1f = (float)cur_b1_, b2f = (float)cur_b2_;
-        float a1f = (float)cur_a1_, a2f = (float)cur_a2_;
-
-        // State read: double → float
-        float x1f = (float)x1_, x2f = (float)x2_;
-        float y1f = (float)y1_, y2f = (float)y2_;
-
-        float output = b0f * input + b1f * x1f + b2f * x2f
-                     - a1f * y1f - a2f * y2f;
-
-        // Clamp to prevent NaN/Inf
-        output = fmaxf(-1.0f, fminf(1.0f, output));
-
-        // State write-back: float → double (preserves full IIR precision)
-        x2_ = (double)x1f;
-        x1_ = (double)input;
-        y2_ = (double)y1f;
-        y1_ = (double)output;
-
-        return output;
-    }
-    void reset() {
-        x1_ = x2_ = y1_ = y2_ = 0.0;
-    }
-    // Coefficients — double storage for 53-bit mantissa precision
-    double norm_b0_ = 1.0, norm_b1_ = 0.0, norm_b2_ = 0.0;
-    double norm_a1_ = 0.0, norm_a2_ = 0.0;
-    double cur_b0_ = 1.0, cur_b1_ = 0.0, cur_b2_ = 0.0;
-    double cur_a1_ = 0.0, cur_a2_ = 0.0;
-    // State — double to eliminate 24-bit mantissa quantization in IIR feedback
-    double x1_ = 0.0, x2_ = 0.0;
-    double y1_ = 0.0, y2_ = 0.0;
-private:
-    void setCoefficients(double b0, double b1, double b2, double a0, double a1, double a2) {
-        norm_b0_ = b0 / a0;
-        norm_b1_ = b1 / a0;
-        norm_b2_ = b2 / a0;
-        norm_a1_ = a1 / a0;
-        norm_a2_ = a2 / a0;
-    }
-};
 // ============================================================================
 // DSP EQ state — 3-band cascade for Steven's Special + Cat Mode
 // Band 1: High-Shelf 8kHz / -6dB / Q=0.707 (smooth rolloff)
@@ -596,6 +450,42 @@ static BiquadFilter g_autoEqBand9L, g_autoEqBand9R;
 static BiquadFilter g_autoEqBand10L, g_autoEqBand10R;
 static std::atomic<bool> g_autoEqEnabled{false};
 static std::atomic<float> g_autoEqPreGain{1.0f};
+// 【V8.2】MSEB 10-band filters — independent instances (MSEB = subjective-dimension
+// mapping engine, 11 dims → 10 biquads). Kept separate from AutoEQ (bands 1-10)
+// and 5-band graphic EQ (bands 1-5) so the three modes never clobber each other.
+static BiquadFilter g_msebBand1L, g_msebBand1R;
+static BiquadFilter g_msebBand2L, g_msebBand2R;
+static BiquadFilter g_msebBand3L, g_msebBand3R;
+static BiquadFilter g_msebBand4L, g_msebBand4R;
+static BiquadFilter g_msebBand5L, g_msebBand5R;
+static BiquadFilter g_msebBand6L, g_msebBand6R;
+static BiquadFilter g_msebBand7L, g_msebBand7R;
+static BiquadFilter g_msebBand8L, g_msebBand8R;
+static BiquadFilter g_msebBand9L, g_msebBand9R;
+static BiquadFilter g_msebBand10L, g_msebBand10R;
+static std::atomic<bool> g_mseb10Enabled{false};
+static std::atomic<float> g_msebPreGain{1.0f};
+// 【V8.3】上次提交的 10 段增益，用于跳过未变化 band 的 crossfade（拖一个滑块
+// 不应让全部 10 个 band 同时双滤波并行，否则处理量翻倍 + 低频相位不对齐 -> 哗哗声）。
+static float g_lastMsebGains[10] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f,
+                                     999.0f, 999.0f, 999.0f, 999.0f, 999.0f };
+// 【V8.3】M/S 声场 — 跨声道处理（非 EQ）：声场宽度 + 结像。
+// M=(L+R)/2 (mid/center), S=(L-R)/2 (side/stereo width).
+// soundstage 映射 S 增益 (width)，imaging 映射 M 增益 (center focus)。
+static std::atomic<float> g_msWidth{1.0f};      // S 增益，默认 1.0（原声场）
+static std::atomic<float> g_msCenter{1.0f};     // M 增益，默认 1.0（原结像）
+static std::atomic<bool> g_msEnabled{false};
+static float g_curMsWidth = 1.0f;   // smoothed width (zipper-noise fix)
+static float g_curMsCenter = 1.0f;  // smoothed center
+// 【V8.3】瞬态整形 — 双时间常数包络跟随器（时域，非 EQ）。
+// fastEnv 跟踪瞬态峰值，slowEnv 跟踪持续电平，transient = fastEnv - slowEnv。
+// amount>0 增强 attack，amount<0 柔化。impulseResponse 维度映射。
+static std::atomic<float> g_transientAmount{0.0f};  // -1..+1（-10..+10 维度 / 10）
+static std::atomic<bool> g_transientEnabled{false};
+static float g_curTransientAmount = 0.0f;  // smoothed（zipper-noise fix）
+// 每声道独立包络状态（L/R）
+static float g_tsFastEnvL = 0.0f, g_tsSlowEnvL = 0.0f;
+static float g_tsFastEnvR = 0.0f, g_tsSlowEnvR = 0.0f;
 static std::atomic<bool> g_dspEqEnabled{false};
 static std::atomic<bool> g_debugSilenceTest{false};  // 【V7.08】强制静音测试标志
 static std::atomic<int64_t> g_playbackPositionUs{0};  // 【V7.67】实际播放位置（微秒），用于nativeGetPositionMs
@@ -621,7 +511,6 @@ static std::atomic<int64_t> g_dspDisabledSampleCount{0};  // 【V7.08】DSP 关�
 static std::atomic<float> g_dspEqPreGain{1.0f};   // 0dB (Steven: EQ是boost不需要pre-atten)
 static float g_curDspPreGain = 1.0f;  // [zipper-noise fix] smoothed pre-gain (mirror DAC path), callback-thread only
 static std::atomic<float> g_masterGain{0.89f};     // -1dB intersample peak protection
-static std::atomic<int> g_dspMode{0};              // 0=Steven Special, 1=Cat Mode
 static std::atomic<bool> g_eq5BandEnabled{false};  // 【V7.80】5段图形均衡器预设模式
 static std::atomic<bool> g_msebActive{false};         // 【V7.200】MSEB 激活时保护5段EQ不被任何reset/dspMode清零
 static std::atomic<bool> g_nightMode{false};         // 夜间模式：softClip 阈值降低
@@ -751,6 +640,103 @@ public:
 static HeadroomAGC g_agc;
 static std::atomic<bool> g_agcEnabled{false};
 static std::atomic<float> g_agcTargetDb{-26.0f};
+
+// ============================================================================
+// Master Bus Compressor — 动态压缩（向下压缩，stereo-linked，dB 域峰值检测 + 软拐点）
+// 独立全局模块，作用在瞬态整形之后、Look-Ahead Limiter 之前。
+// stereo-linked：用 L/R 较大峰值驱动同一个增益衰减，保持立体声场不漂移。
+// ============================================================================
+class MasterCompressor {
+public:
+    bool enabled = false;
+    float thresholdDb = -18.0f;   // 阈值（dBFS）
+    float ratio = 2.0f;           // 压缩比（1=直通，越大压越狠）
+    float attackMs = 10.0f;       // 启动时间
+    float releaseMs = 120.0f;     // 释放时间
+    float makeupDb = 0.0f;        // 补偿增益
+    float kneeDb = 6.0f;          // 软拐点宽度
+
+    float envDb = -120.0f;        // 平滑峰值包络（dB）
+    float grDb = 0.0f;            // 当前增益衰减（dB，平滑用）
+    float grLinear = 1.0f;        // 平滑后的线性增益
+    float attackCoeff = 0.0f;     // exp 平滑系数
+    float releaseCoeff = 0.0f;
+    float makeupLinear = 1.0f;
+
+    void setSampleRate(int32_t sr) {
+        attackCoeff = expf(-1.0f / (std::max(sr, 1) * attackMs / 1000.0f));
+        releaseCoeff = expf(-1.0f / (std::max(sr, 1) * releaseMs / 1000.0f));
+        makeupLinear = powf(10.0f, makeupDb / 20.0f);
+    }
+
+    void configure(float thrDb, float rat, float atkMs, float relMs, float mkDb) {
+        thresholdDb = thrDb;
+        ratio = rat < 1.0f ? 1.0f : rat;
+        attackMs = atkMs < 0.1f ? 0.1f : atkMs;
+        releaseMs = relMs < 1.0f ? 1.0f : relMs;
+        makeupDb = mkDb;
+        makeupLinear = powf(10.0f, makeupDb / 20.0f);
+    }
+
+    // 平滑增益衰减（dB 域一阶低通）
+    // 注意：grDb 为负值（压缩=负增益）。targetGr 更负（压更多）→ attack 快；
+    // targetGr 更接近 0（松）→ release 慢。此前判断写反导致启动慢/释放快（pumping）。
+    inline float smoothGr(float targetGr) {
+        if (targetGr < grDb) {
+            // 压更多 → attack 快
+            grDb = grDb + (1.0f - attackCoeff) * (targetGr - grDb);
+        } else {
+            // 松 → release 慢
+            grDb = grDb + (1.0f - releaseCoeff) * (targetGr - grDb);
+        }
+        return grDb;
+    }
+
+    inline void process(float &sL, float &sR) {
+        if (!enabled) return;
+        // stereo-linked 峰值检测
+        float peak = fmaxf(fabsf(sL), fabsf(sR));
+        float peakDb = 20.0f * log10f(peak + 1e-12f);
+        // 峰值包络跟随
+        if (peakDb > envDb) {
+            envDb = envDb + (1.0f - attackCoeff) * (peakDb - envDb);
+        } else {
+            envDb = envDb + (1.0f - releaseCoeff) * (peakDb - envDb);
+        }
+        // 计算目标增益衰减（软拐点）
+        float over = envDb - thresholdDb;
+        float targetGr;
+        float halfKnee = kneeDb * 0.5f;
+        float slope = 1.0f - 1.0f / ratio;
+        if (over <= -halfKnee) {
+            targetGr = 0.0f;
+        } else if (over >= halfKnee) {
+            targetGr = over * slope;
+        } else {
+            // 二次软拐点：在 [-knee/2, +knee/2] 平滑过渡
+            float t = over + halfKnee;
+            targetGr = (t * t) / (2.0f * kneeDb) * slope;
+        }
+        float gr = smoothGr(targetGr);
+        grLinear = powf(10.0f, -gr / 20.0f);
+        float g = grLinear * makeupLinear;
+        sL *= g;
+        sR *= g;
+    }
+
+    void reset() {
+        envDb = -120.0f;
+        grDb = 0.0f;
+        grLinear = 1.0f;
+    }
+};
+static MasterCompressor g_compressor;
+static std::atomic<bool> g_compressorEnabled{false};
+static std::atomic<float> g_compressorThresholdDb{-18.0f};
+static std::atomic<float> g_compressorRatio{2.0f};
+static std::atomic<float> g_compressorAttackMs{10.0f};
+static std::atomic<float> g_compressorReleaseMs{120.0f};
+static std::atomic<float> g_compressorMakeupDb{0.0f};
 
 // ============================================================================
 // Soft Clip — cubic sigmoid waveshaper
@@ -923,29 +909,34 @@ public:
         }
 
         // DSP processing
-        if (g_autoEqEnabled.load() || g_dspEqEnabled.load()) {
+        if (g_mseb10Enabled.load() || g_autoEqEnabled.load() || g_dspEqEnabled.load()) {
             // [zipper-noise fix] fade pre-gain toward target per-frame (same SMOOTH as DAC path).
             // MSEB slider changes (g_dspEqPreGain jump) no longer step output level instantly.
-            float targetPreGain = g_autoEqEnabled.load() ? g_autoEqPreGain.load() : g_dspEqPreGain.load();
+            float targetPreGain = 1.0f;
+            if (g_autoEqEnabled.load()) targetPreGain *= g_autoEqPreGain.load();
+            if (g_mseb10Enabled.load()) targetPreGain *= g_msebPreGain.load();
+            if (!g_mseb10Enabled.load() && !g_autoEqEnabled.load() && g_dspEqEnabled.load()) targetPreGain *= g_dspEqPreGain.load();
             float preGain = g_curDspPreGain;
             const float PREGAIN_SMOOTH = 0.05f;
             float masterGain = g_masterGain.load();
             bool agcOn = g_agcEnabled.load();
-            int mode = g_dspMode.load(std::memory_order_relaxed);
             bool ditherOn = g_ditherEnabled.load();    // 【V7.05】
             bool dcBlockOn = g_dcBlockEnabled.load();   // 【V7.05】
-            // 【V7.39】try_lock 替代 lock_guard — 回调永远不阻塞
-            // 如果 DSP 参数正在被更新，本帧跳过 EQ 但仍然输出音频
-            std::unique_lock<std::mutex> eqLock(g_eqMutex, std::try_to_lock);
-            if (!eqLock.owns_lock()) {
-                // DSP 参数正在更新，本帧不处理 EQ，直接输出原始数据
-                g_totalSampleCount.fetch_add(totalSamples, std::memory_order_relaxed);
-                g_framesWritten.fetch_add(numFrames);
-                return oboe::DataCallbackResult::Continue;
-            }
+            // 【V8.2 hiby】blocking lock (not try_lock): JNI now holds g_eqMutex
+            // only for microseconds of pure math (arrays copied outside the lock),
+            // so the callback can safely wait instead of dropping EQ for a frame.
+            // The old try_lock + early-return caused processed-frame <-> pass-through
+            // frame switching = level/timbre step = audible crackle.
+            std::lock_guard<std::mutex> eqLock(g_eqMutex);
 
             float frameEnergyAccum = 0.0f;
             int samplesInFrame = 0;
+            // 【V8.3】瞬态整形包络系数（预计算，避免每样本 expf）。
+            int sr = stream->getSampleRate();
+            const float tsAtkFast = 1.0f - expf(-1.0f / (sr * 0.001f));   // 1ms
+            const float tsRelFast = 1.0f - expf(-1.0f / (sr * 0.015f));   // 15ms
+            const float tsAtkSlow = 1.0f - expf(-1.0f / (sr * 0.015f));   // 15ms
+            const float tsRelSlow = 1.0f - expf(-1.0f / (sr * 0.080f));   // 80ms
             for (int i = 0; i < totalSamples; i += channels) {
                 bool stereo = (channels == 2);
 
@@ -955,7 +946,8 @@ public:
                 // 【V7.05】DC Blocker
                 if (dcBlockOn) sL = dcBlock(sL, g_dcX1L, g_dcY1L);
 
-                // EQ bands — AutoEQ 10段 > 5段图形均衡器 > DSP模式
+                // EQ 链：AutoEQ 打底（耳机修正）→ MSEB 叠加（主观调音）→ 5段图形EQ/默认模式
+                // （三者实例独立，AutoEQ 与 MSEB 可并存叠加，不再互斥）
                 if (g_autoEqEnabled.load()) {
                     sL = g_eqBand1L.process(sL);
                     sL = g_eqBand2L.process(sL);
@@ -967,16 +959,29 @@ public:
                     sL = g_autoEqBand8L.process(sL);
                     sL = g_autoEqBand9L.process(sL);
                     sL = g_autoEqBand10L.process(sL);
-                } else if (g_eq5BandEnabled.load()) {
-                    sL = g_eqBand1L.process(sL);
-                    sL = g_eqBand2L.process(sL);
-                    sL = g_eqBand3L.process(sL);
-                    sL = g_eqBand4L.process(sL);
-                    sL = g_eqBand5L.process(sL);
-                } else {
-                    sL = g_eqBand1L.process(sL);
-                    sL = g_eqBand2L.process(sL);
-                    if (mode == 1) sL = g_eqBand3L.process(sL);  // Cat mode: bass boost
+                }
+                if (g_mseb10Enabled.load()) {
+                    sL = g_msebBand1L.process(sL);
+                    sL = g_msebBand2L.process(sL);
+                    sL = g_msebBand3L.process(sL);
+                    sL = g_msebBand4L.process(sL);
+                    sL = g_msebBand5L.process(sL);
+                    sL = g_msebBand6L.process(sL);
+                    sL = g_msebBand7L.process(sL);
+                    sL = g_msebBand8L.process(sL);
+                    sL = g_msebBand9L.process(sL);
+                    sL = g_msebBand10L.process(sL);
+                } else if (!g_autoEqEnabled.load()) {
+                    if (g_eq5BandEnabled.load()) {
+                        sL = g_eqBand1L.process(sL);
+                        sL = g_eqBand2L.process(sL);
+                        sL = g_eqBand3L.process(sL);
+                        sL = g_eqBand4L.process(sL);
+                        sL = g_eqBand5L.process(sL);
+                    } else {
+                        sL = g_eqBand1L.process(sL);
+                        sL = g_eqBand2L.process(sL);
+                    }
                 }
 
                 sL *= masterGain;
@@ -990,10 +995,10 @@ public:
                 if (stereo) {
                     sR = rawR;
                     if (dcBlockOn) sR = dcBlock(sR, g_dcX1R, g_dcY1R);
-                    sR = g_eqBand1R.process(sR);
-                    sR = g_eqBand2R.process(sR);
-                    // AutoEQ 10段 > 5段图形均衡器 > DSP模式
+                    // EQ 链：AutoEQ 打底 → MSEB 叠加 → 5段图形EQ/默认（与 L 链对称）
                     if (g_autoEqEnabled.load()) {
+                        sR = g_eqBand1R.process(sR);
+                        sR = g_eqBand2R.process(sR);
                         sR = g_eqBand3R.process(sR);
                         sR = g_eqBand4R.process(sR);
                         sR = g_eqBand5R.process(sR);
@@ -1002,12 +1007,29 @@ public:
                         sR = g_autoEqBand8R.process(sR);
                         sR = g_autoEqBand9R.process(sR);
                         sR = g_autoEqBand10R.process(sR);
-                    } else if (g_eq5BandEnabled.load()) {
-                        sR = g_eqBand3R.process(sR);
-                        sR = g_eqBand4R.process(sR);
-                        sR = g_eqBand5R.process(sR);
-                    } else {
-                        if (mode == 1) sR = g_eqBand3R.process(sR);
+                    }
+                    if (g_mseb10Enabled.load()) {
+                        sR = g_msebBand1R.process(sR);
+                        sR = g_msebBand2R.process(sR);
+                        sR = g_msebBand3R.process(sR);
+                        sR = g_msebBand4R.process(sR);
+                        sR = g_msebBand5R.process(sR);
+                        sR = g_msebBand6R.process(sR);
+                        sR = g_msebBand7R.process(sR);
+                        sR = g_msebBand8R.process(sR);
+                        sR = g_msebBand9R.process(sR);
+                        sR = g_msebBand10R.process(sR);
+                    } else if (!g_autoEqEnabled.load()) {
+                        if (g_eq5BandEnabled.load()) {
+                            sR = g_eqBand1R.process(sR);
+                            sR = g_eqBand2R.process(sR);
+                            sR = g_eqBand3R.process(sR);
+                            sR = g_eqBand4R.process(sR);
+                            sR = g_eqBand5R.process(sR);
+                        } else {
+                            sR = g_eqBand1R.process(sR);
+                            sR = g_eqBand2R.process(sR);
+                        }
                     }
                     sR *= masterGain;
                 }
@@ -1018,6 +1040,60 @@ public:
                     float agcGain = g_agc.updateAndGetGainFromEnergy(frameEnergyAccum, samplesInFrame);
                     sL *= agcGain;
                     if (stereo) sR *= agcGain;
+                }
+
+                // 【V8.3】M/S 声场处理 — 跨声道矩阵（仅 stereo）。
+                // M=(L+R)/2 结像中心，S=(L-R)/2 声场宽度。
+                // 线性矩阵：L'=M*center + S*width, R'=M*center - S*width
+                // 平滑系数（zipper-noise fix），作用在 EQ/masterGain 之后、limiter 之前。
+                if (g_msEnabled.load() && stereo) {
+                    float w = g_curMsWidth;
+                    float c = g_curMsCenter;
+                    float tw = g_msWidth.load();
+                    float tc = g_msCenter.load();
+                    w += (tw - w) * PREGAIN_SMOOTH;
+                    c += (tc - c) * PREGAIN_SMOOTH;
+                    g_curMsWidth = w;
+                    g_curMsCenter = c;
+                    float mid = (sL + sR) * 0.5f;
+                    float side = (sL - sR) * 0.5f;
+                    sL = mid * c + side * w;
+                    sR = mid * c - side * w;
+                }
+
+                // 【V8.3】瞬态整形 — 双时间常数包络跟随器（时域）。
+                // fastEnv（attack ~1ms / release ~15ms）跟踪瞬态，slowEnv（attack ~15ms / release ~80ms）跟踪持续电平。
+                // transient = fastEnv - slowEnv；gain = 1 + amount*transient*K（amount>0 增强 attack，<0 柔化）。
+                // 作用在 M/S 后、limiter 前（线性处理后，非线性时变，保持立体声关系）。
+                if (g_transientEnabled.load()) {
+                    g_curTransientAmount += (g_transientAmount.load() - g_curTransientAmount) * PREGAIN_SMOOTH;
+                    float amt = g_curTransientAmount;
+                    if (fabsf(amt) > 0.001f) {
+                        float aL = fabsf(sL);
+                        g_tsFastEnvL += (aL - g_tsFastEnvL) * (aL > g_tsFastEnvL ? tsAtkFast : tsRelFast);
+                        g_tsSlowEnvL += (aL - g_tsSlowEnvL) * (aL > g_tsSlowEnvL ? tsAtkSlow : tsRelSlow);
+                        float transL = g_tsFastEnvL - g_tsSlowEnvL;
+                        float gainL = 1.0f + amt * transL * 4.0f;
+                        if (gainL < 0.05f) gainL = 0.05f;
+                        if (gainL > 4.0f) gainL = 4.0f;
+                        sL *= gainL;
+                        if (stereo) {
+                            float aR = fabsf(sR);
+                            g_tsFastEnvR += (aR - g_tsFastEnvR) * (aR > g_tsFastEnvR ? tsAtkFast : tsRelFast);
+                            g_tsSlowEnvR += (aR - g_tsSlowEnvR) * (aR > g_tsSlowEnvR ? tsAtkSlow : tsRelSlow);
+                            float transR = g_tsFastEnvR - g_tsSlowEnvR;
+                            float gainR = 1.0f + amt * transR * 4.0f;
+                            if (gainR < 0.05f) gainR = 0.05f;
+                            if (gainR > 4.0f) gainR = 4.0f;
+                            sR *= gainR;
+                        }
+                    }
+                }
+
+                // 【V8.3】动态压缩 — master bus 向下压缩器（stereo-linked）。
+                // 作用在瞬态整形之后、Look-Ahead Limiter 之前。
+                if (g_compressorEnabled.load()) {
+                    g_compressor.process(sL, sR);
                 }
 
                 // Look-Ahead Limiter
@@ -1217,6 +1293,7 @@ static bool reopenOutputStream(int newRate) {
         g_limiter.setSampleRate(actualRate);
         g_limiter.reset();
         g_agc.setSampleRate(actualRate);
+        g_compressor.setSampleRate(actualRate);
     }
     LOGI("reopenOutputStream: reopened at %d Hz / %d ch", actualRate, actualCh);
     return true;
@@ -1789,6 +1866,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
         g_limiter.setSampleRate(sr);
         g_limiter.reset();
         g_agc.setSampleRate(sr);
+        g_compressor.setSampleRate(sr);
     }
     g_sampleRate.store(g_outputStream->getSampleRate());
     g_channelCount.store(g_outputStream->getChannelCount());
@@ -2092,6 +2170,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
         g_limiter.setSampleRate(sr);
         g_limiter.reset();
         g_agc.setSampleRate(sr);
+        g_compressor.setSampleRate(sr);
     }
     g_sampleRate.store(g_outputStream->getSampleRate());
     g_channelCount.store(g_outputStream->getChannelCount());
@@ -2441,70 +2520,6 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand7(JNIEnv *env, jobject t
     return g_band7.load(std::memory_order_relaxed);
 }
 
-// --- DSP Mode ---
-JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDspMode(JNIEnv *env, jobject thiz, jint mode) {
-    std::lock_guard<std::mutex> eqLock(g_eqMutex);
-    int sr = g_sampleRate.load();
-    // 【V7.200】MSEB active → refuse to overwrite 5-band EQ with DSP mode
-    if (g_msebActive.load()) {
-        LOGI("nativeSetDspMode: refused (mode=%d) — MSEB active", mode);
-        g_dspMode.store(mode);
-        g_dspEqEnabled.store(mode >= 0);
-        // Allow DSP mode flag change but don't touch 5-band EQ coefficients
-        return;
-    }
-    g_dspMode.store(mode);
-    g_eq5BandEnabled.store(false);  // 【V7.80】切换DSP模式→禁用5段预设
-    g_autoEqEnabled.store(false);
-    g_autoEqPreGain = 1.0f;
-    // 【V7.38】模式切换时同步开关：OFF(-1)→关闭, 其他→开启
-    g_dspEqEnabled.store(mode >= 0);
-    LOGI("DSP Mode=%d, DSP Enabled=%s", mode, mode >= 0 ? "YES" : "NO");
-    if (mode == 1) {
-        // Cat Mode: 高音柔和 + 低频增强 + 极高频保护
-        g_eqBand1L.setHighShelf(sr, 8000.0f, -4.0f, 0.707f);
-        g_eqBand1R.setHighShelf(sr, 8000.0f, -4.0f, 0.707f);
-        g_eqBand2L.setPeaking(sr, 12000.0f, -3.0f, 2.0f);
-        g_eqBand2R.setPeaking(sr, 12000.0f, -3.0f, 2.0f);
-        g_eqBand3L.setPeaking(sr, 250.0f, 3.0f, 0.5f);
-        g_eqBand3R.setPeaking(sr, 250.0f, 3.0f, 0.5f);
-        g_dspEqPreGain.store(powf(10.0f, -2.0f / 20.0f));  // -2dB headroom
-        LOGI("DSP Mode: Cat Mode (HS -4dB@8kHz + Peak -3dB@12kHz + Bass +3dB@250Hz)");
-        LOGI("CAT Band1L b0=%.4f b1=%.4f b2=%.4f a1=%.4f a2=%.4f",
-             g_eqBand1L.norm_b0_, g_eqBand1L.norm_b1_, g_eqBand1L.norm_b2_,
-             g_eqBand1L.norm_a1_, g_eqBand1L.norm_a2_);
-    } else if (mode == 0) {
-        // Steven Special: 高音大幅柔和 + 极高频保护
-        g_eqBand1L.setHighShelf(sr, 8000.0f, -6.0f, 0.707f);
-        g_eqBand1R.setHighShelf(sr, 8000.0f, -6.0f, 0.707f);
-        g_eqBand2L.setPeaking(sr, 12000.0f, -4.0f, 2.0f);
-        g_eqBand2R.setPeaking(sr, 12000.0f, -4.0f, 2.0f);
-        g_eqBand3L.setHighShelf(sr, 15000.0f, -2.0f, 1.0f);
-        g_eqBand3R.setHighShelf(sr, 15000.0f, -2.0f, 1.0f);
-        g_dspEqPreGain.store(powf(10.0f, -3.0f / 20.0f));  // -3dB headroom
-        LOGI("DSP Mode: Steven Special (HS -6dB@8kHz + Peak -4dB@12kHz + HS -2dB@15kHz)");
-        LOGI("STEVEN Band1L b0=%.4f b1=%.4f b2=%.4f a1=%.4f a2=%.4f",
-             g_eqBand1L.norm_b0_, g_eqBand1L.norm_b1_, g_eqBand1L.norm_b2_,
-             g_eqBand1L.norm_a1_, g_eqBand1L.norm_a2_);
-    } else {
-        // OFF: flatten all bands
-        g_eqBand1L.setFlat(); g_eqBand1R.setFlat();
-        g_eqBand2L.setFlat(); g_eqBand2R.setFlat();
-        g_eqBand3L.setFlat(); g_eqBand3R.setFlat();
-        g_dspEqPreGain.store(1.0f);
-        LOGI("DSP Mode: OFF (all bands flat)");
-    }
-    g_eqBand1L.reset(); g_eqBand1R.reset();
-    g_eqBand2L.reset(); g_eqBand2R.reset();
-    g_eqBand3L.reset(); g_eqBand3R.reset();
-}
-
-JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetDspMode(JNIEnv *env, jobject thiz) {
-    return g_dspMode.load(std::memory_order_relaxed);
-}
-
 // --- 【V7.80】5段图形均衡器预设 ---
 // 将28个品牌预设映射到DSP 5-band peaking EQ
 // 标准频率: 60Hz / 230Hz / 910Hz / 3.6kHz / 14kHz
@@ -2513,25 +2528,41 @@ static const float kEq5BandDefaultFreqs[5] = {60.0f, 230.0f, 910.0f, 3600.0f, 14
 JNIEXPORT void JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDspEq5Band(JNIEnv *env, jobject thiz,
                                                                jfloatArray gainsDb, jfloatArray freqsHz) {
+    // 【V8.2 hiby】copy JNI arrays OUTSIDE the lock: Get/ReleaseFloatArrayElements
+    // can pin/unpin memory and are not cheap. Holding g_eqMutex across them widens
+    // the window where the audio callback's try_lock fails -> drop-out.
+    jsize len = env->GetArrayLength(gainsDb);
+    if (len <= 0) return;
+    float gains[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float freqs[5];
+    for (int i = 0; i < 5; i++) freqs[i] = kEq5BandDefaultFreqs[i];
+    {
+        jfloat* g = env->GetFloatArrayElements(gainsDb, nullptr);
+        for (int i = 0; i < len && i < 5; i++) gains[i] = g[i];
+        env->ReleaseFloatArrayElements(gainsDb, g, JNI_ABORT);
+        if (freqsHz) {
+            jfloat* f = env->GetFloatArrayElements(freqsHz, nullptr);
+            for (int i = 0; i < len && i < 5; i++) freqs[i] = f[i];
+            env->ReleaseFloatArrayElements(freqsHz, f, JNI_ABORT);
+        }
+    }
+
     std::lock_guard<std::mutex> eqLock(g_eqMutex);
     float sr = static_cast<float>(g_sampleRate.load());
     if (sr <= 0) return;
-    
-    jfloat* gains = env->GetFloatArrayElements(gainsDb, nullptr);
-    jfloat* freqs = freqsHz ? env->GetFloatArrayElements(freqsHz, nullptr) : nullptr;
-    jsize len = env->GetArrayLength(gainsDb);
-    
+
     struct { BiquadFilter* L; BiquadFilter* R; } bands[5] = {
         {&g_eqBand1L, &g_eqBand1R}, {&g_eqBand2L, &g_eqBand2R},
         {&g_eqBand3L, &g_eqBand3R}, {&g_eqBand4L, &g_eqBand4R},
         {&g_eqBand5L, &g_eqBand5R}
     };
-    
+
     for (int i = 0; i < len && i < 5; i++) {
         float gainDb = gains[i];
-        float freqHz = freqs ? freqs[i] : kEq5BandDefaultFreqs[i];
+        float freqHz = freqs[i];
         float Q = 1.4f;  // Graphic EQ Q — narrower than default to reduce band overlap
-        bands[i].L->reset(); bands[i].R->reset();
+        // 【V8.2】no reset() on live gain change — process() coefficient ramp
+        // handles the transition; clearing IIR state causes an audible click.
         if (fabsf(gainDb) < 0.1f) {
             bands[i].L->setFlat(); bands[i].R->setFlat();
         } else {
@@ -2539,29 +2570,24 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDspEq5Band(JNIEnv *env, jobj
             bands[i].R->setPeaking(sr, freqHz, gainDb, Q);
         }
     }
-    
+
     // 确保 bands 4-5 在 len<5 时也是 flat
     for (int i = len; i < 5; i++) {
-        bands[i].L->reset(); bands[i].R->reset();
         bands[i].L->setFlat(); bands[i].R->setFlat();
     }
-    
+
     // Pre-gain headroom：防止正增益导致削波
-    // 取所有频段最大正增益 + 3dB 安全余量，折算为线性衰减系数
+    // 取所有频段最大正增益，折算为线性衰减系数
     float maxGain = 0.0f;
     for (int i = 0; i < 5; i++) {
         if (gains[i] > maxGain) maxGain = gains[i];
     }
     float preGainDb = -maxGain;  // 1:1 headroom — Look-Ahead Limiter handles cascade overshoot
     g_dspEqPreGain = powf(10.0f, preGainDb / 20.0f);
-    
+
     g_eq5BandEnabled.store(true);
     g_dspEqEnabled.store(true);
-    g_dspMode.store(-1);  // 预设模式时禁用 DSP 模式
-    
-    env->ReleaseFloatArrayElements(gainsDb, gains, 0);
-    if (freqs) env->ReleaseFloatArrayElements(freqsHz, freqs, 0);
-    
+
     LOGI("DSP 5-band EQ preset applied: [%.1f, %.1f, %.1f, %.1f, %.1f] dB",
          gains[0], gains[1], gains[2], gains[3], gains[4]);
 }
@@ -2573,11 +2599,158 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMsebActive(JNIEnv *env, jobj
     LOGI("MSEB active = %s", active ? "YES" : "NO");
 }
 
+// --- 【V8.2】MSEB 10-band subjective-dimension EQ ---
+// 11 subjective dims -> 10 biquads (independent instances, crossfade on coeff change).
+// Signature: (gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray)
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMseb10Band(JNIEnv *env, jobject thiz,
+                                                               jfloatArray gainsDb, jfloatArray freqsHz, jfloatArray qValues) {
+    // Copy JNI arrays OUTSIDE the lock (V8.2 hiby: lock held only for pure math).
+    jsize len = env->GetArrayLength(gainsDb);
+    if (len <= 0) return;
+    float gains[10] = {0}; float freqs[10] = {0}; float qs[10] = {0};
+    {
+        jfloat* g = env->GetFloatArrayElements(gainsDb, nullptr);
+        for (int i = 0; i < len && i < 10; i++) gains[i] = g[i];
+        env->ReleaseFloatArrayElements(gainsDb, g, JNI_ABORT);
+        if (freqsHz) {
+            jfloat* f = env->GetFloatArrayElements(freqsHz, nullptr);
+            for (int i = 0; i < len && i < 10; i++) freqs[i] = f[i];
+            env->ReleaseFloatArrayElements(freqsHz, f, JNI_ABORT);
+        }
+        if (qValues) {
+            jfloat* q = env->GetFloatArrayElements(qValues, nullptr);
+            for (int i = 0; i < len && i < 10; i++) qs[i] = q[i];
+            env->ReleaseFloatArrayElements(qValues, q, JNI_ABORT);
+        }
+    }
+
+    std::lock_guard<std::mutex> eqLock(g_eqMutex);
+    float sr = static_cast<float>(g_sampleRate.load());
+    if (sr <= 0) sr = 48000.0f;
+
+    struct { BiquadFilter* L; BiquadFilter* R; } bands[10] = {
+        {&g_msebBand1L, &g_msebBand1R}, {&g_msebBand2L, &g_msebBand2R},
+        {&g_msebBand3L, &g_msebBand3R}, {&g_msebBand4L, &g_msebBand4R},
+        {&g_msebBand5L, &g_msebBand5R}, {&g_msebBand6L, &g_msebBand6R},
+        {&g_msebBand7L, &g_msebBand7R}, {&g_msebBand8L, &g_msebBand8R},
+        {&g_msebBand9L, &g_msebBand9R}, {&g_msebBand10L, &g_msebBand10R}
+    };
+
+    for (int i = 0; i < 10; i++) {
+        float gainDb = (i < len) ? gains[i] : 0.0f;
+        float freqHz = (i < len && freqs[i] > 0.0f) ? freqs[i] : 1000.0f;
+        float Q = (i < len && qs[i] > 0.0f) ? qs[i] : 1.0f;
+        // 【V8.3】只在增益真正变化时更新 + crossfade；未变 band 跳过，
+        // 避免拖动单个滑块时全部 10 个 band 同时双滤波并行（underrun + 低频相位差异 -> 哗哗声）。
+        if (fabsf(gainDb - g_lastMsebGains[i]) < 0.01f) continue;
+        g_lastMsebGains[i] = gainDb;
+        // crossfade handles transition — no reset() on live change.
+        if (fabsf(gainDb) < 0.1f) {
+            bands[i].L->setFlat(); bands[i].R->setFlat();
+        } else if (freqHz < 250.0f) {
+            // 【V8.3 ringing 根治】低频段用 low-shelf（无共振峰、无 ringing），
+            // 替代 peaking 的共振峰（32/60/120Hz ringing 长达 10ms/5ms，EDM 低音叠加成哗哗）。
+            // Q=0.707（Butterworth 临界阻尼，无 overshoot）。
+            bands[i].L->setLowShelf(sr, freqHz, gainDb, 0.707f);
+            bands[i].R->setLowShelf(sr, freqHz, gainDb, 0.707f);
+        } else {
+            bands[i].L->setPeaking(sr, freqHz, gainDb, Q);
+            bands[i].R->setPeaking(sr, freqHz, gainDb, Q);
+        }
+    }
+
+    // Pre-gain headroom: 按正增益总和衰减，避免低频 low-shelf 叠加（32/60/120Hz 在 30Hz 以下重叠）
+    // 造成的级联削波（密集鼓声满幅时哗哗/沙沙）。
+    float sumPosGain = 0.0f;
+    for (int i = 0; i < 10; i++) if (gains[i] > 0.0f) sumPosGain += gains[i];
+    g_msebPreGain.store(powf(10.0f, (-sumPosGain) / 20.0f));
+
+    g_mseb10Enabled.store(true);
+    // MSEB 与 5段图形 EQ 互斥，但与 AutoEQ（耳机修正）并存叠加。
+    g_eq5BandEnabled.store(false);
+    g_dspEqEnabled.store(true);
+
+    LOGI("MSEB 10-band applied: [%.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f %.1f] dB preGain=%.3f",
+         gains[0], gains[1], gains[2], gains[3], gains[4],
+         gains[5], gains[6], gains[7], gains[8], gains[9], g_msebPreGain.load());
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeResetMseb10Band(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> eqLock(g_eqMutex);
+    struct { BiquadFilter* L; BiquadFilter* R; } bands[10] = {
+        {&g_msebBand1L, &g_msebBand1R}, {&g_msebBand2L, &g_msebBand2R},
+        {&g_msebBand3L, &g_msebBand3R}, {&g_msebBand4L, &g_msebBand4R},
+        {&g_msebBand5L, &g_msebBand5R}, {&g_msebBand6L, &g_msebBand6R},
+        {&g_msebBand7L, &g_msebBand7R}, {&g_msebBand8L, &g_msebBand8R},
+        {&g_msebBand9L, &g_msebBand9R}, {&g_msebBand10L, &g_msebBand10R}
+    };
+    for (int i = 0; i < 10; i++) { bands[i].L->reset(); bands[i].R->reset(); bands[i].L->setFlat(); bands[i].R->setFlat(); }
+    for (int i = 0; i < 10; i++) g_lastMsebGains[i] = 999.0f;  // 强制下次重新应用
+    g_mseb10Enabled.store(false);
+    g_msebPreGain.store(1.0f);
+    LOGI("MSEB 10-band cleared");
+}
+
+// --- 【V8.3】M/S 声场（跨声道矩阵）---
+// soundstage(-10..+10) -> S 增益 (width), imaging(-10..+10) -> M 增益 (center).
+// 映射：width = 1 + soundstage*0.08 (0.2..1.8), center = 1 + imaging*0.06 (0.4..1.6)
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMsStage(JNIEnv *env, jobject thiz,
+                                                            jfloat soundstage, jfloat imaging) {
+    float width = 1.0f + soundstage * 0.08f;
+    float center = 1.0f + imaging * 0.06f;
+    if (width < 0.1f) width = 0.1f;
+    if (center < 0.1f) center = 0.1f;
+    g_msWidth.store(width);
+    g_msCenter.store(center);
+    bool active = (fabsf(soundstage) > 0.01f || fabsf(imaging) > 0.01f);
+    g_msEnabled.store(active);
+    LOGI("M/S stage: width=%.3f center=%.3f enabled=%s", width, center, active ? "YES" : "NO");
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeResetMsStage(JNIEnv *env, jobject thiz) {
+    g_msWidth.store(1.0f);
+    g_msCenter.store(1.0f);
+    g_msEnabled.store(false);
+    LOGI("M/S stage reset (unity)");
+}
+
+// 【V8.3】瞬态整形 JNI — impulseResponse 维度映射。
+// amount = impulseResponse / 10（-1..+1），正增强 attack、负柔化。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetTransient(JNIEnv *env, jobject thiz, jfloat amount) {
+    float a = amount;
+    if (a > 1.0f) a = 1.0f;
+    if (a < -1.0f) a = -1.0f;
+    g_transientAmount.store(a);
+    bool active = fabsf(a) > 0.001f;
+    g_transientEnabled.store(active);
+    if (!active) { g_tsFastEnvL = g_tsSlowEnvL = g_tsFastEnvR = g_tsSlowEnvR = 0.0f; }
+    LOGI("Transient shaper: amount=%.3f enabled=%s", a, active ? "YES" : "NO");
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeResetTransient(JNIEnv *env, jobject thiz) {
+    g_transientAmount.store(0.0f);
+    g_transientEnabled.store(false);
+    g_tsFastEnvL = g_tsSlowEnvL = g_tsFastEnvR = g_tsSlowEnvR = 0.0f;
+    LOGI("Transient shaper reset");
+}
+
 JNIEXPORT void JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeResetDspEq5Band(JNIEnv *env, jobject thiz) {
     // 【V7.200】MSEB active → refuse reset, MSEB owns the 5-band EQ pipeline
     if (g_msebActive.load()) {
         LOGI("nativeResetDspEq5Band: refused — MSEB active");
+        return;
+    }
+    // 【V8.3】AutoEQ active → refuse reset，g_eqBand1-5 正承载 AutoEQ 前 5 段，
+    // 重置会清掉耳机修正（AutoEQ 与 5 段图形 EQ 共享 g_eqBand1-5 实例）。
+    if (g_autoEqEnabled.load()) {
+        LOGI("nativeResetDspEq5Band: refused — AutoEQ active");
         return;
     }
     std::lock_guard<std::mutex> eqLock(g_eqMutex);
@@ -2591,16 +2764,8 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeResetDspEq5Band(JNIEnv *env, jo
         bands[i].L->setFlat(); bands[i].R->setFlat();
     }
     g_eq5BandEnabled.store(false);
-    g_autoEqEnabled.store(false);
-    g_autoEqPreGain = 1.0f;
     g_dspEqPreGain = 1.0f;  // 重置 pre-gain 为 0dB
-    LOGI("DSP 5-band EQ preset cleared, switching back to DSP mode");
-    // 恢复默认 Steven Special 模式
-    g_dspMode.store(0);
-    g_dspEqEnabled.store(true);
-    int sr = g_sampleRate.load();
-    g_eqBand3L.setHighShelf(sr, 15000.0f, -2.0f, 1.0f);
-    g_eqBand3R.setHighShelf(sr, 15000.0f, -2.0f, 1.0f);
+    LOGI("DSP 5-band EQ preset cleared");
 }
 
 // --- AutoEQ 10-band ---
@@ -2626,7 +2791,6 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEq10Band(JNIEnv *env, jo
     };
 
     for (int i = 0; i < 10; i++) {
-        bands[i].L->reset(); bands[i].R->reset();
         if (fabsf(gains[i]) < 0.01f) {
             bands[i].L->setFlat(); bands[i].R->setFlat();
             continue;
@@ -2639,8 +2803,14 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEq10Band(JNIEnv *env, jo
             bands[i].L->setLowShelf(sr, freqs[i], gains[i], qs[i]);
             bands[i].R->setLowShelf(sr, freqs[i], gains[i], qs[i]);
         } else {  // Peaking (default)
-            bands[i].L->setPeaking(sr, freqs[i], gains[i], qs[i]);
-            bands[i].R->setPeaking(sr, freqs[i], gains[i], qs[i]);
+            if (freqs[i] < 250.0f) {
+                // 【V8.3 ringing 根治】低频 Peaking 切 low-shelf（无共振峰、无 ringing）。
+                bands[i].L->setLowShelf(sr, freqs[i], gains[i], 0.707f);
+                bands[i].R->setLowShelf(sr, freqs[i], gains[i], 0.707f);
+            } else {
+                bands[i].L->setPeaking(sr, freqs[i], gains[i], qs[i]);
+                bands[i].R->setPeaking(sr, freqs[i], gains[i], qs[i]);
+            }
         }
     }
 
@@ -2648,7 +2818,6 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEq10Band(JNIEnv *env, jo
     g_autoEqEnabled.store(true);
     g_eq5BandEnabled.store(false);  // 互斥
     g_dspEqEnabled.store(true);
-    g_dspMode.store(-1);
 
     env->ReleaseFloatArrayElements(gainsDb, gains, 0);
     env->ReleaseFloatArrayElements(freqsHz, freqs, 0);
@@ -2661,27 +2830,21 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEq10Band(JNIEnv *env, jo
 JNIEXPORT void JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeResetAutoEq(JNIEnv *env, jobject thiz) {
     std::lock_guard<std::mutex> eqLock(g_eqMutex);
-    // 重置 bands 6-10
-    BiquadFilter* autoBands[10] = {
-        &g_autoEqBand6L, &g_autoEqBand6R, &g_autoEqBand7L, &g_autoEqBand7R,
-        &g_autoEqBand8L, &g_autoEqBand8R, &g_autoEqBand9L, &g_autoEqBand9R,
-        &g_autoEqBand10L, &g_autoEqBand10R
+    // 重置全部 10 段：前 5 段复用 g_eqBand1-5，后 5 段 g_autoEqBand6-10
+    struct { BiquadFilter* L; BiquadFilter* R; } bands[10] = {
+        {&g_eqBand1L, &g_eqBand1R}, {&g_eqBand2L, &g_eqBand2R},
+        {&g_eqBand3L, &g_eqBand3R}, {&g_eqBand4L, &g_eqBand4R},
+        {&g_eqBand5L, &g_eqBand5R}, {&g_autoEqBand6L, &g_autoEqBand6R},
+        {&g_autoEqBand7L, &g_autoEqBand7R}, {&g_autoEqBand8L, &g_autoEqBand8R},
+        {&g_autoEqBand9L, &g_autoEqBand9R}, {&g_autoEqBand10L, &g_autoEqBand10R}
     };
     for (int i = 0; i < 10; i++) {
-        autoBands[i]->reset();
-        autoBands[i]->setFlat();
+        bands[i].L->reset(); bands[i].L->setFlat();
+        bands[i].R->reset(); bands[i].R->setFlat();
     }
     g_autoEqEnabled.store(false);
     g_autoEqPreGain = 1.0f;
     LOGI("AutoEQ 10-band cleared");
-    // 恢复默认 Steven Special 模式
-    g_dspMode.store(0);
-    g_dspEqEnabled.store(true);
-    int sr = g_sampleRate.load();
-    if (sr > 0) {
-        g_eqBand3L.setHighShelf(sr, 15000.0f, -2.0f, 1.0f);
-        g_eqBand3R.setHighShelf(sr, 15000.0f, -2.0f, 1.0f);
-    }
 }
 
 // --- AGC ---
@@ -2710,6 +2873,28 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetNightMode(JNIEnv *env, jobje
 JNIEXPORT jboolean JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeIsNightMode(JNIEnv *env, jobject thiz) {
     return g_nightMode.load();
+}
+
+// --- 动态压缩（Master Bus Compressor）---
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetCompressorEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_compressorEnabled.store(enabled != 0);
+    g_compressor.enabled = (enabled != 0);   // 关键：同步对象内 enabled，否则 process() 直接 return
+    if (!enabled) g_compressor.reset();
+    LOGI("Compressor %s", enabled ? "enabled" : "disabled");
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetCompressorParams(JNIEnv *env, jobject thiz,
+        jfloat thresholdDb, jfloat ratio, jfloat attackMs, jfloat releaseMs, jfloat makeupDb) {
+    g_compressorThresholdDb.store(thresholdDb);
+    g_compressorRatio.store(ratio);
+    g_compressorAttackMs.store(attackMs);
+    g_compressorReleaseMs.store(releaseMs);
+    g_compressorMakeupDb.store(makeupDb);
+    g_compressor.configure(thresholdDb, ratio, attackMs, releaseMs, makeupDb);
+    LOGI("Compressor params: thr=%.1f ratio=%.1f atk=%.1f rel=%.1f makeup=%.1f",
+         thresholdDb, ratio, attackMs, releaseMs, makeupDb);
 }
 
 // --- Dither ---

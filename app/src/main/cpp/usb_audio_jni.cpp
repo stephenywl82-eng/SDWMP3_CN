@@ -277,6 +277,108 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetDspEq5Band(JNIEnv*
     if (driver) driver->resetDspEq5Band();
 }
 
+// ── nativeSetMseb10Band ────────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetMseb10Band(
+    JNIEnv* env, jobject, jfloatArray gainsDb, jfloatArray freqsHz, jfloatArray qValues) {
+    auto* driver = getDriver();
+    if (!driver) return;
+    jfloat* gains = env->GetFloatArrayElements(gainsDb, nullptr);
+    if (!gains) return;
+    jfloat* freqs = freqsHz ? env->GetFloatArrayElements(freqsHz, nullptr) : nullptr;
+    jfloat* qs = qValues ? env->GetFloatArrayElements(qValues, nullptr) : nullptr;
+    jsize len = env->GetArrayLength(gainsDb);
+    driver->setMseb10Band(gains, freqs, qs, len);
+    env->ReleaseFloatArrayElements(gainsDb, gains, 0);
+    if (freqs) env->ReleaseFloatArrayElements(freqsHz, freqs, 0);
+    if (qs) env->ReleaseFloatArrayElements(qValues, qs, 0);
+}
+
+// ── nativeResetMseb10Band ───────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetMseb10Band(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    if (driver) driver->resetMseb10Band();
+}
+
+// ── nativeSetAutoEq10Band ─────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetAutoEq10Band(
+    JNIEnv* env, jobject, jfloatArray gainsDb, jfloatArray freqsHz, jfloatArray qValues, jintArray filterTypes, jfloat preampDb) {
+    auto* driver = getDriver();
+    if (!driver) return;
+    jfloat* gains = env->GetFloatArrayElements(gainsDb, nullptr);
+    if (!gains) return;
+    jfloat* freqs = freqsHz ? env->GetFloatArrayElements(freqsHz, nullptr) : nullptr;
+    jfloat* qs = qValues ? env->GetFloatArrayElements(qValues, nullptr) : nullptr;
+    jint* types = filterTypes ? env->GetIntArrayElements(filterTypes, nullptr) : nullptr;
+    jsize len = env->GetArrayLength(gainsDb);
+    driver->setAutoEq10Band(gains, freqs, qs, types, len, preampDb);
+    env->ReleaseFloatArrayElements(gainsDb, gains, 0);
+    if (freqs) env->ReleaseFloatArrayElements(freqsHz, freqs, 0);
+    if (qs) env->ReleaseFloatArrayElements(qValues, qs, 0);
+    if (types) env->ReleaseIntArrayElements(filterTypes, types, 0);
+}
+
+// ── nativeResetAutoEq ─────────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetAutoEq(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    if (driver) driver->resetAutoEq();
+}
+
+// ── nativeSetMsStage ───────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetMsStage(JNIEnv*, jobject, jfloat soundstage, jfloat imaging) {
+    auto* driver = getDriver();
+    if (driver) driver->setMsStage(soundstage, imaging);
+}
+
+// ── nativeResetMsStage ─────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetMsStage(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    if (driver) driver->resetMsStage();
+}
+
+// ── nativeSetTransient ──────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetTransient(JNIEnv*, jobject, jfloat amount) {
+    auto* driver = getDriver();
+    if (driver) driver->setTransient(amount);
+}
+
+// ── nativeResetTransient ─────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetTransient(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    if (driver) driver->resetTransient();
+}
+
+// ── nativeSetCompressorEnabled ──────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetCompressorEnabled(JNIEnv*, jobject, jboolean enabled) {
+    auto* driver = getDriver();
+    if (driver) driver->setCompressorEnabled(enabled != 0);
+}
+
+// ── nativeSetCompressorParams ──────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetCompressorParams(JNIEnv*, jobject, jfloat thresholdDb, jfloat ratio, jfloat attackMs, jfloat releaseMs, jfloat makeupDb) {
+    auto* driver = getDriver();
+    if (driver) driver->setCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb);
+}
+
 // ── nativeGetDebugLog ────────────────────────────────────────────────────
 
 // ── nativeForceReset ────────────────────────────────────────────────────

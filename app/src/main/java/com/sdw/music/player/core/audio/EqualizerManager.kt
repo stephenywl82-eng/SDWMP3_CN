@@ -4,6 +4,7 @@ import android.content.Context
 import android.media.audiofx.Equalizer
 import android.util.Log
 import com.sdw.music.player.core.audio.AutoEqPresetManager
+import com.sdw.music.player.core.audio.UsbDacManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -221,6 +222,28 @@ object EqualizerManager {
      * 应用 EQ 预设（自动适配 Android Equalizer / Oboe DSP）
      */
     fun applyPreset(presetId: String, context: Context) {
+        // 【V8.3】DAC 独占模式：5 段品牌预设路由到 USB DAC 原生 DSP
+        // （此前缺失 DAC 分支，isOboeMode 在 DAC 模式常为 false → 落到 Android
+        //  系统 Equalizer，对 USB 独占 bit-perfect 链路无效，故「切换没效果」）。
+        if (MusicService.instance?.isDacActive() == true) {
+            val preset = PRESETS.find { it.id == presetId } ?: return
+            if (presetId == "flat") {
+                UsbDacManager.resetDspEq5Band()
+                UsbDacManager.setDspEnabled(false)
+                saveSettings(context, false, presetId)
+                _enabled.value = false
+                Log.d(TAG, "DAC DSP: EQ cleared (flat)")
+            } else {
+                val gainsDb = FloatArray(5) { i -> preset.bands[i].toFloat() / 100f }
+                UsbDacManager.setDspEnabled(true)
+                UsbDacManager.setDspEq5Band(gainsDb, null)
+                saveSettings(context, true, presetId)
+                _enabled.value = true
+                Log.i(TAG, "DAC DSP: Applied EQ preset '${preset.name}' gains=${gainsDb.contentToString()}")
+            }
+            return
+        }
+
         // 【V7.80】Oboe 模式：通过 DSP 5 段Equalizer应用预设
         if (isOboeMode(context)) {
             val preset = PRESETS.find { it.id == presetId } ?: return
@@ -304,27 +327,44 @@ object EqualizerManager {
      * @return true 成功, false 不适用（非 Oboe 或无匹配预设）
      */
     fun applyAutoEqPreset(presetName: String, context: Context): Boolean {
-        if (!isOboeMode(context)) {
-            Log.w(TAG, "AutoEQ only supported in Oboe mode")
-            return false
-        }
-        val oboe = MusicService.instance?.oboeDirectPlayer ?: return false
         val preset = AutoEqPresetManager.findByName(presetName) ?: run {
             Log.w(TAG, "AutoEQ preset not found: $presetName")
             return false
         }
-        val ok = AutoEqPresetManager.applyPreset(oboe, preset)
-        if (ok) {
-            saveAutoEqSettings(context, presetName)
-            _enabled.value = true
+        val svc = MusicService.instance ?: return false
+        // 打包 10 段参数
+        val gainsDb = FloatArray(10)
+        val freqsHz = FloatArray(10)
+        val qValues = FloatArray(10)
+        val filterTypes = IntArray(10)
+        preset.filters.take(10).forEachIndexed { i, f ->
+            gainsDb[i] = f.gain
+            freqsHz[i] = f.freq
+            qValues[i] = f.q.coerceIn(0.1f, 10.0f)
+            filterTypes[i] = AutoEqPresetManager.filterTypeInt(f.type)
         }
-        return ok
+        if (svc.isDacActive()) {
+            svc.applyAutoEq(gainsDb, freqsHz, qValues, filterTypes, preset.preamp)
+        } else if (isOboeMode(context)) {
+            val oboe = svc.oboeDirectPlayer ?: return false
+            AutoEqPresetManager.applyPreset(oboe, preset)
+        } else {
+            Log.w(TAG, "AutoEQ not supported in current mode")
+            return false
+        }
+        saveAutoEqSettings(context, presetName)
+        _enabled.value = true
+        return true
     }
 
     /** 清除 AutoEQ，恢复默认 DSP */
     fun clearAutoEq(context: Context) {
-        val oboe = MusicService.instance?.oboeDirectPlayer ?: return
-        AutoEqPresetManager.clearPreset(oboe)
+        val svc = MusicService.instance ?: return
+        if (svc.isDacActive()) {
+            svc.resetAutoEq()
+        } else {
+            AutoEqPresetManager.clearPreset(svc.oboeDirectPlayer ?: return)
+        }
         saveAutoEqSettings(context, null)
         _enabled.value = false
         Log.i(TAG, "AutoEQ cleared")
@@ -346,6 +386,16 @@ object EqualizerManager {
      * 启用/禁用 EQ（自动适配 Android / Oboe）
      */
     fun setEnabled(enabled: Boolean, context: Context) {
+        // 【V8.3】DAC 独占模式：开关路由到 USB DAC 原生 DSP
+        if (MusicService.instance?.isDacActive() == true) {
+            UsbDacManager.setDspEnabled(enabled)
+            if (!enabled) UsbDacManager.resetDspEq5Band()
+            saveSettings(context, enabled, getCurrentPresetId(context))
+            _enabled.value = enabled
+            Log.d(TAG, "DAC DSP enabled=$enabled")
+            return
+        }
+
         // 【V7.80】Oboe 模式：控制 DSP
         if (isOboeMode(context)) {
             val oboe = MusicService.instance?.oboeDirectPlayer
@@ -438,16 +488,12 @@ object EqualizerManager {
 
         // 【V7.107】恢复 AutoEQ 预设 — OboeDirectPlayer 每切歌新建实例，AutoEQ 会丢失
         // 必须在 5-band EQ 恢复之后,因为 resetDspEq5Band() 也会清 g_autoEqEnabled
-        // 【V7.108】DSP Mode 为 OFF 时不恢复 AutoEQ，避免切歌后 EQ 自动打开
-        if (isOboeMode(context)) {
-            val dspMode = context.getSharedPreferences("dsp_mode", Context.MODE_PRIVATE)
-                .getInt("mode", -1)
-            if (dspMode >= 0) {
-                val savedAutoEq = getAutoEqPreset(context)
-                if (savedAutoEq != null) {
-                    applyAutoEqPreset(savedAutoEq, context)
-                    Log.i(TAG, "AutoEQ preset restored in restoreSettings: $savedAutoEq")
-                }
+        // 【V8.3】DAC 独占模式同样需恢复（applyAutoEqPreset 内部按 isDacActive 路由）。
+        if (isOboeMode(context) || MusicService.instance?.isDacActive() == true) {
+            val savedAutoEq = getAutoEqPreset(context)
+            if (savedAutoEq != null) {
+                applyAutoEqPreset(savedAutoEq, context)
+                Log.i(TAG, "AutoEQ preset restored in restoreSettings: $savedAutoEq")
             }
         }
 

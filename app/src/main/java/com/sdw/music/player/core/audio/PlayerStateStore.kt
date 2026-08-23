@@ -30,7 +30,6 @@ class PlayerStateStore @Inject constructor(
         private val KEY_REPEAT_MODE = intPreferencesKey("repeat_mode")
         private val KEY_PLAYBACK_POSITION_MS = longPreferencesKey("playback_position_ms")
         private val KEY_LAST_QUEUE_IDS = stringPreferencesKey("last_queue_ids")
-        private val KEY_DSP_MODE = intPreferencesKey("dsp_mode")
     }
 
     private val store: DataStore<Preferences> get() = appContext.dataStore
@@ -41,8 +40,7 @@ class PlayerStateStore @Inject constructor(
         shuffleEnabled: Boolean,
         repeatMode: Int,
         positionMs: Long,
-        queueIds: List<Long>,
-        dspMode: Int
+        queueIds: List<Long>
     ) {
         store.edit { prefs ->
             prefs[KEY_LAST_SONG_ID] = songId
@@ -50,7 +48,6 @@ class PlayerStateStore @Inject constructor(
             prefs[KEY_REPEAT_MODE] = repeatMode
             prefs[KEY_PLAYBACK_POSITION_MS] = positionMs
             prefs[KEY_LAST_QUEUE_IDS] = queueIds.joinToString(",")
-            prefs[KEY_DSP_MODE] = dspMode
         }
     }
 
@@ -72,8 +69,7 @@ class PlayerStateStore @Inject constructor(
             playbackPositionMs = prefs[KEY_PLAYBACK_POSITION_MS] ?: 0L,
             lastQueueIds = if (queueStr.isNotBlank()) {
                 queueStr.split(",").mapNotNull { it.toLongOrNull() }
-            } else emptyList(),
-            dspMode = prefs[KEY_DSP_MODE] ?: -1
+            } else emptyList()
         )
     }
 

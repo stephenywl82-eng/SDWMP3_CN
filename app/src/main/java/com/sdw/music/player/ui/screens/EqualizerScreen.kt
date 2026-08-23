@@ -51,8 +51,6 @@ fun EqualizerScreen(
 @Composable
 private fun OboeEqFullScreen(onBack: () -> Unit, onNavigateToMseb: () -> Unit) {
     val context = LocalContext.current
-    val dspPrefs = context.getSharedPreferences("dsp_mode", android.content.Context.MODE_PRIVATE)
-    val eqPrefs = context.getSharedPreferences("dsp_eq", android.content.Context.MODE_PRIVATE)
     val presets = remember { EqualizerManager.PRESETS }
 
     // AutoEQ 状态
@@ -60,12 +58,8 @@ private fun OboeEqFullScreen(onBack: () -> Unit, onNavigateToMseb: () -> Unit) {
     var autoEqExpandedBrand by remember { mutableStateOf<String?>(null) }
     var currentAutoEqPreset by remember { mutableStateOf(EqualizerManager.getAutoEqPreset(context)) }
 
-    var dspMode by remember { mutableIntStateOf(dspPrefs.getInt("mode", -1)) }
-    var dspEnabled by remember { mutableStateOf(eqPrefs.getBoolean("enabled", false)) }
-
     val eqEnabled by EqualizerManager.enabledFlow.collectAsState()
     var currentPresetId by remember { mutableStateOf(EqualizerManager.getCurrentPresetId(context)) }
-    val dspLabels = listOf("Off", "Steven", "Cat")
 
     LaunchedEffect(Unit) {
         EqualizerManager.restoreSettings(context)
@@ -120,48 +114,6 @@ private fun OboeEqFullScreen(onBack: () -> Unit, onNavigateToMseb: () -> Unit) {
                     Text(stringResource(R.string.eq_mseb_psychoacoustic), style = MaterialTheme.typography.titleSmall)
                 }
             }
-
-            // === DSP Mode选择器 ===
-            item {
-                Text(
-                    text = stringResource(R.string.eq_dsp_mode),
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-            }
-
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    dspLabels.forEachIndexed { idx, label ->
-                        val selected = (dspMode + 1) == idx && !eqEnabled
-                        FilterChip(
-                            selected = selected,
-                            onClick = {
-                                val newMode = idx - 1
-                                dspMode = newMode
-                                dspPrefs.edit().putInt("mode", newMode).apply()
-                                val dspEnum = when (newMode) {
-                                    -1 -> OboeDirectPlayer.DspMode.OFF
-                                    0 -> OboeDirectPlayer.DspMode.STEVEN_SPECIAL
-                                    1 -> OboeDirectPlayer.DspMode.CAT_MODE
-                                    else -> OboeDirectPlayer.DspMode.OFF
-                                }
-                                MusicService.instance?.oboeDirectPlayer?.setDspMode(dspEnum)
-                                dspEnabled = newMode >= 0
-                                eqPrefs.edit().putBoolean("enabled", newMode >= 0).apply()
-                            },
-                            label = { Text(label) },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-
 
             // === 分隔 ===
             item {
@@ -339,120 +291,6 @@ private fun OboeEqFullScreen(onBack: () -> Unit, onNavigateToMseb: () -> Unit) {
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 20.dp, vertical = 16.dp)
-                )
-            }
-        }
-    }
-}
-
-// ================ Oboe 独占模式：DSP 控制（旧版，保留） ================
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun OboeDspScreen(onBack: () -> Unit) {
-    val context = LocalContext.current
-    val dspPrefs = context.getSharedPreferences("dsp_mode", android.content.Context.MODE_PRIVATE)
-    val eqPrefs = context.getSharedPreferences("dsp_eq", android.content.Context.MODE_PRIVATE)
-
-    var dspMode by remember { mutableIntStateOf(dspPrefs.getInt("mode", -1)) }
-    var dspEnabled by remember { mutableStateOf(eqPrefs.getBoolean("enabled", false)) }
-
-    val dspLabels = listOf("Off", "Steven Special", "Cat Mode")
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.eq_dsp_effects)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
-                    }
-                },
-                actions = {
-                    Text(
-                        text = if (dspEnabled) "On" else "Off",
-                        style = MaterialTheme.typography.labelMedium,
-                        modifier = Modifier.padding(end = 4.dp)
-                    )
-                    Switch(
-                        checked = dspEnabled,
-                        onCheckedChange = { on ->
-                            dspEnabled = on
-                            eqPrefs.edit().putBoolean("enabled", on).apply()
-                            MusicService.instance?.setDspEqEnabled(on)
-                        },
-                        modifier = Modifier.padding(end = 12.dp)
-                    )
-                }
-            )
-        }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-        ) {
-            // 模式说明
-            item {
-                Text(
-                    text = stringResource(R.string.eq_oboe_exclusive_unavailable),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 20.dp, vertical = 16.dp)
-                )
-            }
-
-            // DSP Mode选择
-            item {
-                Text(
-                    text = stringResource(R.string.eq_dsp_mode),
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-            }
-
-            item {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    dspLabels.forEachIndexed { idx, label ->
-                        val selected = (dspMode + 1) == idx  // mode: -1/0/1 → idx: 0/1/2
-                        FilterChip(
-                            selected = selected,
-                            onClick = {
-                                val newMode = idx - 1
-                                dspMode = newMode
-                                dspPrefs.edit().putInt("mode", newMode).apply()
-                                // 应用 DSP Mode到 OboeDirectPlayer
-                                val dspEnum = when (newMode) {
-                                    -1 -> OboeDirectPlayer.DspMode.OFF
-                                    0 -> OboeDirectPlayer.DspMode.STEVEN_SPECIAL
-                                    1 -> OboeDirectPlayer.DspMode.CAT_MODE
-                                    else -> OboeDirectPlayer.DspMode.OFF
-                                }
-                                MusicService.instance?.oboeDirectPlayer?.setDspMode(dspEnum)
-                            },
-                            label = { Text(label) },
-                            modifier = Modifier.weight(1f)
-                        )
-                    }
-                }
-            }
-
-            // 当前状态提示
-            item {
-                Spacer(Modifier.height(24.dp))
-                val currentLabel = dspLabels.getOrElse(dspMode + 1) { stringResource(R.string.eq_off) }
-                Text(
-                    text = if (dspEnabled) stringResource(R.string.eq_current, currentLabel) else stringResource(R.string.eq_current_off),
-                    style = MaterialTheme.typography.bodyMedium,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth()
                 )
             }
         }

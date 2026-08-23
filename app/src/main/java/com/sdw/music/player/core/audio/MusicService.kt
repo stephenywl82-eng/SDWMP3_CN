@@ -1308,9 +1308,10 @@ class MusicService : MediaSessionService() {
                         val msebParams = MsebCalculator.load(this@MusicService)
                         if (!msebParams.isFlat) {
                             UsbDacManager.setDspEnabled(true)
-                            UsbDacManager.setDspEq5Band(
+                            UsbDacManager.setMseb10Band(
                                 MsebCalculator.calculateGains(msebParams),
-                                MsebCalculator.BAND_FREQS
+                                MsebCalculator.BAND_FREQS,
+                                MsebCalculator.BAND_QS
                             )
                             dspEqEnabled = true
                         }
@@ -1464,7 +1465,7 @@ class MusicService : MediaSessionService() {
                 oboeFailureCount = 0
                 oboeUsbGuardMs = System.currentTimeMillis() + 8000L  // [V8.1] block USB-DAC race for 8s
                 oboeSuppressUsbRestart = true  // [V8.2] prevent Oboe restart loop after first song
-                oboeFlowTrace = "2705 Oboe OK (mode=${newPlayer.getDspMode()?.displayName}, exclusive=${newPlayer.isExclusiveMode()})"
+                oboeFlowTrace = "2705 Oboe OK (exclusive=${newPlayer.isExclusiveMode()})"
 
                 handler.post {
                     currentSong = song
@@ -1472,10 +1473,6 @@ class MusicService : MediaSessionService() {
                     volumeGuard.resetMuteState()
                     oboeFailureCount = 0
 
-                    val dspModeSp = getSharedPreferences("dsp_mode", MODE_PRIVATE)
-                    val savedDspMode = dspModeSp.getInt("mode", -1)
-                    setDspMode(savedDspMode)
-                    Log.i(TAG, "DSP mode restored: ${when (savedDspMode) { -1 -> "OFF"; 1 -> "CAT_MODE"; else -> "STEVEN_SPECIAL" }}")
                     EqualizerManager.restoreSettings(this@MusicService)
 
                     // Restore MSEB if active (new OboeDirectPlayer resets native Biquad to zero)
@@ -1483,9 +1480,10 @@ class MusicService : MediaSessionService() {
                         val msebParams = MsebCalculator.load(this@MusicService)
                         if (!msebParams.isFlat) {
                             oboeDirectPlayer?.setDspEnabled(true)
-                            oboeDirectPlayer?.setDspEq5Band(
+                            oboeDirectPlayer?.setMseb10Band(
                                 MsebCalculator.calculateGains(msebParams),
-                                MsebCalculator.BAND_FREQS
+                                MsebCalculator.BAND_FREQS,
+                                MsebCalculator.BAND_QS
                             )
                             dspEqEnabled = true
                         }
@@ -1509,7 +1507,7 @@ class MusicService : MediaSessionService() {
                     val nativeRate = newPlayer.getSampleRateNative() ?: 0
                     val bitPerfect = sampleRate == nativeRate
                     val clipInfo = newPlayer.getClipDebugInfo() ?: ""
-                    Log.i(TAG, "OboeDirect playing: ${song.title}, rate=${sampleRate}Hz, native=${nativeRate}Hz, bitPerfect=$bitPerfect, exclusive=${newPlayer.isExclusiveMode()}, dspMode=${newPlayer.getDspMode()?.displayName}, $clipInfo")
+                    Log.i(TAG, "OboeDirect playing: ${song.title}, rate=${sampleRate}Hz, native=${nativeRate}Hz, bitPerfect=$bitPerfect, exclusive=${newPlayer.isExclusiveMode()}, $clipInfo")
                 }
             }
         }.start()
@@ -1559,15 +1557,17 @@ class MusicService : MediaSessionService() {
     /** DAC 独占模式是否真正激活（已 claim） */
     fun isDacActive(): Boolean = isUsbExclusiveMode() && UsbDacManager.isClaimed()
 
-    /** 应用 MSEB 5 段 EQ — 根据当前播放模式路由到 Oboe 或 USB DAC 链路（共用同一套 Biquad） */
-    fun applyMsebEq(gainsDb: FloatArray, freqsHz: FloatArray?) {
+    /** 应用 MSEB 10 段 EQ — 根据当前播放模式路由到 Oboe 或 USB DAC 链路（共用同一套 Biquad） */
+    fun applyMsebEq(gainsDb: FloatArray, freqsHz: FloatArray?, qValues: FloatArray?) {
         dspEqEnabled = true
+        val f = freqsHz ?: FloatArray(gainsDb.size)
+        val q = qValues ?: FloatArray(gainsDb.size) { 1.0f }
         if (isDacActive()) {
             UsbDacManager.setDspEnabled(true)
-            UsbDacManager.setDspEq5Band(gainsDb, freqsHz)
+            UsbDacManager.setMseb10Band(gainsDb, f, q)
         } else {
             oboeDirectPlayer?.setDspEnabled(true)
-            oboeDirectPlayer?.setDspEq5Band(gainsDb, freqsHz)
+            oboeDirectPlayer?.setMseb10Band(gainsDb, f, q)
         }
     }
 
@@ -1575,11 +1575,82 @@ class MusicService : MediaSessionService() {
     fun resetMsebEq() {
         dspEqEnabled = false
         if (isDacActive()) {
-            UsbDacManager.resetDspEq5Band()
+            UsbDacManager.resetMseb10Band()
             UsbDacManager.setDspEnabled(false)
         } else {
-            oboeDirectPlayer?.resetDspEq5Band()
+            oboeDirectPlayer?.resetMseb10Band()
             oboeDirectPlayer?.setDspEnabled(false)
+        }
+    }
+
+    /** 【V8.3】应用 AutoEQ 10 段耳机修正 — 路由到 Oboe 或 USB DAC（与 MSEB 并存叠加，打底）。*/
+    fun applyAutoEq(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray, filterTypes: IntArray, preampDb: Float) {
+        if (isDacActive()) {
+            UsbDacManager.setAutoEq10Band(gainsDb, freqsHz, qValues, filterTypes, preampDb)
+        } else {
+            oboeDirectPlayer?.setAutoEq10Band(gainsDb, freqsHz, qValues, filterTypes, preampDb)
+        }
+    }
+
+    /** 清除 AutoEQ 耳机修正 — 路由到当前播放模式对应的链路 */
+    fun resetAutoEq() {
+        if (isDacActive()) {
+            UsbDacManager.resetAutoEq()
+        } else {
+            oboeDirectPlayer?.resetAutoEq()
+        }
+    }
+
+    /** 【V8.3】应用 M/S 声场（跨声道矩阵）— 独立于 EQ，单独开关 */
+    fun applyMsStage(soundstage: Float, imaging: Float) {
+        if (isDacActive()) {
+            UsbDacManager.setMsStage(soundstage, imaging)
+        } else {
+            oboeDirectPlayer?.setMsStage(soundstage, imaging)
+        }
+    }
+
+    fun resetMsStage() {
+        if (isDacActive()) {
+            UsbDacManager.resetMsStage()
+        } else {
+            oboeDirectPlayer?.resetMsStage()
+        }
+    }
+
+    /** 【V8.3】应用瞬态整形（时域，impulseResponse 维度映射，-1..+1）*/
+    fun applyTransient(amount: Float) {
+        if (isDacActive()) {
+            UsbDacManager.setTransient(amount)
+        } else {
+            oboeDirectPlayer?.setTransient(amount)
+        }
+    }
+
+    fun resetTransient() {
+        if (isDacActive()) {
+            UsbDacManager.resetTransient()
+        } else {
+            oboeDirectPlayer?.resetTransient()
+        }
+    }
+
+    /** 【V8.3】动态压缩（Master Bus Compressor，独立全局模块）*/
+    fun applyCompressor(enabled: Boolean, thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float) {
+        if (isDacActive()) {
+            UsbDacManager.setCompressorEnabled(enabled)
+            if (enabled) UsbDacManager.setCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb)
+        } else {
+            oboeDirectPlayer?.setCompressorEnabled(enabled)
+            if (enabled) oboeDirectPlayer?.setCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb)
+        }
+    }
+
+    fun resetCompressor() {
+        if (isDacActive()) {
+            UsbDacManager.setCompressorEnabled(false)
+        } else {
+            oboeDirectPlayer?.setCompressorEnabled(false)
         }
     }
 
@@ -1645,32 +1716,6 @@ class MusicService : MediaSessionService() {
 
     /** ??V7.0 OboeDirectPlayer (?? UI  */
     fun getOboePlayer(): OboeDirectPlayer? = oboeDirectPlayer
-
-    /** ??V7.0??Settings DSP Mode:-1 = OFF,0 = Steven Special,1 = Cat Mode */
-    fun setDspMode(mode: Int) {
-        // 
-        getSharedPreferences("dsp_mode", MODE_PRIVATE).edit().putInt("mode", mode).apply()
-        oboeDirectPlayer?.setDspMode(
-            when (mode) {
-                -1 -> OboeDirectPlayer.DspMode.OFF
-                1 -> OboeDirectPlayer.DspMode.CAT_MODE
-                else -> OboeDirectPlayer.DspMode.STEVEN_SPECIAL
-            }
-        )
-        Log.i(TAG, "DSP mode set to: ${when (mode) { -1 -> "OFF"; 1 -> "CAT_MODE"; else -> "STEVEN_SPECIAL" }}")
-    }
-
-    /** ??V7.0 DSP Mode:-1 = OFF,0 = Steven Special,1 = Cat Mode */
-    fun getDspMode(): Int {
-        return try {
-            val mode = oboeDirectPlayer?.getDspMode()
-            when (mode) {
-                OboeDirectPlayer.DspMode.OFF -> -1
-                OboeDirectPlayer.DspMode.CAT_MODE -> 1
-                else -> 0
-            }
-        } catch (_: Exception) { -1 }
-    }
 
     // 
 

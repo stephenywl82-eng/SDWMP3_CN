@@ -420,6 +420,33 @@ object UsbDacManager {
     }
     fun resetDspEq5Band() { if (isNativeLoaded) try { nativeResetDspEq5Band() } catch (_: Throwable) {} }
 
+    // 【V8.2】MSEB 10-band subjective EQ
+    fun setMseb10Band(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray) {
+        if (isNativeLoaded) try { nativeSetMseb10Band(gainsDb, freqsHz, qValues) } catch (_: Throwable) {}
+    }
+    fun resetMseb10Band() { if (isNativeLoaded) try { nativeResetMseb10Band() } catch (_: Throwable) {} }
+
+    // 【V8.3】AutoEQ 10-band 耳机修正（任意频点 + PK/HS/LS），与 MSEB 并存叠加。
+    fun setAutoEq10Band(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray, filterTypes: IntArray, preampDb: Float) {
+        if (isNativeLoaded) try { nativeSetAutoEq10Band(gainsDb, freqsHz, qValues, filterTypes, preampDb) } catch (_: Throwable) {}
+    }
+    fun resetAutoEq() { if (isNativeLoaded) try { nativeResetAutoEq() } catch (_: Throwable) {} }
+
+    // 【V8.3】M/S 声场（跨声道矩阵）
+    fun setMsStage(soundstage: Float, imaging: Float) {
+        if (isNativeLoaded) try { nativeSetMsStage(soundstage, imaging) } catch (_: Throwable) {}
+    }
+    fun resetMsStage() { if (isNativeLoaded) try { nativeResetMsStage() } catch (_: Throwable) {} }
+
+    fun setTransient(amount: Float) { if (isNativeLoaded) try { nativeSetTransient(amount) } catch (_: Throwable) {} }
+    fun resetTransient() { if (isNativeLoaded) try { nativeResetTransient() } catch (_: Throwable) {} }
+
+    // 【V8.3】动态压缩（Master Bus Compressor，独立全局模块）
+    fun setCompressorEnabled(enabled: Boolean) { if (isNativeLoaded) try { nativeSetCompressorEnabled(enabled) } catch (_: Throwable) {} }
+    fun setCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float) {
+        if (isNativeLoaded) try { nativeSetCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb) } catch (_: Throwable) {}
+    }
+
     @Volatile private var currentVolume = 0.7f
     fun getSafeDacInfo(): String {
         if (!isNativeLoaded) return "Native driver not loaded"
@@ -641,6 +668,16 @@ object UsbDacManager {
     private external fun nativeSetDspEnabled(enabled: Boolean)
     private external fun nativeSetDspEq5Band(gainsDb: FloatArray, freqsHz: FloatArray?)
     private external fun nativeResetDspEq5Band()
+    private external fun nativeSetMseb10Band(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray)
+    private external fun nativeResetMseb10Band()
+    private external fun nativeSetAutoEq10Band(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray, filterTypes: IntArray, preampDb: Float)
+    private external fun nativeResetAutoEq()
+    private external fun nativeSetMsStage(soundstage: Float, imaging: Float)
+    private external fun nativeResetMsStage()
+    private external fun nativeSetTransient(amount: Float)
+    private external fun nativeResetTransient()
+    private external fun nativeSetCompressorEnabled(enabled: Boolean)
+    private external fun nativeSetCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float)
     private external fun nativeForceReset()
     fun forceReset() { if (isNativeLoaded) nativeForceReset() }
 

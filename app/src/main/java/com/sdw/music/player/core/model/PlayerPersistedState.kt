@@ -9,6 +9,5 @@ data class PlayerPersistedState(
     val shuffleEnabled: Boolean = false,
     val repeatMode: Int = 0,
     val playbackPositionMs: Long = 0L,
-    val lastQueueIds: List<Long> = emptyList(),
-    val dspMode: Int = -1
+    val lastQueueIds: List<Long> = emptyList()
 )

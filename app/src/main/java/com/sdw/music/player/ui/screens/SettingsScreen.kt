@@ -50,12 +50,6 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 .getInt("min_duration", 150)
         )
     }
-    var dspMode by remember(refreshTrigger) {
-        mutableStateOf(
-            context.getSharedPreferences("dsp_mode", android.content.Context.MODE_PRIVATE)
-                .getInt("mode", -1)
-        )
-    }
     var usbExclusiveEnabled by remember(refreshTrigger) {
         mutableStateOf(
             context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
@@ -129,37 +123,6 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
 
             item { SettingsDivider() }
 
-            item {
-                val dspLabels = listOf(stringResource(R.string.action_close), "Steven Special")
-                SettingsItem(
-                    icon = Icons.Default.GraphicEq,
-                    title = stringResource(R.string.settings_dsp_mode),
-                    subtitle = stringResource(R.string.settings_current, dspLabels.getOrElse(dspMode + 1) { stringResource(R.string.action_close) })
-                )
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
-                ) {
-                    dspLabels.forEachIndexed { idx, label ->
-                        val selected = (dspMode + 1) == idx
-                        FilterChip(
-                            selected = selected,
-                            onClick = {
-                                dspMode = idx - 1
-                                context.getSharedPreferences("dsp_mode", android.content.Context.MODE_PRIVATE)
-                                    .edit().putInt("mode", idx - 1).apply()
-                                refreshTrigger++
-                            },
-                            label = { Text(label, color = if (selected) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.onBackground, fontSize = 12.sp) },
-                            colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary,
-                                containerColor = MaterialTheme.colorScheme.surface
-                            )
-                        )
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-            }
             item { SettingsDivider() }
             // === Hardware Exclusive Mode (Bypass Android Mixer) ===
             item {

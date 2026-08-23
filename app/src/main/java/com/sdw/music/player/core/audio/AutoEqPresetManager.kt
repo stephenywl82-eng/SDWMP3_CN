@@ -32,7 +32,7 @@ object AutoEqPresetManager {
     private const val TAG = "AutoEqPresetManager"
 
     /** filterType: 0=Peaking, 1=HighShelf, 2=LowShelf */
-    private fun filterTypeInt(type: String): Int = when (type) {
+    fun filterTypeInt(type: String): Int = when (type) {
         "HS" -> 1
         "LS" -> 2
         else -> 0  // PK/LSC/HSC all map to Peaking

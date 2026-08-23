@@ -16,12 +16,17 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
+    /* CMake disabled to avoid OOM on 8GB box — libaudio_analyzer.so is shipped
+       via jniLibs (prebuilt stripped .so). Rebuild native manually if fft_analyzer
+       sources change. */
+    /*
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
             version = "3.22.1"
         }
     }
+    */
     ndkVersion = "25.1.8937393"
 }
 

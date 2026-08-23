@@ -61,3 +61,6 @@ translate*.py
 _*.py
 trace*.txt
 build*.bat
+
+# --- Temp debug scripts (2026-08-23) ---
+remove_*.py

@@ -37,7 +37,6 @@ sealed class PlayerIntent {
     data class SeekTo(val positionMs: Long) : PlayerIntent()
     data class SetShuffle(val enabled: Boolean) : PlayerIntent()
     data class SetRepeatMode(val mode: Int) : PlayerIntent()
-    data class SetDspMode(val mode: Int) : PlayerIntent()
     data class ToggleEqSheet(val show: Boolean) : PlayerIntent()
     data class SelectEqPreset(val presetId: String) : PlayerIntent()
     data class PlaySongList(val songs: List<com.sdw.music.player.Song>, val startIndex: Int = 0) : PlayerIntent()
@@ -66,7 +65,6 @@ data class PlayerState(
     val durationMs: Long = 0L,
     val shuffleEnabled: Boolean = false,
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
-    val dspMode: Int = -1,
     val showEqSheet: Boolean = false,
     val accentColor: Long = 0L,  // 0 = no cover color, PlayerScreen falls back to system primary
     val coverColors: List<Int> = emptyList(),  // 5色 for Edge灯 (List has value equality, IntArray had ref equality causing false recomposition)
@@ -362,22 +360,6 @@ class PlayerViewModel @Inject constructor(
             is PlayerIntent.SetRepeatMode -> {
                 connection.setRepeatMode(intent.mode)
             }
-            is PlayerIntent.SetDspMode -> {
-                val ctx = getApplication<android.app.Application>().applicationContext
-                val enabled = intent.mode >= 0
-                if (enabled) {
-                    // Apply last-used preset when enabling, not just bare EQ
-                    val presetId = com.sdw.music.player.EqualizerManager.getCurrentPresetId(ctx)
-                    if (presetId != "flat") {
-                        com.sdw.music.player.EqualizerManager.applyPreset(presetId, ctx)
-                    } else {
-                        com.sdw.music.player.EqualizerManager.setEnabled(true, ctx)
-                    }
-                } else {
-                    com.sdw.music.player.EqualizerManager.setEnabled(false, ctx)
-                }
-                _state.update { it.copy(dspMode = intent.mode) }
-            }
             is PlayerIntent.PlaySongList -> {
                 connection.setSongs(intent.songs, updateGlobal = false)
                 if (intent.songs.isNotEmpty()) {
@@ -391,7 +373,6 @@ class PlayerViewModel @Inject constructor(
             is PlayerIntent.SelectEqPreset -> {
                 val ctx = getApplication<android.app.Application>().applicationContext
                 com.sdw.music.player.EqualizerManager.applyPreset(intent.presetId, ctx)
-                _state.update { it.copy(dspMode = 0) }
             }
             is PlayerIntent.ToggleFavorite -> {
                 val songId = _state.value.currentSongId
@@ -574,8 +555,7 @@ class PlayerViewModel @Inject constructor(
         _state.update { s ->
             s.copy(
                 shuffleEnabled = persisted.shuffleEnabled,
-                repeatMode = persisted.repeatMode,
-                dspMode = persisted.dspMode
+                repeatMode = persisted.repeatMode
             )
         }
 
@@ -639,8 +619,7 @@ class PlayerViewModel @Inject constructor(
                     shuffleEnabled = s.shuffleEnabled,
                     repeatMode = s.repeatMode,
                     positionMs = _positionMs.value,
-                    queueIds = s.songList.map { it.id },
-                    dspMode = s.dspMode
+                    queueIds = s.songList.map { it.id }
                 )
             } catch (e: Exception) {
                 android.util.Log.e("PlayerViewModel", "persistState failed", e)

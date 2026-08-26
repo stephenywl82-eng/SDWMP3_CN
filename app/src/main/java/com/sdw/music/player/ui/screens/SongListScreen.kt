@@ -2,10 +2,16 @@ package com.sdw.music.player.ui.screens
 
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -41,7 +47,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.activity.compose.BackHandler
 import com.sdw.music.player.R
 import androidx.compose.ui.unit.sp
@@ -321,8 +329,22 @@ fun SongListScreen(
                         )
                     } else {
                         Column(modifier = Modifier.fillMaxWidth()) {
-                            Text(stringResource(R.string.brand_name), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            Text(stringResource(R.string.songlist_song_count, songs.size), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            // [fix] 应用名允许换行 2~3 行，竖屏窄屏下字号自适应，去掉歌曲数目行
+                            val cfg = androidx.compose.ui.platform.LocalConfiguration.current
+                            val titleFontSize = when {
+                                cfg.screenWidthDp < 400 -> 20.sp
+                                cfg.screenWidthDp < 600 -> 22.sp
+                                else -> 24.sp
+                            }
+                            Text(
+                                stringResource(R.string.brand_name),
+                                style = MaterialTheme.typography.titleLarge,
+                                fontSize = titleFontSize,
+                                lineHeight = titleFontSize * 1.15f,
+                                color = MaterialTheme.colorScheme.onBackground,
+                                maxLines = 3,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 },
@@ -335,20 +357,41 @@ fun SongListScreen(
                         IconButton(onClick = { isSearching = true }) {
                             Icon(Icons.Default.Search, stringResource(R.string.action_search), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        IconButton(onClick = onRefresh) {
-                            Icon(Icons.Default.Refresh, stringResource(R.string.action_refresh), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        // [fix] 顶部入口收进「更多」菜单，避免 7 个图标把标题空间挤光导致应用名被遮挡
+                        var moreExpanded by remember { mutableStateOf(false) }
+                        IconButton(onClick = { moreExpanded = true }) {
+                            Icon(Icons.Default.MoreVert, stringResource(R.string.action_more), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
-                        IconButton(onClick = onNavigateToPlaylist) {
-                            Icon(Icons.AutoMirrored.Filled.QueueMusic, stringResource(R.string.title_playlists), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        IconButton(onClick = onNavigateToAlbum) {
-                            Icon(Icons.Default.Album, stringResource(R.string.title_albums), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        IconButton(onClick = onNavigateToArtist) {
-                            Icon(Icons.Default.Person, stringResource(R.string.title_artists), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        IconButton(onClick = onNavigateToFolder) {
-                            Icon(Icons.Default.Folder, stringResource(R.string.title_folders), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        DropdownMenu(
+                            expanded = moreExpanded,
+                            onDismissRequest = { moreExpanded = false },
+                            offset = DpOffset(x = (-80).dp, y = 0.dp)
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.action_refresh)) },
+                                leadingIcon = { Icon(Icons.Default.Refresh, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = { moreExpanded = false; onRefresh() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.title_playlists)) },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.QueueMusic, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = { moreExpanded = false; onNavigateToPlaylist() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.title_albums)) },
+                                leadingIcon = { Icon(Icons.Default.Album, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = { moreExpanded = false; onNavigateToAlbum() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.title_artists)) },
+                                leadingIcon = { Icon(Icons.Default.Person, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = { moreExpanded = false; onNavigateToArtist() }
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.title_folders)) },
+                                leadingIcon = { Icon(Icons.Default.Folder, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) },
+                                onClick = { moreExpanded = false; onNavigateToFolder() }
+                            )
                         }
                         IconButton(onClick = onNavigateToSettings) {
                             Icon(Icons.Default.Settings, stringResource(R.string.action_settings), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -529,34 +572,48 @@ fun SongListScreen(
         }
 
         // === Mini Player ===
-        if (currentPlayingSong != null) {
-            val miniCoverUri = currentPlayingSong.albumArtUri
-            MiniPlayer(
-                song = currentPlayingSong,
-                isPlaying = isPlaying,
-                accentColor = activeColor,
-                coverUri = miniCoverUri,
-                coverVisible = miniCoverVisible,
-                positionMs = positionMs,
-                durationMs = durationMs,
-                onClick = onNavigateToPlayer,
-                onCoverPositioned = { offset, size ->
-                    sharedCoverState?.miniCoverPosition = CoverPosition(
-                        windowOffset = offset,
-                        size = size
-                    )
-                },
-                modifier = Modifier.align(Alignment.BottomCenter)
-            )
-        } else {
-            // Device brand watermark when mini player is hidden
+        // 【V8.5】出现/消失动画：底部滑入 + 渐显；消失下滑 + 渐隐。
+        // 用 lastSong 保留最后非空歌曲，保证 exit 动画期间仍有内容可渲染
+        var lastMiniSong by remember { mutableStateOf<Song?>(null) }
+        if (currentPlayingSong != null) lastMiniSong = currentPlayingSong
+        AnimatedVisibility(
+            visible = currentPlayingSong != null,
+            enter = slideInVertically(tween(420, easing = FastOutSlowInEasing)) { it } + fadeIn(tween(420, easing = FastOutSlowInEasing)),
+            exit = slideOutVertically(tween(320, easing = FastOutSlowInEasing)) { it } + fadeOut(tween(320, easing = FastOutSlowInEasing)),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
+            lastMiniSong?.let { song ->
+                val miniCoverUri = song.albumArtUri
+                MiniPlayer(
+                    song = song,
+                    isPlaying = isPlaying,
+                    accentColor = activeColor,
+                    coverUri = miniCoverUri,
+                    coverVisible = miniCoverVisible,
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    onClick = onNavigateToPlayer,
+                    onCoverPositioned = { offset, size ->
+                        sharedCoverState?.miniCoverPosition = CoverPosition(
+                            windowOffset = offset,
+                            size = size
+                        )
+                    }
+                )
+            }
+        }
+        // 水印：迷你条隐藏时显示，带淡入淡出（与迷你条互斥平滑过渡）
+        AnimatedVisibility(
+            visible = currentPlayingSong == null,
+            enter = fadeIn(tween(400, easing = FastOutSlowInEasing)),
+            exit = fadeOut(tween(300, easing = FastOutSlowInEasing)),
+            modifier = Modifier.align(Alignment.BottomCenter)
+        ) {
             Text(
                 text = deviceName.ifEmpty { stringResource(R.string.brand_audio) },
                 style = MaterialTheme.typography.headlineMedium,
                 color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = 24.dp)
+                modifier = Modifier.padding(bottom = 24.dp)
             )
         }
     }

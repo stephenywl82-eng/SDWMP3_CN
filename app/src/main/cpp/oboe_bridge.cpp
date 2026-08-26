@@ -18,6 +18,7 @@
 #include <media/NdkMediaFormat.h>
 #include <unistd.h>
 #include "biquad_filter.h"
+#include "loudness_comp.h"
 #include <sys/stat.h>
 #define LOG_TAG "OboeBridge"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -415,6 +416,21 @@ JNIEXPORT jlong JNICALL Java_com_sdw_music_player_OboeAudioSink_nativeGetPresent
 // ============================================================
 static std::mutex g_streamMutex;
 static PCMRingBuffer *g_ringBuffer = nullptr;
+// 【Crossfade】前置声明：onAudioReady 需引用（B 轨 + crossfade 状态原子），
+// 原 decoder 全局区的 g_decoderStopRequested/g_decoderCv 定义上移至此。
+static std::atomic<bool> g_decoderStopRequested{false};
+static std::condition_variable g_decoderCv;
+static std::atomic<int64_t> g_decoderPositionUs{0};  // 【Crossfade】前置声明（onAudioReady 完成分支引用）
+static std::atomic<bool> g_decoderStopRequestedB{false};
+static std::condition_variable g_decoderCvB;
+static PCMRingBuffer *g_ringBufferB = nullptr;   // 【Crossfade】B 轨 ring
+static std::atomic<bool> g_activeIsB{false};     // 【Crossfade】active 轨是否为 B
+static std::atomic<bool> g_crossfadeActive{false}; // 【Crossfade】正在交叉淡化
+static std::atomic<float> g_crossfadePos{0.0f};    // 【Crossfade】进度 0..1
+static std::atomic<float> g_crossfadeStep{0.0f};   // 【Crossfade】每帧增量
+static std::atomic<int> g_crossfadeDurationMs{0};  // 【Crossfade】时长（完成后重置播放位置用）
+static float g_xfadeBufA[16384];   // 【Crossfade】A 轨临时缓冲（实时线程安全 static）
+static float g_xfadeBufB[16384];   // 【Crossfade】B 轨临时缓冲
 static oboe::ManagedStream g_outputStream;
 static std::atomic<bool> g_isPlaying{false};
 static std::atomic<int> g_sampleRate{44100};
@@ -477,6 +493,10 @@ static std::atomic<float> g_msCenter{1.0f};     // M 增益，默认 1.0（原�
 static std::atomic<bool> g_msEnabled{false};
 static float g_curMsWidth = 1.0f;   // smoothed width (zipper-noise fix)
 static float g_curMsCenter = 1.0f;  // smoothed center
+// 【V8.3】Crossfeed — 消除头中效应（仅 Oboe 路径，DAC 保持 bit-perfect 直通）。
+static std::atomic<float> g_crossfeedAmount{0.0f};  // 0~1 混入强度
+static std::atomic<bool> g_crossfeedEnabled{false};
+static float g_curCrossfeedAmount = 0.0f;  // smoothed
 // 【V8.3】瞬态整形 — 双时间常数包络跟随器（时域，非 EQ）。
 // fastEnv 跟踪瞬态峰值，slowEnv 跟踪持续电平，transient = fastEnv - slowEnv。
 // amount>0 增强 attack，amount<0 柔化。impulseResponse 维度映射。
@@ -593,6 +613,69 @@ public:
     }
 };
 static LookAheadLimiter g_limiter;
+
+// ============================================================================
+// Crossfeed — 消除头中效应（耳机虚拟声场第一步）
+// 左耳混入少量经过延迟 + 低通衰减的右声道（模拟头部遮挡与耳间路径差 ITD），
+// 反之亦然。一阶低通 ~700Hz（头部遮挡高频），ITD ~300μs（头宽路径差）。
+// ============================================================================
+// 5.1 虚拟环绕上混（DTS 风格）：立体声 → 中侧分解 → 增宽 + 环绕反射 → 渲染回耳机。
+// 中侧分解：M=(L+R)/2（单声道成分）、S=(L-R)/2（侧向成分）。
+// 增宽 = 放大 S（width>1）；环绕 = S 延迟 + 低通后反相回灌（后墙反射包围感）。
+class Crossfeed {
+public:
+    static constexpr int MAX_DELAY = 512;  // 48kHz 下 512 samples ≈ 10.7ms，容纳后墙反射
+    static constexpr float REAR_DELAY_S = 0.012f;   // 12ms 后墙反射（≈4m 声程差）
+    static constexpr float REAR_LP_HZ = 2500.0f;    // 后墙反射高频吸收
+    static constexpr float REAR_GAIN = 0.5f;        // 环绕反射强度
+    static constexpr float WIDTH_BOOST = 0.6f;      // amount=1 时 S 放大到 1.6x（增宽）
+
+    float histS[MAX_DELAY] = {0};   // 侧向(S)历史，做环绕延迟
+    int writePos = 0;
+
+    int delayRear = 48;
+    float lpRearCoeff = 0.28f;
+    float lpRearS = 0;
+
+    void setSampleRate(float sr) {
+        delayRear = (int)(REAR_DELAY_S * sr + 0.5f);
+        if (delayRear < 1) delayRear = 1;
+        if (delayRear > MAX_DELAY) delayRear = MAX_DELAY;
+        lpRearCoeff = 1.0f - expf(-2.0f * 3.14159265f * REAR_LP_HZ / sr);
+    }
+
+    void reset() {
+        memset(histS, 0, sizeof(histS));
+        writePos = 0;
+        lpRearS = 0;
+    }
+
+    // 处理一对样本，amount 0~1（环绕强度）。返回前完成 L/R 虚拟化渲染。
+    void process(float &sL, float &sR, float amount) {
+        float inL = sL, inR = sR;
+
+        // 中侧分解
+        float mid = (inL + inR) * 0.5f;
+        float side = (inL - inR) * 0.5f;
+
+        // 增宽：放大 side 成分（amount 越大越宽）
+        float width = 1.0f + amount * WIDTH_BOOST;
+
+        // 环绕：side 延迟 + 低通（后墙反射），反相分左右
+        histS[writePos] = side;
+        int rpRear = writePos - delayRear;
+        if (rpRear < 0) rpRear += MAX_DELAY;
+        lpRearS += lpRearCoeff * (histS[rpRear] - lpRearS);
+        float rear = REAR_GAIN * amount * lpRearS;
+
+        // 合成：M + S*width ± 环绕
+        sL = mid + side * width + rear;
+        sR = mid - side * width - rear;
+
+        writePos = (writePos + 1) % MAX_DELAY;
+    }
+};
+static Crossfeed g_crossfeed;
 
 // ============================================================================
 // Headroom AGC — Automatic Gain Control
@@ -739,6 +822,14 @@ static std::atomic<float> g_compressorReleaseMs{120.0f};
 static std::atomic<float> g_compressorMakeupDb{0.0f};
 
 // ============================================================================
+// Loudness Comp — ISO 226 等响补偿（低音量时低频/高频自动提升）
+// 作用在 EQ/masterGain 之后、M/S 之前（共享 phon 估算，stereo-linked）
+// ============================================================================
+static LoudnessComp g_loudness;
+static std::atomic<bool> g_loudnessEnabled{false};
+static std::atomic<float> g_loudnessIntensity{1.0f};
+
+// ============================================================================
 // Soft Clip — cubic sigmoid waveshaper
 // Night mode: lower threshold for softer clipping
 // ============================================================================
@@ -812,21 +903,75 @@ public:
             return oboe::DataCallbackResult::Continue;
         }
 
-        // Read from ring buffer
-        if (!g_ringBuffer) {
-            memset(output, 0, totalSamples * sizeof(float));
-            return oboe::DataCallbackResult::Continue;
-        }
-        int available = g_ringBuffer->available();
-        g_ringBufferFill.store(available, std::memory_order_relaxed);  // 【V7.16】
-        int toRead = std::min(available, totalSamples);
-
-        if (toRead > 0) {
-            g_ringBuffer->read(output, toRead);
-        }
-        if (toRead < totalSamples) {
-            g_underrunCount.fetch_add(1, std::memory_order_relaxed);  // 【V7.39】
-            memset(output + toRead, 0, (totalSamples - toRead) * sizeof(float));
+        // Read from ring buffer（方案 B：crossfade 先 mix 进 output，再统一走下方 RMS/频谱/DSP）
+        int toRead = 0;
+        if (g_crossfadeActive.load()) {
+            // 双轨交叉淡化：from(active)=cos 淡出, to(incoming)=sin 淡入 等功率（无锁无分配）
+            bool fromB = g_activeIsB.load();
+            PCMRingBuffer* fromRing = fromB ? g_ringBufferB : g_ringBuffer;
+            PCMRingBuffer* toRing   = fromB ? g_ringBuffer : g_ringBufferB;
+            int availFrom = fromRing ? fromRing->available() : 0;
+            int availTo   = toRing ? toRing->available() : 0;
+            g_ringBufferFill.store(availFrom, std::memory_order_relaxed);
+            int toReadFrom = std::min(availFrom, totalSamples);
+            int toReadTo   = std::min(availTo, totalSamples);
+            toRead = toReadFrom;
+            if (toReadFrom > 0) fromRing->read(g_xfadeBufA, toReadFrom);
+            if (toReadTo > 0) toRing->read(g_xfadeBufB, toReadTo);
+            float pos = g_crossfadePos.load();
+            float step = g_crossfadeStep.load();
+            const float HP = 1.5707963f;  // PI/2
+            for (int f = 0; f < numFrames; f++) {
+                float gTo = sinf(pos * HP);
+                float gFrom = cosf(pos * HP);
+                for (int c = 0; c < channels; c++) {
+                    int idx = f * channels + c;
+                    float from = idx < toReadFrom ? g_xfadeBufA[idx] : 0.0f;
+                    float to = idx < toReadTo ? g_xfadeBufB[idx] : 0.0f;
+                    output[idx] = from * gFrom + to * gTo;
+                }
+                pos += step;
+            }
+            if (toReadFrom < totalSamples || toReadTo < totalSamples) {
+                g_underrunCount.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (pos >= 1.0f) {
+                // crossfade 完成：翻转 active 槽，停旧 active（无阻塞，join 延后到下次 open/stop）
+                g_crossfadeActive.store(false);
+                g_activeIsB.store(!fromB);
+                // 【Crossfade】新 active 轨已播 crossfade 时长，重置播放位置（否则延续旧轨 position）
+                g_playbackPositionUs.store((int64_t)g_crossfadeDurationMs.load() * 1000LL);
+                g_decoderPositionUs.store((int64_t)g_crossfadeDurationMs.load() * 1000LL);
+                if (fromB) {
+                    g_decoderStopRequestedB.store(true);
+                    g_decoderCvB.notify_all();
+                    LOGI("Crossfade complete: A is now active");
+                } else {
+                    g_decoderStopRequested.store(true);
+                    g_decoderCv.notify_all();
+                    LOGI("Crossfade complete: B is now active");
+                }
+            } else {
+                g_crossfadePos.store(pos);
+            }
+            // 方案 B：不 return，继续走 RMS/频谱/DSP（DSP 只对混合后音频跑一次）
+        } else {
+            // 正常路径：读 active ring（crossfade 完成后 active 可能 = B）
+            PCMRingBuffer* activeRing = g_activeIsB.load() ? g_ringBufferB : g_ringBuffer;
+            if (!activeRing) {
+                memset(output, 0, totalSamples * sizeof(float));
+                return oboe::DataCallbackResult::Continue;
+            }
+            int available = activeRing->available();
+            g_ringBufferFill.store(available, std::memory_order_relaxed);  // 【V7.16】
+            toRead = std::min(available, totalSamples);
+            if (toRead > 0) {
+                activeRing->read(output, toRead);
+            }
+            if (toRead < totalSamples) {
+                g_underrunCount.fetch_add(1, std::memory_order_relaxed);  // 【V7.39】
+                memset(output + toRead, 0, (totalSamples - toRead) * sizeof(float));
+            }
         }
 
         // 【V7.xx】Compute RMS amplitude for beat-reactive visuals (pre-DSP raw audio)
@@ -909,7 +1054,11 @@ public:
         }
 
         // DSP processing
-        if (g_mseb10Enabled.load() || g_autoEqEnabled.load() || g_dspEqEnabled.load()) {
+        // 【V8.3 修复】外层条件必须包含所有独立模块：EQ（MSEB/AutoEQ/图形）之外，
+        // M/S 声场、环绕（crossfeed）、瞬态、压缩、AGC 各自独立工作，不能因 EQ 全关而失效。
+        if (g_mseb10Enabled.load() || g_autoEqEnabled.load() || g_dspEqEnabled.load() || g_loudnessEnabled.load()
+            || g_msEnabled.load() || g_crossfeedEnabled.load() || g_transientEnabled.load() || g_compressorEnabled.load()
+            || g_agcEnabled.load()) {
             // [zipper-noise fix] fade pre-gain toward target per-frame (same SMOOTH as DAC path).
             // MSEB slider changes (g_dspEqPreGain jump) no longer step output level instantly.
             float targetPreGain = 1.0f;
@@ -1042,6 +1191,14 @@ public:
                     if (stereo) sR *= agcGain;
                 }
 
+                // 【V8.3】等响补偿（ISO 226）—— EQ/masterGain/AGC 之后、M/S 之前。
+                // stereo-linked：L/R 共享 phon 估算与补偿系数，各保独立滤波状态。
+                if (g_loudnessEnabled.load()) {
+                    g_loudness.setOutGain(masterGain);
+                    g_loudness.process(sL, stereo ? sR : sL);
+                    if (!stereo) sR = sL;
+                }
+
                 // 【V8.3】M/S 声场处理 — 跨声道矩阵（仅 stereo）。
                 // M=(L+R)/2 结像中心，S=(L-R)/2 声场宽度。
                 // 线性矩阵：L'=M*center + S*width, R'=M*center - S*width
@@ -1059,6 +1216,16 @@ public:
                     float side = (sL - sR) * 0.5f;
                     sL = mid * c + side * w;
                     sR = mid * c - side * w;
+                }
+
+                // 【V8.3】Crossfeed — 消除头中效应（仅 Oboe，stereo）。
+                // 左耳混入对侧低通延迟信号，模拟头部遮挡，缓解长时间听歌疲劳。
+                // 作用在 M/S 后、瞬态整形前（线性时不变处理，保持立体声关系）。
+                if (g_crossfeedEnabled.load() && stereo) {
+                    g_curCrossfeedAmount += (g_crossfeedAmount.load() - g_curCrossfeedAmount) * PREGAIN_SMOOTH;
+                    if (g_curCrossfeedAmount > 0.001f) {
+                        g_crossfeed.process(sL, sR, g_curCrossfeedAmount);
+                    }
                 }
 
                 // 【V8.3】瞬态整形 — 双时间常数包络跟随器（时域）。
@@ -1198,12 +1365,72 @@ static AMediaCodec* g_decoderCodec = nullptr;
 static int g_decoderTrackIndex = -1;
 static std::atomic<bool> g_decoderRunning{false};
 static std::atomic<bool> g_decoderPaused{false};
-static std::atomic<bool> g_decoderStopRequested{false};
+// 【Crossfade】g_decoderStopRequested / g_decoderCv 已前置声明到 onAudioReady 之前
 static std::atomic<bool> g_decoderEos{false};
-static std::atomic<int64_t> g_decoderPositionUs{0};
+// 【Crossfade】g_decoderPositionUs 已前置声明到 onAudioReady 之前
 static std::thread g_decoderThread;
 static std::mutex g_decoderMutex;
-static std::condition_variable g_decoderCv;
+// 【Crossfade】B 轨独立 decoder（incoming）
+static AMediaExtractor* g_decoderExtractorB = nullptr;
+static AMediaCodec* g_decoderCodecB = nullptr;
+static int g_decoderTrackIndexB = -1;
+static std::atomic<bool> g_decoderRunningB{false};
+static std::atomic<bool> g_decoderPausedB{false};
+static std::atomic<bool> g_decoderEosB{false};
+static std::atomic<int64_t> g_decoderPositionB{0};
+static std::thread g_decoderThreadB;
+static std::mutex g_decoderMutexB;
+static std::vector<float> g_convertBufferB;
+static std::atomic<int> g_decoderOutputEncodingB{2};
+static std::atomic<int64_t> g_cachedDurationB{0};
+static std::atomic<bool> g_decoderThreadRunningB{false};
+static std::atomic<int> g_decoderFramesOutputB{0};
+// 【Crossfade 重采样】B 槽 incoming 采样率 + 线性重采样到 stream 采样率的状态
+// 目的：A 轨(48k) crossfade 到 B 轨(44.1k) 时，B 轨数据若不重采样会被 48k stream 快放 -> 变调
+static std::atomic<int> g_sampleRateB{0};          // B 轨 decoder 输出采样率（0=未定）
+static std::atomic<int> g_channelCountB{2};        // 【V8.3】B 轨 decoder 输出声道数（重采样用，不能共享 A 轨的）
+static std::vector<float> g_resampleOutB;          // B 轨重采样输出缓冲
+static double g_resamplePhaseB = 0.0;              // 输入帧域相位残差
+static float g_resamplePrevB[8] = {0.0f};          // 上一块尾帧（每声道，最多 8 声道）
+static bool g_resampleHasPrevB = false;
+static bool g_resampleLoggedB = false;
+static void resetResamplerB() { g_resamplePhaseB = 0.0; g_resampleHasPrevB = false; for (int i = 0; i < 8; i++) g_resamplePrevB[i] = 0.0f; }
+// 【Crossfade 重采样】A 槽对称重采样状态（A 槽作为 incoming 时，解码输出重采样到 stream 率）
+static std::atomic<int> g_sampleRateA{0};          // A 轨 decoder 输出采样率（0=未定）
+static std::vector<float> g_resampleOutA;          // A 轨重采样输出缓冲
+static double g_resamplePhaseA = 0.0;
+static float g_resamplePrevA[8] = {0.0f};
+static bool g_resampleHasPrevA = false;
+static bool g_resampleLoggedA = false;
+static void resetResamplerA() { g_resamplePhaseA = 0.0; g_resampleHasPrevA = false; for (int i = 0; i < 8; i++) g_resamplePrevA[i] = 0.0f; }
+// 线性插值重采样（interleaved PCM -> interleaved PCM），跨块连续（phase/prev 状态由调用方持有）
+static int resampleLinearToStream(const float* in, int inSamples, int channels,
+                                  int inRate, int outRate,
+                                  std::vector<float>& out,
+                                  double& phase, float* prev, bool& hasPrev) {
+    out.clear();
+    if (inSamples <= 0 || channels <= 0 || inRate <= 0 || outRate <= 0 || inRate == outRate) return 0;
+    int inFrames = inSamples / channels;
+    if (inFrames <= 0) return 0;
+    double ratio = (double)inRate / (double)outRate;
+    out.reserve((size_t)((double)inFrames / ratio) * (size_t)channels + (size_t)channels * 8);
+    double pos = phase;
+    while (pos < (double)inFrames) {
+        int i0 = (int)pos;
+        double frac = pos - (double)i0;
+        for (int c = 0; c < channels; c++) {
+            float s0 = (i0 < 0) ? prev[c] : ((i0 < inFrames) ? in[i0 * channels + c] : prev[c]);
+            int i1 = i0 + 1;
+            float s1 = (i1 < 0) ? prev[c] : ((i1 < inFrames) ? in[i1 * channels + c] : s0);
+            out.push_back((float)(s0 + (s1 - s0) * frac));
+        }
+        pos += ratio;
+    }
+    phase = pos - (double)inFrames;
+    for (int c = 0; c < channels; c++) prev[c] = in[(inFrames - 1) * channels + c];
+    hasPrev = true;
+    return (int)(out.size() / channels);
+}
 // 【V8.3】decoder 生命周期锁：串行化 nativeOpen/nativeOpenFd/nativeStop/nativePlay/nativeSeekTo
 // 对 g_decoderExtractor/g_decoderCodec/g_decoderThread 全局单例指针的 join/delete/create 操作。
 // 根因：快速切歌时「切歌后台线程」与「主线程 fallback stop 回调」并发 join 同一 std::thread、
@@ -1294,6 +1521,8 @@ static bool reopenOutputStream(int newRate) {
         g_limiter.reset();
         g_agc.setSampleRate(actualRate);
         g_compressor.setSampleRate(actualRate);
+        g_loudness.setSampleRate((float)actualRate);
+        g_crossfeed.setSampleRate((float)actualRate);
     }
     LOGI("reopenOutputStream: reopened at %d Hz / %d ch", actualRate, actualCh);
     return true;
@@ -1415,11 +1644,32 @@ static void ndkDecodeLoop() {
                         g_convertBuffer[i] = static_cast<float>(pcm16[i]) / 32768.0f;
                     }
                 }
+                // 【Crossfade 重采样】A 轨采样率 != stream 率时重采样（incoming 和 active 都适用）。
+                // 不能用 g_activeIsB 当守卫：crossfade 完成后 A 轨变 active 但 decode 循环继续跑，
+                // 此时若不再重采样，48k 数据被 44.1k stream 快放 → 变调（V8.3 修复）。
+                const float* writeSrc = g_convertBuffer.data();
+                int writeSamples = numSamples;
+                {
+                    int streamRate = g_sampleRate.load();
+                    int aRate = g_sampleRateA.load();
+                    int chA = g_channelCount.load();
+                    if (aRate > 0 && streamRate > 0 && aRate != streamRate && chA >= 1 && chA <= 8) {
+                        int outFrames = resampleLinearToStream(g_convertBuffer.data(), numSamples, chA,
+                                                               aRate, streamRate,
+                                                               g_resampleOutA,
+                                                               g_resamplePhaseA, g_resamplePrevA, g_resampleHasPrevA);
+                        if (outFrames > 0) {
+                            writeSrc = g_resampleOutA.data();
+                            writeSamples = outFrames * chA;
+                            if (!g_resampleLoggedA) { LOGI("NDK Decoder A: resampling %dHz -> %dHz", aRate, streamRate); g_resampleLoggedA = true; }
+                        }
+                    }
+                }
                 // 【V7.39】写入 RingBuffer：等待空间而非丢数据
                 if (g_ringBuffer) {
                     int written = 0;
-                    int remain = numSamples;
-                    const float* src = g_convertBuffer.data();
+                    int remain = writeSamples;
+                    const float* src = writeSrc;
                     int retryCount = 0;
                     while (remain > 0 && retryCount < 100) {
                         int n = g_ringBuffer->write(src + written, remain);
@@ -1432,10 +1682,10 @@ static void ndkDecodeLoop() {
                         }
                     }
                     if (remain > 0) {
-                        LOGW("RingBuffer write: dropped %d/%d samples after %d retries", remain, numSamples, retryCount);
+                        LOGW("RingBuffer write: dropped %d/%d samples after %d retries", remain, writeSamples, retryCount);
                     }
                 }
-                g_decoderFramesOutput.fetch_add(numSamples / g_channelCount.load());  // 【V7.16】
+                g_decoderFramesOutput.fetch_add(writeSamples / g_channelCount.load());  // 【V7.16】
 
                 // Back-pressure: sleep if buffer is mostly full
                 if (g_ringBuffer && g_ringBuffer->available() > kRingBufferCapacity * 3 / 4) {
@@ -1461,18 +1711,24 @@ static void ndkDecodeLoop() {
                     g_channelCount.store(ch);
                 }
                 if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr) && sr > 0) {
-                    int currentStreamRate = 0;
-                    {
-                        std::lock_guard<std::mutex> lock(g_streamMutex);
-                        if (g_outputStream) currentStreamRate = g_outputStream->getSampleRate();
-                    }
-                    if (currentStreamRate > 0 && sr != currentStreamRate) {
-                        LOGI("NDK Decoder: sample rate changed %d -> %d (HE-AAC SBR?), reopening stream", currentStreamRate, sr);
-                        if (g_ringBuffer) g_ringBuffer->clear();
-                        reopenOutputStream(sr);
+                    g_sampleRateA.store(sr);  // 【Crossfade 重采样】记录 A 槽解码采样率
+                    if (g_activeIsB.load()) {
+                        // 【Crossfade 重采样】A 槽作为 incoming：不 reopen stream（会打断 active 轨），
+                        // 写 ring 时重采样到 stream 率即可
                     } else {
-                        g_fileSampleRate.store(sr);
-                        g_sampleRate.store(sr);
+                        int currentStreamRate = 0;
+                        {
+                            std::lock_guard<std::mutex> lock(g_streamMutex);
+                            if (g_outputStream) currentStreamRate = g_outputStream->getSampleRate();
+                        }
+                        if (currentStreamRate > 0 && sr != currentStreamRate) {
+                            LOGI("NDK Decoder: sample rate changed %d -> %d (HE-AAC SBR?), reopening stream", currentStreamRate, sr);
+                            if (g_ringBuffer) g_ringBuffer->clear();
+                            reopenOutputStream(sr);
+                        } else {
+                            g_fileSampleRate.store(sr);
+                            g_sampleRate.store(sr);
+                        }
                     }
                 }
                 AMediaFormat_delete(format);
@@ -1486,6 +1742,182 @@ static void ndkDecodeLoop() {
     g_decoderRunning.store(false);
     g_decoderThreadRunning.store(false);  // 【V7.16】
     LOGI("NDK decode loop ended");
+}
+
+// 【Crossfade】B 轨解码循环（incoming，与 ndkDecodeLoop 镜像，但不碰共享采样率/声道/stream）
+static void ndkDecodeLoopB() {
+    LOGI("NDK decode loop B started");
+    int inputEos = 0;
+
+    while (!g_decoderStopRequestedB.load()) {
+        if (g_decoderPausedB.load()) {
+            std::unique_lock<std::mutex> lock(g_decoderMutexB);
+            auto pred = [&]() -> bool {
+                return !g_decoderPausedB.load() || g_decoderStopRequestedB.load();
+            };
+            g_decoderCvB.wait_for(lock, std::chrono::milliseconds(50), pred);
+            continue;
+        }
+
+        bool hadWork = false;
+
+        // Feed input
+        if (!inputEos && g_decoderCodecB != nullptr) {
+            ssize_t inputIndex = AMediaCodec_dequeueInputBuffer(g_decoderCodecB, 5000);
+            if (inputIndex >= 0) {
+                hadWork = true;
+                size_t inputSize = 0;
+                uint8_t* inputBuf = AMediaCodec_getInputBuffer(g_decoderCodecB, inputIndex, &inputSize);
+                if (inputBuf) {
+                    ssize_t sampleSize = AMediaExtractor_readSampleData(g_decoderExtractorB, inputBuf, inputSize);
+                    if (sampleSize <= 0) {
+                        AMediaCodec_queueInputBuffer(g_decoderCodecB, inputIndex, 0, 0, 0,
+                                                     AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+                        inputEos = 1;
+                        LOGI("NDK Decoder: input EOS");
+                    } else {
+                        int64_t timeUs = AMediaExtractor_getSampleTime(g_decoderExtractorB);
+                        g_decoderPositionB.store(timeUs);
+                        AMediaCodec_queueInputBuffer(g_decoderCodecB, inputIndex, 0, sampleSize, timeUs, 0);
+                        AMediaExtractor_advance(g_decoderExtractorB);
+                    }
+                }
+            }
+        }
+
+        // Drain output
+        if (!g_decoderCodecB) continue;  // safety: codec was deleted by stop/open
+        AMediaCodecBufferInfo info;
+        ssize_t outputIndex = AMediaCodec_dequeueOutputBuffer(g_decoderCodecB, &info, 5000);
+        if (outputIndex >= 0) {
+            hadWork = true;
+            if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+                // 【V7.46 关键修复】Decoder输出EOS后不要立即break！
+                // 必须等RingBuffer被Oboe回调全部消费完，否则歌曲"提早结束"
+                AMediaCodec_releaseOutputBuffer(g_decoderCodecB, outputIndex, false);
+                g_decoderEosB.store(true);
+                LOGI("NDK Decoder: output EOS → entering drain phase (waiting for RingBuffer empty)");
+                while (!g_decoderStopRequestedB.load()) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                    int avail = g_ringBufferB ? g_ringBufferB->available() : 0;
+                    if (avail <= 0) {
+                        LOGI("NDK Decoder: drain complete, RingBuffer empty, exiting loop");
+                        break;
+                    }
+                    if (g_decoderPausedB.load()) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    }
+                }
+                break;
+            }
+            size_t outputSize = 0;
+            uint8_t* outputBuf = AMediaCodec_getOutputBuffer(g_decoderCodecB, outputIndex, &outputSize);
+            if (outputBuf && info.size > 0) {
+                uint8_t* src = outputBuf + info.offset;
+                int enc = g_decoderOutputEncodingB.load();
+                // 【V8.x】支持全部 PCM 编码：4=FLOAT(4B) 2=PCM16(2B) 21=24bit packed(3B) 22=32bit int(4B)
+                int bytesPerSample = (enc == 4 || enc == 22) ? 4 : (enc == 21 ? 3 : 2);
+                int numSamples = (int)(info.size / bytesPerSample);
+
+                // 【Crossfade】B 轨不写共享 g_fileSampleRate（避免污染 A 轨）
+
+                if (g_convertBufferB.size() < (size_t)numSamples) {
+                    g_convertBufferB.resize(numSamples + 1024);
+                }
+                if (enc == 4) {
+                    const float* f32 = reinterpret_cast<const float*>(src);
+                    for (int i = 0; i < numSamples; i++) g_convertBufferB[i] = f32[i];
+                } else if (enc == 21) {
+                    const uint8_t* b = src;
+                    for (int i = 0; i < numSamples; i++) {
+                        int32_t v = (int32_t)b[0] | ((int32_t)b[1] << 8) | ((int32_t)b[2] << 16);
+                        if (v & 0x800000) v |= 0xFF000000;  // 符号扩展 24→32
+                        g_convertBufferB[i] = static_cast<float>(v) / 8388608.0f;  // 2^23
+                        b += 3;
+                    }
+                } else if (enc == 22) {
+                    const int32_t* pcm32 = reinterpret_cast<const int32_t*>(src);
+                    for (int i = 0; i < numSamples; i++) {
+                        g_convertBufferB[i] = static_cast<float>(pcm32[i]) / 2147483648.0f;
+                    }
+                } else {
+                    const int16_t* pcm16 = reinterpret_cast<const int16_t*>(src);
+                    for (int i = 0; i < numSamples; i++) {
+                        g_convertBufferB[i] = static_cast<float>(pcm16[i]) / 32768.0f;
+                    }
+                }
+                // 【Crossfade 重采样】B 轨采样率 != stream 采样率时，线性重采样到 stream 率（否则变调）
+                const float* writeSrc = g_convertBufferB.data();
+                int writeSamples = numSamples;
+                int streamRate = g_sampleRate.load();
+                int bRate = g_sampleRateB.load();
+                int chB = g_channelCountB.load();
+                if (bRate > 0 && streamRate > 0 && bRate != streamRate && chB >= 1 && chB <= 8) {
+                    int outFrames = resampleLinearToStream(g_convertBufferB.data(), numSamples, chB,
+                                                           bRate, streamRate,
+                                                           g_resampleOutB,
+                                                           g_resamplePhaseB, g_resamplePrevB, g_resampleHasPrevB);
+                    if (outFrames > 0) {
+                        writeSrc = g_resampleOutB.data();
+                        writeSamples = outFrames * chB;
+                        if (!g_resampleLoggedB) { LOGI("NDK Decoder B: resampling %dHz -> %dHz", bRate, streamRate); g_resampleLoggedB = true; }
+                    }
+                }
+                // 【V7.39】写入 RingBuffer：等待空间而非丢数据
+                if (g_ringBufferB) {
+                    int written = 0;
+                    int remain = writeSamples;
+                    const float* src2 = writeSrc;
+                    int retryCount = 0;
+                    while (remain > 0 && retryCount < 100) {
+                        int n = g_ringBufferB->write(src2 + written, remain);
+                        written += n;
+                        remain -= n;
+                        if (remain > 0) {
+                            usleep(2000);
+                            retryCount++;
+                        }
+                    }
+                    if (remain > 0) {
+                        LOGW("RingBuffer write: dropped %d/%d samples after %d retries", remain, writeSamples, retryCount);
+                    }
+                }
+                g_decoderFramesOutputB.fetch_add(writeSamples / g_channelCount.load());  // 【V7.16】
+
+                if (g_ringBufferB && g_ringBufferB->available() > kRingBufferCapacity * 3 / 4) {
+                    usleep(5000);
+                }
+            }
+            AMediaCodec_releaseOutputBuffer(g_decoderCodecB, outputIndex, false);
+        } else if (outputIndex == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+            AMediaFormat* format = AMediaCodec_getOutputFormat(g_decoderCodecB);
+            const char* str = AMediaFormat_toString(format);
+            LOGI("NDK Decoder: output format changed: %s", str ? str : "null");
+            if (format) {
+                int32_t enc = 0;
+                if (AMediaFormat_getInt32(format, "pcm-encoding", &enc) && enc > 0) {
+                    g_decoderOutputEncodingB.store(enc);
+                    LOGI("NDK Decoder: actual PCM encoding=%d (%s)", enc,
+                         enc == 4 ? "FLOAT" : enc == 2 ? "16BIT" : enc == 21 ? "24BIT_PACKED" : "OTHER");
+                }
+                int32_t srB = 0, chB2 = 0;
+                if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &srB) && srB > 0) {
+                    g_sampleRateB.store(srB);  // 【Crossfade 重采样】记录 B 轨解码采样率
+                }
+                if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &chB2) && chB2 > 0) {
+                    g_channelCountB.store(chB2);  // 【V8.3】B 轨解码声道数（重采样必须用 B 自己的）
+                }
+                // 【Crossfade】B 轨不写共享 g_channelCount/g_sampleRate、不 reopen stream
+                AMediaFormat_delete(format);
+            }
+        }
+        if (!hadWork) {
+            usleep(5000);
+        }
+    }
+    g_decoderRunningB.store(false);
+    g_decoderThreadRunningB.store(false);  // 【V7.16】
+    LOGI("NDK decode loop B ended");
 }
 
 // ============================================================================
@@ -1566,6 +1998,17 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
     const char *path = env->GetStringUTFChars(filePath, nullptr);
     if (!path) return false;
     LOGI("OboeDirectPlayer: opening %s", path);
+
+    // 【Crossfade】开新曲（A 轨硬加载）时复位 crossfade 状态并停 B 轨
+    g_crossfadeActive.store(false);
+    g_activeIsB.store(false);
+    g_crossfadePos.store(0.0f);
+    g_decoderStopRequestedB.store(true);
+    g_decoderCvB.notify_all();
+    if (g_decoderThreadB.joinable()) g_decoderThreadB.join();
+    if (g_decoderCodecB) { AMediaCodec_stop(g_decoderCodecB); AMediaCodec_delete(g_decoderCodecB); g_decoderCodecB = nullptr; }
+    if (g_decoderExtractorB) { AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; }
+    if (g_ringBufferB) g_ringBufferB->clear();
 
     g_decoderStopRequested.store(true);
     g_decoderPaused.store(false);
@@ -1867,6 +2310,8 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
         g_limiter.reset();
         g_agc.setSampleRate(sr);
         g_compressor.setSampleRate(sr);
+        g_loudness.setSampleRate((float)sr);
+        g_crossfeed.setSampleRate((float)sr);
     }
     g_sampleRate.store(g_outputStream->getSampleRate());
     g_channelCount.store(g_outputStream->getChannelCount());
@@ -1885,6 +2330,17 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
                                                       jint fd, jlong offset, jlong length) {
     std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     LOGI("OboeDirectPlayer: opening FD %d offset=%lld length=%lld", fd, (long long)offset, (long long)length);
+
+    // 【Crossfade】开新曲（A 轨硬加载）时复位 crossfade 状态并停 B 轨
+    g_crossfadeActive.store(false);
+    g_activeIsB.store(false);
+    g_crossfadePos.store(0.0f);
+    g_decoderStopRequestedB.store(true);
+    g_decoderCvB.notify_all();
+    if (g_decoderThreadB.joinable()) g_decoderThreadB.join();
+    if (g_decoderCodecB) { AMediaCodec_stop(g_decoderCodecB); AMediaCodec_delete(g_decoderCodecB); g_decoderCodecB = nullptr; }
+    if (g_decoderExtractorB) { AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; }
+    if (g_ringBufferB) g_ringBufferB->clear();
 
     g_decoderStopRequested.store(true);
     g_decoderPaused.store(false);
@@ -1975,6 +2431,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
                 AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr2);
                 AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch2);
                 AMediaFormat_getInt64(format, AMEDIAFORMAT_KEY_DURATION, &dur);
+                if (dur > 0) g_cachedDurationUs.store(dur);  // 【Crossfade】FD open 也缓存时长，否则 getDurationMs=0 导致 monitor 永不触发
                 if (sr2 > 0) AMediaFormat_setInt32(configureFormat, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr2);
                 if (ch2 > 0) AMediaFormat_setInt32(configureFormat, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch2);
                 if (dur > 0) AMediaFormat_setInt64(configureFormat, AMEDIAFORMAT_KEY_DURATION, dur);
@@ -2171,6 +2628,8 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
         g_limiter.reset();
         g_agc.setSampleRate(sr);
         g_compressor.setSampleRate(sr);
+        g_loudness.setSampleRate((float)sr);
+        g_crossfeed.setSampleRate((float)sr);
     }
     g_sampleRate.store(g_outputStream->getSampleRate());
     g_channelCount.store(g_outputStream->getChannelCount());
@@ -2244,23 +2703,54 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSeekTo(JNIEnv *env, jobject thi
                                                      jlong positionUs) {
     std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     LOGI("OboeDirectPlayer: seekTo %lld us", (long long)positionUs);
-    g_decoderPaused.store(true);
-    if (g_ringBuffer) g_ringBuffer->clear();
+    // 【Crossfade】按 active 轨分流：B 接管后 seek 的是 B 轨，否则 seek 退役 A 轨会导致进度条无效
+    bool seekB = g_activeIsB.load();
+    // 共享的 Oboe 输出侧状态（两轨共用同一输出流）
     g_framesWritten.store(0);
     g_playbackPositionUs.store(positionUs);  // 【V7.82】同步实际播放位置到 seek 目标，防止进度条回跳
     g_flushRequested.store(true);
-    if (g_decoderCodec) AMediaCodec_flush(g_decoderCodec);
-    if (g_decoderExtractor) AMediaExtractor_seekTo(g_decoderExtractor, positionUs, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
-    g_decoderPositionUs.store(positionUs);
-    g_decoderEos.store(false);
-    g_decoderPaused.store(false);
-    g_decoderCv.notify_all();
+    if (seekB) {
+        g_decoderPausedB.store(true);
+        if (g_ringBufferB) g_ringBufferB->clear();
+        resetResamplerB();  // 【Crossfade 重采样】seek 后清重采样相位/prev
+        if (g_decoderCodecB) AMediaCodec_flush(g_decoderCodecB);
+        if (g_decoderExtractorB) AMediaExtractor_seekTo(g_decoderExtractorB, positionUs, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
+        g_decoderPositionB.store(positionUs);
+        g_decoderEosB.store(false);
+        g_decoderPausedB.store(false);
+        g_decoderCvB.notify_all();
+    } else {
+        g_decoderPaused.store(true);
+        if (g_ringBuffer) g_ringBuffer->clear();
+        resetResamplerA();  // 【Crossfade 重采样】seek 后清 A 轨重采样相位/prev（与 B 分支对称，防相位错乱变调）
+        if (g_decoderCodec) AMediaCodec_flush(g_decoderCodec);
+        if (g_decoderExtractor) AMediaExtractor_seekTo(g_decoderExtractor, positionUs, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
+        g_decoderPositionUs.store(positionUs);
+        g_decoderEos.store(false);
+        g_decoderPaused.store(false);
+        g_decoderCv.notify_all();
+    }
 }
 
 JNIEXPORT void JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeStop(JNIEnv *env, jobject thiz) {
     std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     LOGI("OboeDirectPlayer: stopping");
+    // 【Crossfade】停止时复位 crossfade 状态并停 B 轨
+    g_crossfadeActive.store(false);
+    g_activeIsB.store(false);
+    g_crossfadePos.store(0.0f);
+    g_sampleRateA.store(0);
+    g_sampleRateB.store(0);
+    g_channelCountB.store(2);
+    resetResamplerA();
+    resetResamplerB();
+    g_decoderStopRequestedB.store(true);
+    g_decoderCvB.notify_all();
+    if (g_decoderThreadB.joinable()) g_decoderThreadB.join();
+    if (g_decoderCodecB) { AMediaCodec_stop(g_decoderCodecB); AMediaCodec_delete(g_decoderCodecB); g_decoderCodecB = nullptr; }
+    if (g_decoderExtractorB) { AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; }
+    if (g_ringBufferB) g_ringBufferB->clear();
     g_decoderStopRequested.store(true);
     g_decoderPaused.store(false);
     g_decoderCv.notify_all();
@@ -2293,6 +2783,238 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeStop(JNIEnv *env, jobject thiz)
     g_decoderTrackIndex = -1;
 }
 
+// ============================================================================
+// Crossfade 双轨 — incoming 打开 / 触发 / 释放（方案 B：先 mix 再走 DSP）
+// ============================================================================
+
+// 【Crossfade】incoming 打开分发：B active → 进 A 槽，否则进 B 槽
+static bool openIncomingToA_internal(int fd, int64_t offset, int64_t length);
+static bool openIncomingToB_internal(int fd, int64_t offset, int64_t length);
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenIncomingFd(JNIEnv *env, jobject thiz,
+                                                               jint fd, jlong offset, jlong length) {
+    if (g_activeIsB.load()) {
+        return openIncomingToA_internal(fd, offset, length);
+    }
+    return openIncomingToB_internal(fd, offset, length);
+}
+
+static bool openIncomingToA_internal(int fd, int64_t offset, int64_t length) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
+    g_decoderStopRequested.store(true);
+    g_decoderCv.notify_all();
+    if (g_decoderThread.joinable()) g_decoderThread.join();
+    if (g_decoderCodec) { AMediaCodec_stop(g_decoderCodec); AMediaCodec_delete(g_decoderCodec); g_decoderCodec = nullptr; }
+    if (g_decoderExtractor) { AMediaExtractor_delete(g_decoderExtractor); g_decoderExtractor = nullptr; }
+    if (!g_ringBuffer) g_ringBuffer = new PCMRingBuffer(kRingBufferCapacity);
+    else g_ringBuffer->clear();
+
+    g_decoderExtractor = AMediaExtractor_new();
+    if (!g_decoderExtractor) { LOGE("Incoming(A): extractor new failed"); return false; }
+    media_status_t r = AMediaExtractor_setDataSourceFd(g_decoderExtractor, fd, offset, length);
+    if (r != AMEDIA_OK) { LOGE("Incoming(A): setDataSourceFd failed %d", r); AMediaExtractor_delete(g_decoderExtractor); g_decoderExtractor = nullptr; return false; }
+
+    size_t numTracks = AMediaExtractor_getTrackCount(g_decoderExtractor);
+    g_decoderTrackIndex = -1;
+    for (size_t i = 0; i < numTracks; i++) {
+        AMediaFormat* format = AMediaExtractor_getTrackFormat(g_decoderExtractor, i);
+        if (!format) continue;
+        const char* mime = nullptr;
+        AMediaFormat_getString(format, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime && strncmp(mime, "audio/", 6) == 0) {
+            g_decoderTrackIndex = (int)i;
+            AMediaExtractor_selectTrack(g_decoderExtractor, g_decoderTrackIndex);
+            g_decoderCodec = AMediaCodec_createDecoderByType(mime);
+            if (!g_decoderCodec) { AMediaFormat_delete(format); LOGE("Incoming(A): createDecoder failed"); return false; }
+            AMediaFormat* cfg = AMediaFormat_new();
+            {
+                const char* m = nullptr;
+                AMediaFormat_getString(format, AMEDIAFORMAT_KEY_MIME, &m);
+                if (m) AMediaFormat_setString(cfg, AMEDIAFORMAT_KEY_MIME, m);
+                int32_t sr2=0, ch2=0; int64_t dur=0;
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr2);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch2);
+                AMediaFormat_getInt64(format, AMEDIAFORMAT_KEY_DURATION, &dur);
+                if (dur > 0) g_cachedDurationUs.store(dur);
+                if (sr2 > 0) { g_fileSampleRate.store(sr2); }  // 【Crossfade 重采样】记录 A 槽采样率（incoming 守卫用）
+                if (sr2>0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr2);
+                if (ch2>0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch2);
+                if (dur>0) AMediaFormat_setInt64(cfg, AMEDIAFORMAT_KEY_DURATION, dur);
+            }
+            copyCsdBuffers(cfg, format);
+            AMediaFormat_setInt32(cfg, "pcm-encoding", 2);
+            media_status_t s = AMediaCodec_configure(g_decoderCodec, cfg, nullptr, nullptr, 0);
+            AMediaFormat_delete(cfg);
+            if (s != AMEDIA_OK) { LOGE("Incoming(A): configure failed %d", s); AMediaFormat_delete(format); return false; }
+            s = AMediaCodec_start(g_decoderCodec);
+            if (s != AMEDIA_OK) { LOGE("Incoming(A): start failed %d", s); AMediaFormat_delete(format); return false; }
+            AMediaFormat_delete(format);
+            break;
+        }
+        AMediaFormat_delete(format);
+    }
+    if (g_decoderTrackIndex < 0) { LOGE("Incoming(A): no audio track"); return false; }
+    // 【Crossfade 重采样】新歌进 A 槽，重置采样率与重采样状态
+    g_sampleRateA.store(0);
+    resetResamplerA();
+    g_resampleLoggedA = false;
+    LOGI("Incoming(A) decoder ready (FD)");
+    return true;
+}
+
+static bool openIncomingToB_internal(int fd, int64_t offset, int64_t length) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
+    g_decoderStopRequestedB.store(true);
+    g_decoderCvB.notify_all();
+    if (g_decoderThreadB.joinable()) g_decoderThreadB.join();
+    if (g_decoderCodecB) { AMediaCodec_stop(g_decoderCodecB); AMediaCodec_delete(g_decoderCodecB); g_decoderCodecB = nullptr; }
+    if (g_decoderExtractorB) { AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; }
+    if (!g_ringBufferB) g_ringBufferB = new PCMRingBuffer(kRingBufferCapacity);
+    else g_ringBufferB->clear();
+
+    g_decoderExtractorB = AMediaExtractor_new();
+    if (!g_decoderExtractorB) { LOGE("Incoming(B): extractor new failed"); return false; }
+    media_status_t r = AMediaExtractor_setDataSourceFd(g_decoderExtractorB, fd, offset, length);
+    if (r != AMEDIA_OK) { LOGE("Incoming(B): setDataSourceFd failed %d", r); AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; return false; }
+
+    size_t numTracks = AMediaExtractor_getTrackCount(g_decoderExtractorB);
+    g_decoderTrackIndexB = -1;
+    for (size_t i = 0; i < numTracks; i++) {
+        AMediaFormat* format = AMediaExtractor_getTrackFormat(g_decoderExtractorB, i);
+        if (!format) continue;
+        const char* mime = nullptr;
+        AMediaFormat_getString(format, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime && strncmp(mime, "audio/", 6) == 0) {
+            g_decoderTrackIndexB = (int)i;
+            AMediaExtractor_selectTrack(g_decoderExtractorB, g_decoderTrackIndexB);
+            g_decoderCodecB = AMediaCodec_createDecoderByType(mime);
+            if (!g_decoderCodecB) { AMediaFormat_delete(format); LOGE("Incoming(B): createDecoder failed"); return false; }
+            AMediaFormat* cfg = AMediaFormat_new();
+            {
+                const char* m = nullptr;
+                AMediaFormat_getString(format, AMEDIAFORMAT_KEY_MIME, &m);
+                if (m) AMediaFormat_setString(cfg, AMEDIAFORMAT_KEY_MIME, m);
+                int32_t sr2=0, ch2=0; int64_t dur=0;
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr2);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch2);
+                AMediaFormat_getInt64(format, AMEDIAFORMAT_KEY_DURATION, &dur);
+                if (dur > 0) g_cachedDurationB.store(dur);
+                if (sr2>0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr2);
+                if (ch2>0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch2);
+                if (dur>0) AMediaFormat_setInt64(cfg, AMEDIAFORMAT_KEY_DURATION, dur);
+            }
+            copyCsdBuffers(cfg, format);
+            AMediaFormat_setInt32(cfg, "pcm-encoding", 2);
+            media_status_t s = AMediaCodec_configure(g_decoderCodecB, cfg, nullptr, nullptr, 0);
+            AMediaFormat_delete(cfg);
+            if (s != AMEDIA_OK) { LOGE("Incoming(B): configure failed %d", s); AMediaFormat_delete(format); return false; }
+            s = AMediaCodec_start(g_decoderCodecB);
+            if (s != AMEDIA_OK) { LOGE("Incoming(B): start failed %d", s); AMediaFormat_delete(format); return false; }
+            AMediaFormat_delete(format);
+            break;
+        }
+        AMediaFormat_delete(format);
+    }
+    if (g_decoderTrackIndexB < 0) { LOGE("Incoming(B): no audio track"); return false; }
+    // 【Crossfade 重采样】新歌进 B 槽，重置采样率与重采样状态
+    g_sampleRateB.store(0);
+    g_channelCountB.store(2);
+    resetResamplerB();
+    g_resampleLoggedB = false;
+    LOGI("Incoming(B) decoder ready (FD)");
+    return true;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, jobject thiz, jint durationMs) {
+    // 判断空闲槽（incoming）：B active 时新歌进 A 槽，否则进 B 槽
+    bool toA = g_activeIsB.load();
+    if (toA) {
+        if (!g_decoderCodec || !g_decoderExtractor) { LOGE("StartCrossfade: incoming(A) not opened"); return false; }
+        // 【Crossfade 重采样】A 槽 incoming 采样率 != stream 率时，写 ring 时重采样（A 槽已有重采样器）
+    } else {
+        if (!g_decoderCodecB || !g_decoderExtractorB) { LOGE("StartCrossfade: incoming(B) not opened"); return false; }
+    }
+    // 【ANR 修复·重入守卫】crossfade 进行中拒绝重复触发
+    if (g_crossfadeActive.load()) { LOGE("StartCrossfade: already active, ignored"); return false; }
+    g_crossfadeActive.store(true);
+    int sr = g_sampleRate.load(); if (sr <= 0) sr = 44100;
+    float totalFrames = (float)sr * ((float)durationMs / 1000.0f);
+    if (totalFrames < 1.0f) totalFrames = 1.0f;
+    g_crossfadeStep.store(1.0f / totalFrames);
+    g_crossfadePos.store(0.0f);
+    g_crossfadeDurationMs.store(durationMs);
+    if (toA) {
+        g_decoderStopRequested.store(true);
+        g_decoderCv.notify_all();
+        if (g_decoderThread.joinable()) g_decoderThread.join();
+        g_decoderStopRequested.store(false);
+        g_decoderPaused.store(false);
+        g_decoderEos.store(false);
+        g_decoderRunning.store(true);
+        g_decoderThread = std::thread(ndkDecodeLoop);
+    } else {
+        g_decoderStopRequestedB.store(true);
+        g_decoderCvB.notify_all();
+        if (g_decoderThreadB.joinable()) g_decoderThreadB.join();
+        g_decoderStopRequestedB.store(false);
+        g_decoderPausedB.store(false);
+        g_decoderEosB.store(false);
+        g_decoderRunningB.store(true);
+        g_decoderThreadB = std::thread(ndkDecodeLoopB);
+    }
+    LOGI("Crossfade started: %dms, step=%.6f (toA=%d)", durationMs, g_crossfadeStep.load(), toA ? 1 : 0);
+    return true;
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeStopIncoming(JNIEnv *env, jobject thiz) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
+    g_crossfadeActive.store(false);
+    g_decoderStopRequestedB.store(true);
+    g_decoderCvB.notify_all();
+    if (g_decoderThreadB.joinable()) g_decoderThreadB.join();
+    if (g_decoderCodecB) { AMediaCodec_stop(g_decoderCodecB); AMediaCodec_delete(g_decoderCodecB); g_decoderCodecB = nullptr; }
+    if (g_decoderExtractorB) { AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; }
+    if (g_ringBufferB) g_ringBufferB->clear();
+    LOGI("Incoming stopped");
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeIsActiveB(JNIEnv *env, jobject thiz) {
+    return g_activeIsB.load();
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeReleaseInactive(JNIEnv *env, jobject thiz) {
+    // 释放非活动轨：B 在播 → 释放旧 A；A 在播 → 释放 B（incoming）
+    if (g_crossfadeActive.load()) { LOGE("ReleaseInactive: crossfade in progress, skip"); return; }
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
+    if (g_activeIsB.load()) {
+        // B active → 释放旧 A 轨（线程已 stopRequested，这里 join 收尾 + 删 codec/extractor）
+        g_decoderStopRequested.store(true);
+        g_decoderCv.notify_all();
+        if (g_decoderThread.joinable()) g_decoderThread.join();
+        if (g_decoderCodec) { AMediaCodec_stop(g_decoderCodec); AMediaCodec_delete(g_decoderCodec); g_decoderCodec = nullptr; std::this_thread::sleep_for(std::chrono::milliseconds(300)); }
+        if (g_decoderExtractor) { AMediaExtractor_delete(g_decoderExtractor); g_decoderExtractor = nullptr; }
+        if (g_ringBuffer) g_ringBuffer->clear();
+        g_decoderRunning.store(false);
+        g_decoderThreadRunning.store(false);
+        g_decoderEos.store(false);
+        LOGI("Inactive track A released");
+    } else {
+        // A active → 释放 B（incoming）
+        g_decoderStopRequestedB.store(true);
+        g_decoderCvB.notify_all();
+        if (g_decoderThreadB.joinable()) g_decoderThreadB.join();
+        if (g_decoderCodecB) { AMediaCodec_stop(g_decoderCodecB); AMediaCodec_delete(g_decoderCodecB); g_decoderCodecB = nullptr; }
+        if (g_decoderExtractorB) { AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; }
+        if (g_ringBufferB) g_ringBufferB->clear();
+        LOGI("Inactive track B released");
+    }
+}
+
 // --- Position / Duration / State queries ---
 JNIEXPORT jlong JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeGetPositionMs(JNIEnv *env, jobject thiz) {
@@ -2314,6 +3036,8 @@ JNIEXPORT jlong JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeGetDurationMs(JNIEnv *env, jobject thiz) {
     // Return cached duration to avoid AMediaExtractor_getTrackFormat race
     // (extractor may be torn down concurrently during track switch / release)
+    // 【Crossfade】B 接管后读 B 轨时长
+    if (g_activeIsB.load()) return g_cachedDurationB.load() / 1000;
     return g_cachedDurationUs.load() / 1000;
 }
 
@@ -2321,6 +3045,11 @@ JNIEXPORT jboolean JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeIsEos(JNIEnv *env, jobject thiz) {
     // Must wait for both: decoder received EOS AND drain loop exited
     // (RingBuffer empty). Otherwise completion fires while audio still playing.
+    // 【Crossfade】crossfade 进行中不算播完：旧 A 轨已 EOS 但 B 轨仍在淡入接管，
+    // 此时若返回 true 会触发 onCompletion→playNext 硬切，打断 crossfade 后半段。
+    if (g_crossfadeActive.load()) return false;
+    // 【Crossfade】B 接管后读 B 轨 EOS 状态
+    if (g_activeIsB.load()) return g_decoderEosB.load() && !g_decoderRunningB.load();
     return g_decoderEos.load() && !g_decoderRunning.load();
 }
 
@@ -2660,10 +3389,12 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMseb10Band(JNIEnv *env, jobj
         }
     }
 
-    // Pre-gain headroom: 按正增益总和衰减，避免低频 low-shelf 叠加（32/60/120Hz 在 30Hz 以下重叠）
-    // 造成的级联削波（密集鼓声满幅时哗哗/沙沙）。
+    // 【V8.3 preGain 方案 B】只补低频 3 段（<250Hz）正增益总和。
+    // 低频 low-shelf 在 30Hz 以下几乎全部叠加（会级联削波），需按“和”补偿；
+    // 中高频 peaking 频点分离、峰值不同时出现，+2~3dB 几乎不削波，交给 limiter 兔底。
+    // 按“全部正增益总和”补偿会把整体响度压掉一半（听感“开 MSEB 变轻”），故只补低频。
     float sumPosGain = 0.0f;
-    for (int i = 0; i < 10; i++) if (gains[i] > 0.0f) sumPosGain += gains[i];
+    for (int i = 0; i < 3; i++) if (gains[i] > 0.0f) sumPosGain += gains[i];
     g_msebPreGain.store(powf(10.0f, (-sumPosGain) / 20.0f));
 
     g_mseb10Enabled.store(true);
@@ -2716,6 +3447,28 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeResetMsStage(JNIEnv *env, jobje
     g_msCenter.store(1.0f);
     g_msEnabled.store(false);
     LOGI("M/S stage reset (unity)");
+}
+
+// 【V8.3】Crossfeed JNI — 消除头中效应（仅 Oboe）。amount 0~1。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetCrossfeed(JNIEnv *env, jobject thiz, jfloat amount) {
+    float a = amount;
+    if (a > 1.0f) a = 1.0f;
+    if (a < 0.0f) a = 0.0f;
+    g_crossfeedAmount.store(a);
+    bool active = a > 0.001f;
+    g_crossfeedEnabled.store(active);
+    if (!active) { g_crossfeed.reset(); g_curCrossfeedAmount = 0.0f; }
+    LOGI("Crossfeed: amount=%.3f enabled=%s", a, active ? "YES" : "NO");
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeResetCrossfeed(JNIEnv *env, jobject thiz) {
+    g_crossfeedAmount.store(0.0f);
+    g_crossfeedEnabled.store(false);
+    g_crossfeed.reset();
+    g_curCrossfeedAmount = 0.0f;
+    LOGI("Crossfeed reset");
 }
 
 // 【V8.3】瞬态整形 JNI — impulseResponse 维度映射。
@@ -2895,6 +3648,21 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetCompressorParams(JNIEnv *env
     g_compressor.configure(thresholdDb, ratio, attackMs, releaseMs, makeupDb);
     LOGI("Compressor params: thr=%.1f ratio=%.1f atk=%.1f rel=%.1f makeup=%.1f",
          thresholdDb, ratio, attackMs, releaseMs, makeupDb);
+}
+
+// --- Loudness Comp (ISO 226 等响补偿) ---
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetLoudnessEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_loudnessEnabled.store(enabled != 0);
+    g_loudness.setEnabled(enabled != 0);
+    LOGI("Loudness %s", enabled ? "enabled" : "disabled");
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetLoudnessIntensity(JNIEnv *env, jobject thiz, jfloat intensity) {
+    g_loudnessIntensity.store(intensity);
+    g_loudness.setIntensity(intensity);
+    LOGI("Loudness intensity=%.2f", intensity);
 }
 
 // --- Dither ---

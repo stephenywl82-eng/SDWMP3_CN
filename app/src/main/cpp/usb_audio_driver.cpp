@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <cstdarg>
 #include <cstdlib>
+#include "loudness_comp.h"
 
 #define TAG "UsbAudioDriver"
 
@@ -139,6 +140,17 @@ bool UsbAudioDriver::open(int fd, int epAddress, int maxPacketSize, int interval
     detailedInfo_ = buf;
     LOGI("%s", buf);
 
+    // [align Salt] Read the REAL USB bus speed. UAC2 protocol (isUac2_) does NOT
+    // imply high-speed: full-speed (12Mbps) UAC2 devices are common (TTGK Note
+    // 3302:201D is one — its 3 alts all carry 49 samples/frame = 44.1/48kHz at
+    // 1000 frames/sec). Treating isUac2_ as high-speed made streamLoop send
+    // sampleRate/8000 frames per packet (~5.5 @44.1k) instead of sampleRate/1000
+    // (~44 @44.1k) — 8x wrong, which stalls the DAC mid-song.
+    // USBDEVFS_GET_SPEED returns usb_device_speed: 2=FULL, 3=HIGH.
+    int speed = ioctl(fd_, USBDEVFS_GET_SPEED, nullptr);
+    highSpeed_ = (speed == 3 /*USB_SPEED_HIGH*/);
+    LOGI("Open: USB bus speed=%d (%s)", speed, highSpeed_ ? "HIGH" : (speed == 2 ? "FULL" : "other"));
+
     // 鈺愨晲锟?DISCONNECT kernel audio driver FIRST 鈺愨晲锟?
     // Android kernel already has the USB Audio Class driver (snd_usb_audio)
     // attached to this device. That driver claims the interfaces and owns the
@@ -197,12 +209,14 @@ bool UsbAudioDriver::open(int fd, int epAddress, int maxPacketSize, int interval
     }
     // 鈹€鈹€ END DEBUG 鈹€鈹€
 
-    // Claim the audio streaming interface (alt=1 activates ISO OUT)
-    if (!claimInterface(1)) {
-        LOGE("Failed to claim interface");
-        return false;
-    }
-    currentAlt_ = 1;
+    // [fix BTR5 2026-08-24] Do NOT setInterfaceAlt here. Multi-alt DACs pick the
+    // wrong alt when hardcoded to alt=1 (BTR5: alt=1 = 32-bit mps=392, alt=2 =
+    // 16-bit mps=196). Early setInterfaceAlt(1) made BTR5 timeout (errno=110) and
+    // poisoned all later descriptor reads (errno=71 EPROTO). start() selects the
+    // correct alt via selectAltForRate() after descriptor parsing. Just mark
+    // claimed here; the endpoint gets activated in start().
+    claimed_.store(true, std::memory_order_release);
+    currentAlt_ = 0;  // not activated yet
 
     // 銆愯嚜閫傚簲DAC銆戣В鏋愬叏閮ˋudioStreaming alt setting鍊欓€夎〃
     parseAltCandidates();
@@ -276,13 +290,14 @@ bool UsbAudioDriver::start(int sampleRate, int channels, int bitsPerSample) {
     channels_ = channels;
     bitsPerSample_ = bitsPerSample;
     bytesPerFrame_ = channels_ * (bitsPerSample_ / 8);
+    loudness_.setSampleRate((float)sampleRate);
 
     LOGI("start: sr=%d ch=%d bits=%d bytesPerFrame=%d",
          sampleRate_, channels_, bitsPerSample_, bytesPerFrame_);
 
     // 銆愯嚜閫傚簲DAC銆戜粠descriptor鍊欓€夎〃閫夋渶浣砤lt + 楠岃瘉clock range
     int targetAlt = selectAltForRate(sampleRate_, bitsPerSample_, channels_);
-    LOGI("selectAltForRate(r=%d bits=%d ch=%d) 锟斤拷 alt=%d (candidates=%zu, ranges=%zu)",
+    LOGI("selectAltForRate(r=%d bits=%d ch=%d) -> alt=%d (candidates=%zu, ranges=%zu)",
          sampleRate_, bitsPerSample_, channels_, targetAlt, altCandidates_.size(), clockRanges_.size());
 
     // Fallback: if adaptive match failed, use old hardcoded logic
@@ -327,9 +342,11 @@ bool UsbAudioDriver::start(int sampleRate, int channels, int bitsPerSample) {
             // NOTE: Realtek 4BA6 is NOT buggy — Salt verified it accepts SET_CUR
             // (setCurAttempts=[clock=30@0/ret=4/current=44100]). Skipping SET_CUR left
             // its clock stuck at 48k, so 44.1k tracks played back fast/warped.
-            bool buggyDac = (vid_ == 0x2D13 && pid_ == 0xA001)
-                || (vid_ == 0x2972 && pid_ == 0x0047)
-                || (vid_ == 0x3302 && pid_ == 0x201D);  // TTGK Note: no clock source descriptor
+            // [2026-08-24] Salt also verified BTR5 (2972:0047) sends SET_CUR to clock=41
+            // (ret=4) and TTGK Note (3302:201D) sends SET_CUR to clock=6 (ret=4). Both
+            // were wrongly listed here as skipSetCur. Only HIFI_A001 (2D13:A001) truly
+            // breaks on SET_CUR (locks clock at 384k).
+            bool buggyDac = (vid_ == 0x2D13 && pid_ == 0xA001);
             scRet = buggyDac ? sampleRate_ : trySetSampleRate(sampleRate_);
             if (buggyDac) { LOGI("start: skipping SET_CUR for pid=%04X (implicit alt-switch lock)", pid_); clockRate_ = sampleRate_; }
             else if (scRet >= 0) clockRate_ = sampleRate_;
@@ -519,11 +536,11 @@ void UsbAudioDriver::setMseb10Band(const float* gainsDb, const float* freqsHz, c
         }
     }
 
-    // 【V8.3 去限幅后 preGain 裕度】低频 low-shelf（32/60/120Hz）在 30Hz 以下几乎全部叠加，
-    // 只用最大单 band 增益补偿会低估级联总增益，密集鼓声满幅时叠加超 1.0 触发最终硬限幅。
-    // 按正增益总和补偿（保守，避免级联削波）。
+    // 【V8.3 preGain 方案 B】只补低频 3 段（<250Hz）正增益总和（与 Oboe 侧一致）。
+    // 低频 low-shelf 在 30Hz 以下叠加会级联削波，按“和”补偿；中高频 peaking 频点分离
+    // +2~3dB 几乎不削波，交给 limiter 兔底，避免“开 MSEB 变轻”。
     float sumPosGain = 0.0f;
-    for (int i = 0; i < len && i < 10; i++) if (gainsDb[i] > 0.0f) sumPosGain += gainsDb[i];
+    for (int i = 0; i < len && i < 3; i++) if (gainsDb[i] > 0.0f) sumPosGain += gainsDb[i];
     msebPreGain_ = powf(10.0f, (-sumPosGain) / 20.0f);
 
     mseb10Enabled_.store(true, std::memory_order_release);
@@ -674,6 +691,21 @@ void UsbAudioDriver::resetCompressor() {
     LOGI("DAC compressor reset");
 }
 
+// 【V8.3】等响补偿（ISO 226）——低音量时低频/高频自动提升。stereo-linked。
+void UsbAudioDriver::setLoudnessEnabled(bool en) {
+    loudness_.setEnabled(en);
+    LOGI("DAC loudness %s", en ? "enabled" : "disabled");
+}
+
+void UsbAudioDriver::setLoudnessIntensity(float intensity) {
+    loudness_.setIntensity(intensity);
+    LOGI("DAC loudness intensity=%.2f", intensity);
+}
+
+void UsbAudioDriver::setLoudnessOutGain(float gain) {
+    loudness_.setOutGain(gain);
+}
+
 // 鈹€鈹€ pushPcm 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
@@ -735,6 +767,8 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
         float msW = curMsWidth_, msC = curMsCenter_;
         float msTargetW = msWidth_.load(std::memory_order_acquire);
         float msTargetC = msCenter_.load(std::memory_order_acquire);
+        // 【V8.3】等响补偿：实际输出增益 = 软件音量（立方 taper 后的 volume_，即真正送 DAC 的响度）。
+        if (loudness_.enabled_) loudness_.setOutGain(volume_);
         for (int f = 0; f < chunk; ++f) {
             preGain += (targetPreGain - preGain) * PREGAIN_SMOOTH;
             float sL = src[f * 2] * preGain;
@@ -758,6 +792,11 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
             } else if (dspOn) {
                 sL = dspEqBand5L_.process(dspEqBand4L_.process(dspEqBand3L_.process(dspEqBand2L_.process(dspEqBand1L_.process(sL)))));
                 sR = dspEqBand5R_.process(dspEqBand4R_.process(dspEqBand3R_.process(dspEqBand2R_.process(dspEqBand1R_.process(sR)))));
+            }
+
+            // 【V8.3】等响补偿（ISO 226）—— EQ 之后、M/S 之前，stereo-linked。
+            if (loudness_.enabled_) {
+                loudness_.process(sL, sR);
             }
 
             // 【V8.3】M/S 声场（跨声道矩阵，仅当开启）——独立于 EQ，可单独开关。
@@ -1005,10 +1044,10 @@ void UsbAudioDriver::streamLoop() {
     const int pktMaxFrames = packetSizeFrames();
     const int pktMaxBytes  = pktMaxFrames * bytesPerFrame_;
     const int urbBytes     = pktMaxBytes * kPacketsPerUrb;
-    const double samplesPerMicroframe = sampleRate_ / (isUac2_ ? 8000.0 : 1000.0);
+    const double samplesPerMicroframe = sampleRate_ / (highSpeed_ ? 8000.0 : 1000.0);
 
     LOGI("streamLoop: maxFrames=%d urbBytes=%d pkts/urb=%d hs=%d rate/mf=%.4f",
-         pktMaxFrames, urbBytes, kPacketsPerUrb, isUac2_ ? 1 : 0, samplesPerMicroframe);
+         pktMaxFrames, urbBytes, kPacketsPerUrb, highSpeed_ ? 1 : 0, samplesPerMicroframe);
 
     // 銆怴3.2.7銆慞re-queue 12 URBs锛堝師4锛夛細纭欢鍦ㄩ闃熷垪 32ms锟?6ms锟?
     // 鎶楄皟搴︽姈鍔ㄢ€斺€旈暱鎾伓鍙戝崱椤挎牴鍥狅細stream 绾跨▼琚锟?>32ms 鍗虫柇锟?
@@ -1221,6 +1260,61 @@ int UsbAudioDriver::findClockSourceId() {
         if (dLen == 0) break;
     }
 
+    // Pass 1.5: build map clockEntityId -> {subtype, resolvedSourceId}.
+    // BTR5 (2972:0047) uses a TWO-level clock: Input Terminal -> bCSourceID=40
+    // is a Clock Selector (subtype 0x0B), whose baCSourceID[0]=41 is the real
+    // Clock Source. SET_CUR must go to the SOURCE (41), never the selector (40)
+    // — sending SET_CUR to a selector returns EPIPE (errno=32) and stalls the
+    // whole control pipe (the exact BTR5 failure: SET_CUR ret=-1 EPIPE, then
+    // setInterfaceAlt errno=110/71). Salt reports selectedClockSources=[41@0].
+    int clockSubtype[64];
+    int clockSrcPin[64];
+    for (int i = 0; i < 64; i++) { clockSubtype[i] = -1; clockSrcPin[i] = -1; }
+    pos = 0;
+    while (pos + 2 < len) {
+        uint8_t dLen  = desc[pos];
+        uint8_t dType = (pos + 1 < len) ? desc[pos + 1] : 0;
+        uint8_t dSub  = (pos + 2 < len) ? desc[pos + 2] : 0;
+        if (dType == UAC2_CS_INTERFACE && dLen >= 6) {
+            if (dSub == UAC2_CS_CLOCK_SOURCE && dLen >= 8) {
+                int id = desc[pos + 3];
+                if (id >= 0 && id < 64) { clockSubtype[id] = 0x0A; clockSrcPin[id] = id; }
+                LOGI("ClockEntity: id=%d subtype=SOURCE", id);
+            } else if (dSub == UAC2_CS_CLOCK_SELECTOR) {
+                int id     = desc[pos + 3];   // bClockID
+                int nrPins = desc[pos + 4];   // bNrInPins
+                int pin0   = (nrPins > 0 && dLen >= 6) ? desc[pos + 5] : -1;  // baCSourceID[0]
+                if (id >= 0 && id < 64) { clockSubtype[id] = 0x0B; clockSrcPin[id] = pin0; }
+                LOGI("ClockEntity: id=%d subtype=SELECTOR pins=%d pin0=%d", id, nrPins, pin0);
+            } else if (dSub == 0x0C /*CLOCK_MULTIPLIER*/) {
+                int id  = desc[pos + 3];
+                int src = desc[pos + 4];       // bCSourceID
+                if (id >= 0 && id < 64) { clockSubtype[id] = 0x0C; clockSrcPin[id] = src; }
+                LOGI("ClockEntity: id=%d subtype=MULTIPLIER src=%d", id, src);
+            }
+        }
+        pos += (dLen > 0) ? dLen : 1;
+        if (dLen == 0) break;
+    }
+
+    // Resolve a clock entity id to its terminal Clock Source, following
+    // Selector/Multiplier chains (up to 8 hops, cycle-guarded).
+    auto resolveClock = [&](int id) -> int {
+        int cur = id;
+        for (int hop = 0; hop < 8; ++hop) {
+            if (cur < 0 || cur >= 64) break;
+            int st = clockSubtype[cur];
+            if (st == 0x0A) return cur;                       // Clock Source
+            if (st == 0x0B || st == 0x0C) {
+                int nxt = clockSrcPin[cur];
+                if (nxt > 0 && nxt != cur) { cur = nxt; continue; }
+                return cur;                                   // unresolvable selector
+            }
+            break;                                            // unknown entity
+        }
+        return cur;
+    };
+
     // Pass 2: find AS General bTerminalLink, prefer the one on OUR streaming iface.
     int ourLink = -1, anyLink = -1, curIface = -1;
     pos = 0;
@@ -1243,8 +1337,9 @@ int UsbAudioDriver::findClockSourceId() {
 
     int link = (ourLink >= 0) ? ourLink : anyLink;
     if (link >= 0 && link < 64 && termToClock[link] >= 0) {
-        LOGI("Clock source via terminalLink=%d -> bCSourceID=%d", link, termToClock[link]);
-        return termToClock[link];
+        int resolved = resolveClock(termToClock[link]);
+        LOGI("Clock source via terminalLink=%d -> bCSourceID=%d -> resolved=%d", link, termToClock[link], resolved);
+        return resolved;
     }
 
     // Fallback: first CS_CLOCK_SOURCE descriptor
@@ -1941,6 +2036,11 @@ bool UsbAudioDriver::setHardwareVolume(float pct) {
     float db = (pct > 1e-6f) ? 20.0f * log10f(pct) : featureUnitMinDb_;
     if (db > 0.0f) db = 0.0f;
     if (db < featureUnitMinDb_) db = featureUnitMinDb_;
+    // [V8.x] dedup: playSong + startStreaming each call setVolume once with the
+    // same cubic value; skip redundant SET_CUR when dB unchanged (less bus traffic).
+    if (lastVolumeSet_ && db == lastVolumeDb_) return true;
+    lastVolumeSet_ = true;
+    lastVolumeDb_ = db;
     int16_t dBval = static_cast<int16_t>(db * 256.0f);
     uint16_t wIndex = (featureUnitId_ << 8) | acIface_;
 
@@ -2006,9 +2106,9 @@ bool UsbAudioDriver::submitUrbRaw(int slot) {
 // 鈹€鈹€ packet size helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 int UsbAudioDriver::packetSizeFrames() const {
-    // UAC2 high-speed: 8000 microframes/sec
-    // Full-speed: 1000 frames/sec
-    int tps = isUac2_ ? 8000 : 1000;
+    // High-speed: 8000 microframes/sec. Full-speed: 1000 frames/sec.
+    // Use REAL bus speed (highSpeed_), NOT isUac2_ — UAC2 protocol does not imply high-speed.
+    int tps = highSpeed_ ? 8000 : 1000;
     return (sampleRate_ + tps - 1) / tps;  // ceil(sampleRate / transfers_per_sec)
 }
 

@@ -28,6 +28,15 @@ class SaltLyricProvider : ILyricProvider {
             "Lyrics",
             "Download/lrc"
         )
+        
+        // 【修复】模糊匹配 stopword：这些词在歌名/LRC 文件名里极常见，
+        // 单独命中会把别的歌误配（如《静止 (Live)》被《Break My Heart (Live...)》抓走）。
+        // 模糊匹配时过滤掉这些通用词，防止跨歌错配。
+        private val FUZZY_STOPWORDS = setOf(
+            "live", "remix", "feat", "edit", "mix", "version", "ver",
+            "radio", "acoustic", "instrumental", "demo", "cover", "extended",
+            "original", "clean", "explicit", "bonus", "track", "deluxe"
+        )
     }
 
     override suspend fun search(query: String): List<LyricResult> {
@@ -122,12 +131,15 @@ class SaltLyricProvider : ILyricProvider {
             if (titleOnlyMatch != null) return titleOnlyMatch
         }
         
-        // 优先级4：模糊匹配（标题关键词）
-        val keywords = titleLower.split(" ", "-", "_", "(", "[").filter { it.isNotBlank() }
-        if (keywords.isNotEmpty()) {
+        // 优先级4：模糊匹配（标题关键词，过滤 stopword 且要求 ≥2 个关键词命中）
+        val keywords = titleLower.split(" ", "-", "_", "(", "[").filter {
+            it.isNotBlank() && it !in FUZZY_STOPWORDS
+        }
+        if (keywords.size >= 2) {
             val keywordMatch = lrcFiles.find { f ->
                 val nameLower = f.nameWithoutExtension.lowercase()
-                keywords.any { kw -> nameLower.contains(kw) && kw.length >= 3 }
+                val hitCount = keywords.count { kw -> nameLower.contains(kw) && kw.length >= 3 }
+                hitCount >= 2
             }
             if (keywordMatch != null) return keywordMatch
         }

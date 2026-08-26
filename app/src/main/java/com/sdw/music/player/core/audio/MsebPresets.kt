@@ -18,6 +18,9 @@ object MsebPresets {
 
     private const val PREFS_KEY = "mseb_presets"
 
+    /** 用户自定义预设上限 */
+    const val MAX_USER_PRESETS = 2
+
     /** Built-in classic presets */
     val BUILTIN: List<MsebPreset> = listOf(
         MsebPreset(
@@ -91,12 +94,21 @@ object MsebPresets {
 
     fun getUserPresets(context: Context): List<MsebPreset> = loadUserPresets(context)
 
-    fun save(context: Context, name: String, params: MsebParams) {
+    /**
+     * 保存预设（同名替换）。新名字且已满 [MAX_USER_PRESETS] 个则拒绝。
+     * @return true=已保存；false=超上限未保存
+     */
+    fun save(context: Context, name: String, params: MsebParams): Boolean {
         val presets = loadUserPresets(context).toMutableList()
+        val exists = presets.any { it.name == name }
+        if (!exists && presets.size >= MAX_USER_PRESETS) {
+            return false
+        }
         // Replace if same name exists, otherwise append
         presets.removeAll { it.name == name }
         presets.add(MsebPreset(name, params))
         writePresets(context, presets)
+        return true
     }
 
     fun delete(context: Context, name: String) {

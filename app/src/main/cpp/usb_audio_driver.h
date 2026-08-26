@@ -9,6 +9,7 @@
 #include <linux/usbdevice_fs.h>
 #include <linux/usb/ch9.h>
 #include "biquad_filter.h"
+#include "loudness_comp.h"
 
 /**
  * Native USB Audio Class driver for direct DAC streaming.
@@ -146,6 +147,10 @@ public:
     void setCompressorEnabled(bool en);
     void setCompressorParams(float thresholdDb, float ratio, float attackMs, float releaseMs, float makeupDb);
     void resetCompressor();
+    // 【V8.3】等响补偿（ISO 226，低音量时低频/高频自动提升）
+    void setLoudnessEnabled(bool en);
+    void setLoudnessIntensity(float intensity);
+    void setLoudnessOutGain(float gain);
     // Kotlin 层注入 Salt-verified 的 FU 参数（通用探测失败时兜底，quirk 表已上移到 DacProfile.kt）
     void setFeatureUnitOverride(int unitId, int channel, int channels,
                                 float minDb, float maxDb, float resDb);
@@ -155,6 +160,7 @@ public:
 
     // 鈹€鈹€ Debug log ring buffer (Salt-style in-app log) 鈹€鈹€鈹€鈹€鈹€
     const char* getNativeDebugLog() const { return nativeLogBuf_; }
+    void clearNativeDebugLog() { nativeLogWrite_ = 0; nativeLogBuf_[0] = '\0'; }
 
     // 鈹€鈹€ Conversion helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
     int framesToBytes(int frames) const { return frames * bytesPerFrame_; }
@@ -200,6 +206,7 @@ private:
     int maxPacketSize_ = 0;
     int interval_ = 1;
     bool isUac2_ = false;
+    bool highSpeed_ = true;   // real USB bus speed (high=8000 uframes/s, full=1000 frames/s). Default high; corrected in open() via USBDEVFS_GET_SPEED.
     int vid_ = 0;
     int pid_ = 0;
     int ifaceNum_ = 0;
@@ -289,6 +296,8 @@ private:
     float compMakeupLinear_ = 1.0f;
     float compEnvDb_ = -120.0f;
     float compGrDb_ = 0.0f;
+    // 【V8.3】等响补偿（ISO 226，低音量时低频/高频自动提升，stereo-linked）
+    LoudnessComp loudness_;
     std::atomic<int> writePos_{0};
     std::atomic<int> readPos_{0};
 
@@ -318,6 +327,8 @@ private:
     float featureUnitMaxDb_ = 0.0f;
     float featureUnitResDb_ = 1.0f;
     bool hardwareVolumeReady_ = false;
+    float lastVolumeDb_ = -999.0f;
+    bool lastVolumeSet_ = false;
     void parseFeatureUnit();
     bool setHardwareVolume(float pct);
 

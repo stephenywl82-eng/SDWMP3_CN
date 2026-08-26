@@ -379,6 +379,30 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetCompressorParams(JNI
     if (driver) driver->setCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb);
 }
 
+// ── nativeSetLoudnessEnabled ──────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessEnabled(JNIEnv*, jobject, jboolean enabled) {
+    auto* driver = getDriver();
+    if (driver) driver->setLoudnessEnabled(enabled != 0);
+}
+
+// ── nativeSetLoudnessIntensity ──────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessIntensity(JNIEnv*, jobject, jfloat intensity) {
+    auto* driver = getDriver();
+    if (driver) driver->setLoudnessIntensity(intensity);
+}
+
+// ── nativeSetLoudnessOutGain ──────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessOutGain(JNIEnv*, jobject, jfloat gain) {
+    auto* driver = getDriver();
+    if (driver) driver->setLoudnessOutGain(gain);
+}
+
 // ── nativeGetDebugLog ────────────────────────────────────────────────────
 
 // ── nativeForceReset ────────────────────────────────────────────────────
@@ -397,6 +421,14 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetDebugLog(JNIEnv* env
     auto* driver = getDriver();
     if (!driver) return env->NewStringUTF("Driver not initialized");
     return env->NewStringUTF(driver->getNativeDebugLog());
+}
+
+// ── nativeClearDebugLog ──────────────────────────────────────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeClearDebugLog(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    if (driver) driver->clearNativeDebugLog();
 }
 
 } // extern "C"

@@ -259,6 +259,15 @@ class LyricRepository private constructor(
     ): LyricResult? = withContext(Dispatchers.IO) {
         val cacheKey = "${song.title}_${song.artist}_${song.duration}"
         
+        // 0. 【内嵌歌词优先】音频内嵌 LYRICS tag 最权威，绝不误配（FLAC 优先，其他格式自动跳过）
+        loadEmbedded(song)?.let { embedded ->
+            synchronized(cacheLock) {
+                lyricsCache[cacheKey] = embedded
+            }
+            Log.d(TAG, "🎵 内嵌歌词命中: ${song.title}")
+            return@withContext embedded
+        }
+        
         // 1. 内存缓存优先
         synchronized(cacheLock) {
             lyricsCache[cacheKey]?.let {

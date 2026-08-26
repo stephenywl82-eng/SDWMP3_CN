@@ -3,9 +3,8 @@ package com.sdw.music.player.ui.screens
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -21,6 +20,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import android.content.Context
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import com.sdw.music.player.MsebCalculator
 import com.sdw.music.player.MsebParams
 import com.sdw.music.player.MsebPreset
@@ -29,7 +30,7 @@ import com.sdw.music.player.MusicService
 import com.sdw.music.player.R
 import kotlinx.coroutines.delay
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun MsebScreen(
     onBack: () -> Unit
@@ -39,8 +40,8 @@ fun MsebScreen(
     var enabled by remember { mutableStateOf(MsebCalculator.isEnabled(context)) }
     var savedName by remember { mutableStateOf("") }
 
-    // Preset list (built-in + user)
-    val presets = remember { MsebPresets.getAll(context) }
+    // Preset list (built-in + user) — 可刷新，保存后更新
+    var presets by remember { mutableStateOf(MsebPresets.getAll(context)) }
 
     // Save dialog
     var showSaveDialog by remember { mutableStateOf(false) }
@@ -53,6 +54,16 @@ fun MsebScreen(
     var compAttack by remember { mutableStateOf(compPrefs.getFloat("attack", 10f)) }
     var compRelease by remember { mutableStateOf(compPrefs.getFloat("release", 120f)) }
     var compMakeup by remember { mutableStateOf(compPrefs.getFloat("makeup", 0f)) }
+
+    // ── 【V8.3】等响补偿（独立全局模块，独立开关）──
+    val loudPrefs = remember { context.getSharedPreferences("loudness", Context.MODE_PRIVATE) }
+    var loudEnabled by remember { mutableStateOf(loudPrefs.getBoolean("enabled", false)) }
+    var loudIntensity by remember { mutableStateOf(loudPrefs.getFloat("intensity", 1f)) }
+
+    // ── 【V8.3】Crossfeed（消除头中效应，仅 Oboe）──
+    val xfPrefs = remember { context.getSharedPreferences("crossfeed", Context.MODE_PRIVATE) }
+    var xfEnabled by remember { mutableStateOf(xfPrefs.getBoolean("enabled", false)) }
+    var xfAmount by remember { mutableStateOf(xfPrefs.getFloat("amount", 0.6f)) }
 
     // FFT band levels — 8 bands from native
     var bandLevels by remember { mutableStateOf(floatArrayOf(0f,0f,0f,0f,0f,0f,0f,0f)) }
@@ -72,6 +83,16 @@ fun MsebScreen(
     // 【V8.3】进入页面时恢复压缩器状态
     LaunchedEffect(Unit) {
         MusicService.instance?.applyCompressor(compEnabled, compThreshold, compRatio, compAttack, compRelease, compMakeup)
+    }
+
+    // 【V8.3】进入页面时恢复等响补偿状态
+    LaunchedEffect(Unit) {
+        MusicService.instance?.applyLoudness(loudEnabled, loudIntensity)
+    }
+
+    // 【V8.3】进入页面时恢复 Crossfeed 状态（仅 Oboe）
+    LaunchedEffect(Unit) {
+        MusicService.instance?.applyCrossfeed(if (xfEnabled) xfAmount else 0f)
     }
 
     // 【V7.200】Arm MSEB guard in C++ layer — prevents nativeResetDspEq5Band
@@ -152,35 +173,71 @@ fun MsebScreen(
                 .padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // ── Preset Chips (horizontal scroll) ──
+            // ── Preset Chips (两行自动换行) ──
             Text(
                 stringResource(R.string.mseb_presets),
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.outlineVariant,
                 modifier = Modifier.padding(top = 4.dp)
             )
-            LazyRow(
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            androidx.compose.foundation.layout.FlowRow(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                items(presets) { preset ->
+                presets.forEach { preset ->
                     val isActive = preset.params == params
-                    AssistChip(
-                        onClick = { applyPreset(preset) },
-                        label = {
-                            Text(
-                                preset.name,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.labelSmall
-                            )
-                        },
-                        colors = if (isActive) {
-                            AssistChipDefaults.assistChipColors(
-                                containerColor = MaterialTheme.colorScheme.primaryContainer,
-                                labelColor = MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        } else AssistChipDefaults.assistChipColors()
-                    )
+                    val isUser = preset.name in MsebPresets.getUserPresets(context).map { it.name }
+                    if (isUser) {
+                        // 用户自定义预设：带删除按钮（✕），点击 chip 应用，点 ✕ 删除
+                        InputChip(
+                            selected = isActive,
+                            onClick = { applyPreset(preset) },
+                            label = {
+                                Text(
+                                    preset.name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            trailingIcon = {
+                                Icon(
+                                    Icons.Default.Close,
+                                    contentDescription = "Delete ${preset.name}",
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .clickable {
+                                            MsebPresets.delete(context, preset.name)
+                                            presets = MsebPresets.getAll(context)
+                                        }
+                                )
+                            },
+                            colors = if (isActive) {
+                                InputChipDefaults.inputChipColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    labelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            } else InputChipDefaults.inputChipColors()
+                        )
+                    } else {
+                        AssistChip(
+                            onClick = { applyPreset(preset) },
+                            label = {
+                                Text(
+                                    preset.name,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            },
+                            colors = if (isActive) {
+                                AssistChipDefaults.assistChipColors(
+                                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                    labelColor = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            } else AssistChipDefaults.assistChipColors()
+                        )
+                    }
                 }
             }
 
@@ -191,7 +248,7 @@ fun MsebScreen(
                     containerColor = if (enabled)
                         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
                     else
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        MaterialTheme.colorScheme.surfaceVariant
                 )
             ) {
                 Row(
@@ -253,7 +310,7 @@ fun MsebScreen(
                     containerColor = if (compEnabled)
                         MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.25f)
                     else
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        MaterialTheme.colorScheme.surfaceVariant
                 )
             ) {
                 Column(
@@ -344,6 +401,126 @@ fun MsebScreen(
                 }
             }
 
+            // ── 等响补偿（独立全局模块）──
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (loudEnabled)
+                        MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.25f)
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                stringResource(R.string.mseb_loudness),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (loudEnabled) MaterialTheme.colorScheme.tertiary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                stringResource(R.string.mseb_loudness_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = loudEnabled,
+                            onCheckedChange = { on ->
+                                loudEnabled = on
+                                loudPrefs.edit().putBoolean("enabled", on).apply()
+                                MusicService.instance?.applyLoudness(on, loudIntensity)
+                            }
+                        )
+                    }
+
+                    val loudAlpha = if (loudEnabled) 1f else 0.45f
+                    Column(modifier = Modifier.alpha(loudAlpha)) {
+                        MsebSlider(
+                            stringResource(R.string.mseb_loudness_intensity), "0%", "100%",
+                            stringResource(R.string.mseb_loudness_intensity), loudIntensity,
+                            0f..2f, 2
+                        ) { v ->
+                            loudIntensity = v
+                            loudPrefs.edit().putFloat("intensity", v).apply()
+                            MusicService.instance?.applyLoudness(loudEnabled, v)
+                        }
+                    }
+                }
+            }
+
+            // ── Crossfeed（消除头中效应，仅 Oboe 路径）──
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (xfEnabled)
+                        MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.25f)
+                    else
+                        MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                stringResource(R.string.mseb_crossfeed),
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.SemiBold,
+                                color = if (xfEnabled) MaterialTheme.colorScheme.secondary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                stringResource(R.string.mseb_crossfeed_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = xfEnabled,
+                            onCheckedChange = { on ->
+                                xfEnabled = on
+                                xfPrefs.edit().putBoolean("enabled", on).apply()
+                                MusicService.instance?.applyCrossfeed(if (on) xfAmount else 0f)
+                            }
+                        )
+                    }
+
+                    val xfAlpha = if (xfEnabled) 1f else 0.45f
+                    Column(modifier = Modifier.alpha(xfAlpha)) {
+                        MsebSlider(
+                            stringResource(R.string.mseb_crossfeed_amount), "0%", "100%",
+                            stringResource(R.string.mseb_crossfeed_amount), xfAmount,
+                            0f..1f, 2
+                        ) { v ->
+                            xfAmount = v
+                            xfPrefs.edit().putFloat("amount", v).apply()
+                            MusicService.instance?.applyCrossfeed(if (xfEnabled) v else 0f)
+                        }
+                    }
+                }
+            }
+
             // ── Reset ──
             if (!params.isFlat) {
                 Spacer(modifier = Modifier.height(4.dp))
@@ -369,25 +546,42 @@ fun MsebScreen(
     // ── Save Preset Dialog ──
     if (showSaveDialog) {
         var nameText by remember { mutableStateOf(savedName) }
+        var saveError by remember { mutableStateOf<String?>(null) }
+        val limitMsg = stringResource(R.string.mseb_preset_limit)
         AlertDialog(
             onDismissRequest = { showSaveDialog = false },
             title = { Text(stringResource(R.string.mseb_save_preset)) },
             text = {
-                OutlinedTextField(
-                    value = nameText,
-                    onValueChange = { nameText = it },
-                    label = { Text(stringResource(R.string.mseb_preset_name)) },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                Column {
+                    OutlinedTextField(
+                        value = nameText,
+                        onValueChange = { nameText = it; saveError = null },
+                        label = { Text(stringResource(R.string.mseb_preset_name)) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    if (saveError != null) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            saveError!!,
+                            color = MaterialTheme.colorScheme.error,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
             },
             confirmButton = {
                 TextButton(onClick = {
                     val name = nameText.trim()
                     if (name.isNotEmpty()) {
-                        MsebPresets.save(context, name, params)
-                        savedName = name
-                        showSaveDialog = false
+                        val ok = MsebPresets.save(context, name, params)
+                        if (ok) {
+                            savedName = name
+                            presets = MsebPresets.getAll(context)
+                            showSaveDialog = false
+                        } else {
+                            saveError = limitMsg
+                        }
                     }
                 }) { Text(stringResource(R.string.action_save)) }
             },
@@ -407,7 +601,7 @@ private fun MsebBandGainsDebug(gains: FloatArray) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
@@ -492,7 +686,7 @@ private fun MsebFftBars(levels: FloatArray) {
     Card(
         modifier = Modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+            containerColor = MaterialTheme.colorScheme.surfaceVariant
         )
     ) {
         Column(modifier = Modifier.padding(12.dp)) {

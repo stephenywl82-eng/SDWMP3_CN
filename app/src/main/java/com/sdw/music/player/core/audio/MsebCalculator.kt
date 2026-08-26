@@ -11,12 +11,12 @@ import android.content.Context
  *   [1]  60 Hz  — Sub-bass depth + bass texture LF
  *   [2] 120 Hz  — Bass texture body / punch
  *   [3] 250 Hz  — Temperature warm + thickness
- *   [4] 500 Hz  — Thickness / body
- *   [5]  1 kHz  — Vocal body
- *   [6] 2.5 kHz — Vocal presence + female overtones
- *   [7]  5 kHz  — Sibilance LF + impulse attack
- *   [8]  8 kHz  — Sibilance HF + female shimmer
- *   [9] 12 kHz  — Air + temperature cool
+ *   [4] 425 Hz  — Thickness / body (ERB)
+ *   [5] 992 Hz  — Vocal body (ERB)
+ *   [6] 2.05 kHz — Vocal presence + female overtones (ERB)
+ *   [7] 4.02 kHz — Sibilance LF + impulse attack (ERB)
+ *   [8] 7.71 kHz — Sibilance HF + female shimmer (ERB)
+ *   [9] 14.6 kHz — Air + temperature cool (ERB)
  */
 data class MsebParams(
     // ── 基础 6 维度 ──
@@ -48,7 +48,10 @@ data class MsebParams(
 object MsebCalculator {
 
     /** Fixed center frequencies for the 10 bands (Hz). */
-    val BAND_FREQS = floatArrayOf(32f, 60f, 120f, 250f, 500f, 1000f, 2500f, 5000f, 8000f, 12000f)
+    // 【V8.3】混合标度：低频 <250Hz 保持手挑（32/60/120/250，近似 1~1.5 倍频程，控下潜命门）；
+    // 中高频 ≥250Hz 对齐 ERB 心理声学标度（等效矩形带宽等间隔，贴人耳临界频带）。
+    // 精确 ERB 值：425.3 / 991.9 / 2049.4 / 4022.8 / 7705.8 / 14578.9
+    val BAND_FREQS = floatArrayOf(32f, 60f, 120f, 250f, 425f, 992f, 2049f, 4023f, 7706f, 14579f)
 
     /** Fixed Q per band — narrower in dense LF/HF regions, wider in sparse mid. */
     val BAND_QS = floatArrayOf(1.0f, 1.0f, 1.2f, 0.9f, 0.8f, 0.8f, 1.0f, 1.0f, 1.1f, 1.1f)
@@ -60,12 +63,12 @@ object MsebCalculator {
      * Band[1] 60 Hz  : subBass depth + bassTexture LF
      * Band[2] 120 Hz : bassTexture body + subBass bleed
      * Band[3] 250 Hz : temperature warm + thickness
-     * Band[4] 500 Hz : thickness body + temperature
-     * Band[5] 1 kHz  : vocal body
-     * Band[6] 2.5kHz : vocalForward presence + femaleOvertones
-     * Band[7] 5 kHz  : sibilance LF + impulse attack edge
-     * Band[8] 8 kHz  : sibilance HF + female shimmer
-     * Band[9] 12 kHz : air + temperature cool
+     * Band[4] 425 Hz : thickness body + temperature
+     * Band[5] 992 Hz : vocal body
+     * Band[6] 2.05kHz: vocalForward presence + femaleOvertones
+     * Band[7] 4.02kHz: sibilance LF + impulse attack edge
+     * Band[8] 7.71kHz: sibilance HF + female shimmer
+     * Band[9] 14.6kHz: air + temperature cool
      */
     fun calculateGains(params: MsebParams): FloatArray {
         val g = FloatArray(10)
@@ -82,22 +85,22 @@ object MsebCalculator {
         // Band 3 — Warm / thickness low-mid (250 Hz)
         g[3] = params.temperature * 0.25f + params.thickness * 0.20f
 
-        // Band 4 — Thickness body (500 Hz)
+        // Band 4 — Thickness body (425 Hz)
         g[4] = params.thickness * 0.40f + params.temperature * 0.10f
 
         // Band 5 — Vocal body (1 kHz)
         g[5] = params.vocalForward * 0.20f
 
-        // Band 6 — Vocal presence + female overtones (2.5 kHz)
+        // Band 6 — Vocal presence + female overtones (2.05 kHz)
         g[6] = params.vocalForward * 0.35f + params.femaleOvertones * 0.30f
 
-        // Band 7 — Sibilance LF（5 kHz；impulseResponse 已改为时域瞬态整形，不再叠加于此）
+        // Band 7 — Sibilance LF（4.02 kHz；impulseResponse 已改为时域瞬态整形，不再叠加于此）
         g[7] = params.sibilance * 0.25f + params.sibilanceLf * 0.30f
 
-        // Band 8 — Sibilance HF + female shimmer (8 kHz)
+        // Band 8 — Sibilance HF + female shimmer (7.71 kHz)
         g[8] = params.sibilanceHf * 0.30f + params.femaleOvertones * 0.10f
 
-        // Band 9 — Air + temperature cool (12 kHz)
+        // Band 9 — Air + temperature cool (14.6 kHz)
         g[9] = params.air * 0.35f - params.temperature * 0.15f
 
         for (i in g.indices) {

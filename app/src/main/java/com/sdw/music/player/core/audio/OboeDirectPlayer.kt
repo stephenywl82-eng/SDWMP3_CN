@@ -40,6 +40,7 @@ class OboeDirectPlayer(private val context: Context) {
     @JvmField @Volatile var isPrepared = false
     private var currentFilePath: String? = null
     private var parcelFd: android.os.ParcelFileDescriptor? = null  // 【V7.21】持有FD防止GCClose
+    private var incomingParcelFd: android.os.ParcelFileDescriptor? = null  // 【Crossfade】incoming 轨 FD，防止 GC Close
 
     // Listener for playback events
     var onCompletion: (() -> Unit)? = null
@@ -63,6 +64,12 @@ class OboeDirectPlayer(private val context: Context) {
     private external fun nativeGetChannelCount(): Int
     private external fun nativeIsExclusive(): Boolean
     private external fun nativeIsSharedMode(): Boolean
+    // ---- Crossfade 双轨 native 方法 ----
+    private external fun nativeOpenIncomingFd(fd: Int, offset: Long, length: Long): Boolean
+    private external fun nativeStartCrossfade(durationMs: Int): Boolean
+    private external fun nativeStopIncoming()
+    private external fun nativeIsActiveB(): Boolean
+    private external fun nativeReleaseInactive()
 
     // DSP EQ native methods
     private external fun nativeSetDspEq(enabled: Boolean,
@@ -121,6 +128,12 @@ class OboeDirectPlayer(private val context: Context) {
     // 【V8.3】动态压缩 JNI（Master Bus Compressor）
     private external fun nativeSetCompressorEnabled(enabled: Boolean)
     private external fun nativeSetCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float)
+    // 【V8.3】等响补偿 JNI（ISO 226）
+    private external fun nativeSetLoudnessEnabled(enabled: Boolean)
+    private external fun nativeSetLoudnessIntensity(intensity: Float)
+    // 【V8.3】Crossfeed JNI（消除头中效应，仅 Oboe）
+    private external fun nativeSetCrossfeed(amount: Float)
+    private external fun nativeResetCrossfeed()
     // 【V7.86】AutoEQ 10-band JNI
     private external fun nativeSetAutoEq10Band(gainsDb: FloatArray, freqsHz: FloatArray, qValues: FloatArray, filterTypes: IntArray, preampDb: Float)
     private external fun nativeResetAutoEq()
@@ -280,7 +293,49 @@ class OboeDirectPlayer(private val context: Context) {
         // 【V7.21】Close FD
         try { parcelFd?.close() } catch (_: Exception) {}
         parcelFd = null
+        // 【Crossfade】清理 incoming 轨 FD
+        try { incomingParcelFd?.close() } catch (_: Exception) {}
+        incomingParcelFd = null
     }
+
+    // ---- Crossfade 双轨 API ----
+
+    /** 预加载下一首（进空闲槽，open 但不启解码线程）。返回是否成功。 */
+    fun openIncoming(filePath: String): Boolean {
+        try {
+            val file = java.io.File(filePath)
+            if (!file.exists()) {
+                Log.w(TAG, "openIncoming: file not exist: $filePath")
+                return false
+            }
+            try { incomingParcelFd?.close() } catch (_: Exception) {}
+            incomingParcelFd = android.os.ParcelFileDescriptor.open(file, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+            val fd = incomingParcelFd!!.fd
+            val length = file.length()
+            val ok = nativeOpenIncomingFd(fd, 0L, length)
+            if (!ok) {
+                try { incomingParcelFd?.close() } catch (_: Exception) {}
+                incomingParcelFd = null
+            }
+            Log.i(TAG, "openIncoming: $filePath -> $ok")
+            return ok
+        } catch (e: Exception) {
+            Log.e(TAG, "openIncoming exception: ${e.message}")
+            return false
+        }
+    }
+
+    /** 触发 A→B 交叉淡化（durationMs 毫秒）。incoming 必须已 open。 */
+    fun startCrossfade(durationMs: Int): Boolean = try { nativeStartCrossfade(durationMs) } catch (e: Exception) { Log.e(TAG, "startCrossfade: ${e.message}"); false }
+
+    /** 停止并释放 incoming 轨。 */
+    fun stopIncoming() { try { nativeStopIncoming() } catch (_: Exception) {}; try { incomingParcelFd?.close() } catch (_: Exception) {}; incomingParcelFd = null }
+
+    /** 当前 active 轨是否为 B。 */
+    fun isActiveB(): Boolean = try { nativeIsActiveB() } catch (_: Exception) { false }
+
+    /** 释放非活动轨（crossfade 完成后回收旧轨）。 */
+    fun releaseInactive() { try { nativeReleaseInactive() } catch (_: Exception) {}; try { incomingParcelFd?.close() } catch (_: Exception) {}; incomingParcelFd = null }
 
     /**
      * Get current playback position in milliseconds.
@@ -604,6 +659,32 @@ class OboeDirectPlayer(private val context: Context) {
     fun setCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float) {
         try {
             nativeSetCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb)
+        } catch (_: Exception) {}
+    }
+
+    // 【V8.3】等响补偿（ISO 226）
+    fun setLoudnessEnabled(enabled: Boolean) {
+        try {
+            nativeSetLoudnessEnabled(enabled)
+        } catch (_: Exception) {}
+    }
+
+    fun setLoudnessIntensity(intensity: Float) {
+        try {
+            nativeSetLoudnessIntensity(intensity)
+        } catch (_: Exception) {}
+    }
+
+    // 【V8.3】Crossfeed（消除头中效应，仅 Oboe，amount 0~1）
+    fun setCrossfeed(amount: Float) {
+        try {
+            nativeSetCrossfeed(amount)
+        } catch (_: Exception) {}
+    }
+
+    fun resetCrossfeed() {
+        try {
+            nativeResetCrossfeed()
         } catch (_: Exception) {}
     }
 

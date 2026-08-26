@@ -90,11 +90,17 @@ fun ArtistListScreen(
         items
     }
 
-    // Track which header is at top of screen
+    // Track which header is at top of screen（向后回溯最近的 section header，修正高亮偏移）
     LaunchedEffect(listState.firstVisibleItemIndex) {
         val idx = listState.firstVisibleItemIndex
-        if (idx in flatItems.indices && flatItems[idx].first) {
-            activeLetter.value = flatItems[idx].second as String
+        if (idx in flatItems.indices) {
+            // 从第一个可见项向后回溯，找到最近的 header
+            for (i in idx downTo 0) {
+                if (flatItems[i].first) {
+                    activeLetter.value = flatItems[i].second as String
+                    break
+                }
+            }
         }
     }
 

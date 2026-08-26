@@ -74,18 +74,21 @@ data class DacProfile(
             featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
             featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f)
 
-        /** TTGK Note (pid=201D) — gimped UAC2. Only 48k-family, no Clock Source descriptor.
-         *  SET_CUR returns code 4 (not success) but chip crystal is 24.576 MHz and
-         *  clock source still auto-syncs — Salt Player confirmed working via endpoint
-         *  fallback with clockVerified=false.  Hand-rolled USB Host Exclusive. */
+        /** TTGK Note (pid=201D) — UAC2 adaptive (attributes=0x09), multi-alt.
+         *  Salt verified: endpoint=0x04, alt=1 mps=196 (16bit), alt=2 mps=294 (24bit),
+         *  alt=3 mps=392 (32bit). clockSource=6, SET_CUR to clock=6 succeeds (ret=4).
+         *  Adaptive endpoint syncs via SOF, no feedback endpoint.
+         *  Hand-rolled USB Host Exclusive. */
         val TTGK_NOTE = DacProfile(0x3302, 0x201D, "TTGK Note",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = true)
+            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false)
 
-        /** vid=2972 pid=0047 — ALAC-capable DAC with broken Clock Entity.
-         *  SET_CUR always returns Broken pipe (errno=32).
-         *  Try BIT_PERFECT API first; fall back to Oboe system-route. */
-        val VID2972_0047 = DacProfile(0x2972, 0x0047, "Unknown DAC (2972:0047)",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = true)
+        /** vid=2972 pid=0047 (FiiO BTR5) — UAC2 async (attributes=0x05), multi-alt.
+         *  Salt verified: interface=1, alt=1 mps=392 (32bit), alt=2 mps=196 (16bit),
+         *  alt=3 mps=392. clockSource=40 (selector) → clock=41, SET_CUR ret=4.
+         *  Async endpoint has explicit feedback 0x81. NOT broken Clock Entity.
+         *  Hand-rolled USB Host Exclusive. */
+        val VID2972_0047 = DacProfile(0x2972, 0x0047, "FiiO BTR5",
+            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false)
 
         /** 2D13:A001 "USB HiFi Audio" — S32_LE wire, buggy SET_CUR.
          *  Hardware supports 44.1k but SET_CUR locks clock at 384k.

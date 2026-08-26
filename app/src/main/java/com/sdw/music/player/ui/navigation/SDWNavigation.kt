@@ -2,6 +2,7 @@ package com.sdw.music.player.ui.navigation
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.*
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
@@ -38,6 +39,7 @@ import androidx.media3.common.Player
 import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
+import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.sdw.music.player.ui.animation.SharedCoverOverlay
 import com.sdw.music.player.ui.animation.SharedCoverState
@@ -108,13 +110,19 @@ fun SDWNavHost(
 
     BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
         val screenHeightPx = with(LocalDensity.current) { maxHeight.toPx() }
+        // 全局壁纸背景层：垫在 NavHost 底下（播放器路由豁免，播放器用封面背景）
+        val navBackStackEntry by navController.currentBackStackEntryAsState()
+        val currentRoute = navBackStackEntry?.destination?.route
+        if (currentRoute != Screen.Player.route && currentRoute != Screen.LyricFullscreen.route) {
+            com.sdw.music.player.ui.components.WallpaperBackground()
+        }
         NavHost(
             navController = navController,
             startDestination = Screen.SongList.route,
-            enterTransition = { slideInHorizontally(tween(300)) { it } + fadeIn(tween(300)) },
-            exitTransition = { slideOutHorizontally(tween(300)) { -it / 4 } + fadeOut(tween(300)) },
-            popEnterTransition = { slideInHorizontally(tween(300)) { -it / 4 } + fadeIn(tween(300)) },
-            popExitTransition = { slideOutHorizontally(tween(300)) { it } + fadeOut(tween(300)) }
+            enterTransition = { slideInHorizontally(tween(420)) { it / 4 } + fadeIn(tween(420)) },
+            exitTransition = { slideOutHorizontally(tween(360)) { -it / 5 } + fadeOut(tween(360)) },
+            popEnterTransition = { slideInHorizontally(tween(420)) { -it / 5 } + fadeIn(tween(420)) },
+            popExitTransition = { slideOutHorizontally(tween(360)) { it / 4 } + fadeOut(tween(360)) }
         ) {
             composable(
                 Screen.SongList.route,
@@ -222,10 +230,12 @@ fun SDWNavHost(
 
             composable(
                 Screen.Player.route,
-                enterTransition = { slideInVertically(tween(300)) { it } + fadeIn(tween(300)) },
-                exitTransition = { slideOutVertically(tween(220)) { -it / 5 } + fadeOut(tween(220)) },
-                popEnterTransition = { slideInVertically(tween(260)) { -it / 5 } + fadeIn(tween(260)) },
-                popExitTransition = { slideOutVertically(tween(300)) { it } + fadeOut(tween(300)) }
+                // 【V8.5】进入播放器：轻量淡入（约 200ms），把舞台让给 SharedCoverOverlay 封面飞行动画，
+                // 避免整页滑动与封面动画双轨抢注意力。返回时轻快下滑 + 淡出。
+                enterTransition = { fadeIn(tween(220, easing = FastOutSlowInEasing)) },
+                exitTransition = { slideOutVertically(tween(300, easing = FastOutSlowInEasing)) { it / 3 } + fadeOut(tween(300)) },
+                popEnterTransition = { fadeIn(tween(260, easing = FastOutSlowInEasing)) },
+                popExitTransition = { slideOutVertically(tween(280, easing = FastOutSlowInEasing)) { it / 3 } + fadeOut(tween(280)) }
             ) {
                 // Collect hot flows inside player scope to isolate from song list recomposition
                 val positionMs by vm.positionMs.collectAsState()
@@ -284,6 +294,12 @@ fun SDWNavHost(
                     onNavigateBack = { navController.popBackStack() },
                     onNavigateToLyrics = {
                         navController.navigate(Screen.LyricFullscreen.route)
+                    },
+                    onNavigateToAudioDiagnostic = {
+                        navController.navigate(Screen.AudioDiagnostic.route)
+                    },
+                    onNavigateToMseb = {
+                        navController.navigate(Screen.Mseb.route)
                     },
                     onToggleFavorite = { vm.handleIntent(PlayerIntent.ToggleFavorite) },
                     onToggleEqualizer = {

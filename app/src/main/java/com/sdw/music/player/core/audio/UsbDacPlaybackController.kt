@@ -53,6 +53,9 @@ class UsbDacPlaybackController(
     // 【V3.3.0】FLAC 直解：native libFLAC 硬解直入 ring，绕开 Moto MediaCodec 降级
     @Volatile private var flacDirect = false
 
+    // 【2026-08-25】ALAC 直解：native Apple codec + MP4 box 解析直入 ring，绕开 MediaCodec
+    @Volatile private var alacDirect = false
+
     // 【V3.3.0】CUE 整轨模式：同 FLAC 相邻轨 gapless 切换（不重建 decoder）
     @Volatile private var cueDirect = false
 
@@ -207,6 +210,24 @@ class UsbDacPlaybackController(
             DebugLog.add(TAG, "open(flacDirect): flacOpen OK but no STREAMINFO, fallback MediaCodec")
         }
 
+        // 【2026-08-25】ALAC 直解：Apple codec + 手搓 MP4 box 解析（Bit-Perfect，绕开 MediaCodec）
+        if ((filePath.endsWith(".m4a", ignoreCase = true) || filePath.endsWith(".alac", ignoreCase = true) ||
+             filePath.endsWith(".mp4", ignoreCase = true)) && UsbDacManager.alacOpen(filePath)) {
+            val info = UsbDacManager.alacInfo()
+            if (info[0] > 0) {
+                alacDirect = true
+                sourceSampleRate = info[0]
+                this.dacSampleRate = info[0]
+                sourceChannelCount = info[1]
+                sourceBits = info[2]
+                extractorDurationMs = info[3].toLong()
+                positionMs = 0
+                DebugLog.add(TAG, "open(alacDirect): sr=$sourceSampleRate ch=$sourceChannelCount bits=$sourceBits dur=${extractorDurationMs}ms")
+                return true
+            }
+            DebugLog.add(TAG, "open(alacDirect): alacOpen OK but no config, fallback MediaCodec")
+        }
+
         return try {
             DebugLog.add(TAG, "open: $filePath")
             val ex = MediaExtractor()
@@ -291,13 +312,33 @@ class UsbDacPlaybackController(
      */
     fun play(targetSample: Long = 0L, streamAlreadyRunning: Boolean = false) {
         if (isPlaying) return
-        if (!wavDirect && !flacDirect && (codec == null || extractor == null)) { onError("Not ready"); return }
+        if (!wavDirect && !flacDirect && !alacDirect && (codec == null || extractor == null)) { onError("Not ready"); return }
         shouldStop = false; paused = false; isPlaying = true
 
         decodeThread = Thread({
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
             // [v6.0.13] keep-claim: skip reset when stream alive, avoid glitch from mid-stream memset
             if (!streamAlreadyRunning) UsbDacManager.resetRingBuffer()
+
+            // 【2026-08-25】ALAC 直解：native 解码线程自行填 ring，Kotlin 只做预缓冲等待+监控（同 flac）
+            if (alacDirect) {
+                UsbDacManager.alacStart()
+                val ringTarget = ((dacSampleRate * PREBUFFER_TARGET_MS) / 1000L).toInt()
+                val t0 = System.currentTimeMillis()
+                while (!shouldStop && UsbDacManager.getRingFill() < ringTarget &&
+                    !UsbDacManager.alacIsEos() && System.currentTimeMillis() - t0 < 3000) {
+                    try { Thread.sleep(10) } catch (_: InterruptedException) { return@Thread }
+                }
+                DebugLog.v(TAG, "play(alac): prebuffer ${UsbDacManager.getRingFill()} frames in ${System.currentTimeMillis() - t0}ms")
+                val alacOutBits = if (sourceBits > 16) 24 else 16
+                if (!UsbDacManager.startStreaming(dacSampleRate, dacChannels, alacOutBits)) {
+                    onError("startStreaming FAIL"); return@Thread
+                }
+                DebugLog.v(TAG, "play(alac): DAC stream started, bits=$alacOutBits")
+                alacMonitorLoop()
+                DebugLog.v(TAG, "play(alac): alacMonitorLoop RETURNED")
+                return@Thread
+            }
 
             // 【V3.3.0】FLAC 直解：native 解码线程自行填 ring，Kotlin 只做预缓冲等待+监控
             if (flacDirect) {
@@ -382,6 +423,7 @@ class UsbDacPlaybackController(
         val ringMs = if (dacSampleRate > 0) UsbDacManager.getRingFill() * 1000L / dacSampleRate else 0L
         pausedAtMs = (positionMs - ringMs).coerceAtLeast(0L)
         if (flacDirect) UsbDacManager.flacPause(true)  // 【V3.3.0】挂起 native 解码线程
+        if (alacDirect) UsbDacManager.alacPause(true)  // 【2026-08-25】挂起 native 解码线程
         UsbDacManager.pauseStream()
         DebugLog.add(TAG, "pause at ${pausedAtMs}ms (decodePos=${positionMs}ms ring=${ringMs}ms)")
     }
@@ -435,15 +477,22 @@ class UsbDacPlaybackController(
         DebugLog.v(TAG, "stopDecode (DAC stream paused, ring cleared)")
     }
 
-    // [v6.0.15] Same-rate keep-claim: async kill flacMonitor, new controller takes over instantly.
-    // Don't join or releaseResources — old thread cleans itself up while new one fills ring buffer.
+    // [v6.0.15] Same-rate keep-claim: kill old monitor + release old decoder, new controller takes over.
+    // 【修复 2026-08-25】两首歌一起放根因：旧版只 interrupt Kotlin monitor 线程，
+    // 但 monitor 的 finally 块因 shouldStop=true 跳过 releaseResources()，
+    // 导致旧格式的 native 解码线程（flacStop/alacStop）没被停 → 继续 push 旧歌 PCM 与新歌交织。
+    // 必须：停 monitor → 停 streamLoop（pauseStream，保留 claim）→ 清 ring → 停旧 native 解码线程。
+    // 顺序不能乱：resetRingBuffer 必须在 streamLoop 停了之后，否则 mid-stream memset 与读并发爆音。
+    // 新歌 play(streamAlreadyRunning=false) 会重新 startStreaming（same-rate keep-stream 幂等重启）。
     fun stopMonitor() {
         shouldStop = true; paused = false; isPlaying = false
         synchronized(pauseLock) { (pauseLock as java.lang.Object).notifyAll() }
-        decodeThread?.interrupt()  // wake from sleep, don't block on join
+        decodeThread?.interrupt()  // wake monitor from sleep, don't block on join
         decodeThread = null
-        // releaseResources() deferred to old thread's natural exit
-        DebugLog.v(TAG, "stopMonitor (async, native stream kept)")
+        UsbDacManager.pauseStream()  // stop streamLoop (keep USB claim)
+        UsbDacManager.resetRingBuffer()  // 清旧歌残留 PCM（streamLoop 已停，安全）
+        releaseResources()  // 停旧格式 native 解码线程（flacStop/alacStop/codec.stop）+ 释放 extractor
+        DebugLog.v(TAG, "stopMonitor (monitor killed, stream paused, ring cleared, decoder released, claim kept)")
     }
 
     // 【V3.2.8】seek 改为挂起请求：主线程直接 codec.flush() 会和解码线程的
@@ -454,6 +503,7 @@ class UsbDacPlaybackController(
         positionMs = timeMs
         if (pausedAtMs >= 0) { pausedAtMs = timeMs; return }  // 暂停中：resume 时统一执行
         if (flacDirect) { UsbDacManager.flacSeek(timeMs); return }  // 【V3.3.0】native 线程内安全执行
+        if (alacDirect) { UsbDacManager.alacSeek(timeMs); return }  // 【2026-08-25】native 线程内安全执行
         pendingSeekMs = timeMs  // 播放中：解码线程在循环顶部安全执行
         DebugLog.v(TAG, "seekTo request ${timeMs}ms (deferred to decode thread)")
     }
@@ -492,6 +542,7 @@ class UsbDacPlaybackController(
 
     private fun releaseResources() {
         if (flacDirect) { UsbDacManager.flacStop(); flacDirect = false; cueDirect = false; currentCueTrackIndex = -1; cueTrackList = emptyList() }  // 【V3.3.0】join native 解码线程，清理 CUE 状态
+        if (alacDirect) { UsbDacManager.alacStop(); alacDirect = false }  // 【2026-08-25】join native 解码线程
         codec?.stop(); codec?.release(); codec = null
         extractor?.release(); extractor = null
         try { wavFile?.close() } catch (_: Exception) {}
@@ -499,6 +550,57 @@ class UsbDacPlaybackController(
         audioTrackIndex = -1; extractorDurationMs = 0L
         carry24 = ByteArray(0)
         enc16Forced = false; _bufDiagCount = 0; _bufDiagLastPts = -1L; _hexDumpDone = 0
+    }
+
+    // 【2026-08-25】ALAC 直解监控循环：native 线程自行解码+推流，Kotlin 只同步进度/检测 EOS 排空（同 flac）
+    private fun alacMonitorLoop() {
+        var lastPosMs = 0L; var stallCount = 0; var lastDebug = 0L
+        val prebufferGraceMs = 3000L
+        var prebufferEndTime = System.currentTimeMillis() + prebufferGraceMs
+        try {
+            var drainWaitMs = 0
+            while (!shouldStop) {
+                if (paused) {
+                    synchronized(pauseLock) { while (paused && !shouldStop) (pauseLock as java.lang.Object).wait() }
+                }
+                if (shouldStop) break
+                val pos = UsbDacManager.alacPositionMs()
+                positionMs = pos
+                if (pos == lastPosMs && !paused) {
+                    if (System.currentTimeMillis() < prebufferEndTime) {
+                        Thread.sleep(50)
+                        continue
+                    }
+                    stallCount++
+                    if (stallCount >= 4) DebugLog.add(TAG, "alacMonitor: STALL pos=$pos stallCount=$stallCount ringFill=${UsbDacManager.getRingFill()} alacEos=${UsbDacManager.alacIsEos()}")
+                } else {
+                    stallCount = 0
+                    if (pos != 0L) prebufferEndTime = 0
+                }
+                lastPosMs = pos
+                if (UsbDacManager.alacIsEos()) {
+                    if (UsbDacManager.getRingFill() <= EOS_DRAIN_RESIDUE_FRAMES) {
+                        DebugLog.add(TAG, "alacMonitor: EOS drain complete"); break
+                    }
+                    drainWaitMs += 50
+                    if (drainWaitMs > 10_000) { DebugLog.add(TAG, "alacMonitor: drain timeout"); break }
+                }
+                val now = System.currentTimeMillis()
+                if (now - lastDebug > 10_000) { DebugLog.v(TAG, "alacMonitor: pos=${pos}ms ring=${UsbDacManager.getRingFill()} eos=${UsbDacManager.alacIsEos()}"); lastDebug = now }
+                Thread.sleep(50)
+            }
+        } catch (_: InterruptedException) {
+            DebugLog.v(TAG, "alacMonitor: interrupted (shouldStop=$shouldStop)")
+        } catch (e: Exception) {
+            if (!shouldStop) { DebugLog.add(TAG, "alacMonitor err: ${e.message}"); onError("Decode: ${e.message}") }
+        } finally {
+            if (!shouldStop) {
+                releaseResources(); isPlaying = false
+                UsbDacManager.pauseStream()
+                DebugLog.v(TAG, "alacMonitorLoop done, calling onCompletion")
+                onCompletion()
+            }
+        }
     }
 
     // 【V3.3.0】FLAC 直解监控循环：native 线程自行解码+推流，Kotlin 只同步进度/检测 EOS 排空
@@ -576,6 +678,7 @@ class UsbDacPlaybackController(
 
     // 【V3.2.7】WAV 直读主循环：读文件→float→pushPcm（背压限速），EOS 排空后 onCompletion
     private fun wavDecodeLoop() {
+        var normalEos = false
         try {
             while (!shouldStop) {
                 if (paused) synchronized(pauseLock) { while (paused && !shouldStop) (pauseLock as java.lang.Object).wait() }
@@ -589,10 +692,12 @@ class UsbDacPlaybackController(
                 UsbDacManager.pushPcm(f, fc)
                 positionMs = wavReadBytes * 1000L / (sourceSampleRate.toLong() * wavBlockAlign)
             }
+            normalEos = true  // 循环自然结束（EOF）＝正常播完
         } catch (e: Exception) {
+            // 【修复】异常只报错，不触发 onCompletion；否则 catch+finally 双回调→级联切歌
             if (!shouldStop) { DebugLog.add(TAG, "wavDecodeLoop err: ${e.message}"); onError("Decode: ${e.message}") }
         } finally {
-            if (!shouldStop) {
+            if (normalEos && !shouldStop) {
                 var drainWaitMs = 0
                 while (!shouldStop && UsbDacManager.getRingFill() > EOS_DRAIN_RESIDUE_FRAMES && drainWaitMs < 10_000) {
                     // 【修复】interrupt 时不能让 InterruptedException 从 finally 抛出杀死进程
@@ -604,6 +709,10 @@ class UsbDacPlaybackController(
                 UsbDacManager.pauseStream()  // [V3.3.3] EOS keep USB claim
                 DebugLog.v(TAG, "wavDecodeLoop done, calling onCompletion")
                 onCompletion()
+            } else if (!normalEos && !shouldStop) {
+                // 异常/被停止：只释放资源，不切歌、不自动下一曲
+                releaseResources(); isPlaying = false
+                DebugLog.v(TAG, "wavDecodeLoop aborted (normalEos=false), no onCompletion")
             }
         }
     }
@@ -698,6 +807,7 @@ class UsbDacPlaybackController(
         val info = MediaCodec.BufferInfo()
         var eos = false; val sampleCount = dacChannels
         var pushErrors = 0
+        var normalEos = false
 
         try {
             while (!shouldStop) {
@@ -764,10 +874,12 @@ class UsbDacPlaybackController(
                     DebugLog.add(TAG, "fmt changed: sr=${nf.getInteger(MediaFormat.KEY_SAMPLE_RATE)} ch=${nf.getInteger(MediaFormat.KEY_CHANNEL_COUNT)} enc=$outputPcmEncoding")
                 }
             }
+            normalEos = true  // 循环自然结束（EOS）＝正常播完
         } catch (e: Exception) {
+            // 【修复】异常只报错，不触发 onCompletion；否则 catch+finally 双回调→级联切歌
             if (!shouldStop) { DebugLog.add(TAG, "decodeLoop err: ${e.message}"); onError("Decode: ${e.message}") }
         } finally {
-            if (!shouldStop) {
+            if (normalEos && !shouldStop) {
                 // 【V3.2.7】EOS 排空：等 DAC 把 ring buffer 里剩余音频播完再切歌，
                 // 否则最后 ~3 秒被截断。最多等 10s 防死循环。
                 var drainWaitMs = 0
@@ -783,6 +895,12 @@ class UsbDacPlaybackController(
                 UsbDacManager.pauseStream()  // [V3.3.3] EOS keep USB claim
                 DebugLog.v(TAG, "decodeLoop done, calling onCompletion")
                 onCompletion()
+            } else if (!normalEos && !shouldStop) {
+                // 异常/被停止：只释放资源，不切歌、不自动下一曲
+                try { cd.stop(); cd.release() } catch (_: Exception) {}
+                try { ex.release() } catch (_: Exception) {}
+                codec = null; extractor = null; isPlaying = false
+                DebugLog.v(TAG, "decodeLoop aborted (normalEos=false), no onCompletion")
             }
         }
     }

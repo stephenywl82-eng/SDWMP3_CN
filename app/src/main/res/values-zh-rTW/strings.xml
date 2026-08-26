@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
 <string name="app_name">Moto Music Premium</string>
 <string name="no_music_found">找不到音樂檔案</string>
@@ -23,8 +23,21 @@
     <string name="settings_light_mode">Light Mode</string>
     <string name="settings_light_mode_on">On · light theme</string>
     <string name="settings_light_mode_off">Off · dark theme</string>
+    <string name="settings_wallpaper">自訂桌布</string>
+    <string name="settings_wallpaper_pick">選擇桌布</string>
+    <string name="settings_wallpaper_none">未設定</string>
+    <string name="settings_wallpaper_set">桌布已套用</string>
+    <string name="settings_wallpaper_color_aware">取色感知文字</string>
+    <string name="settings_wallpaper_color_aware_desc">按桌布亮度自動調整遮罩與文字深淺</string>
+    <string name="settings_wallpaper_blur">模糊</string>
+    <string name="settings_wallpaper_scrim">壓暗</string>
+    <string name="settings_wallpaper_clear">移除桌布</string>
+    <string name="settings_wallpaper_clear_desc">恢復預設背景</string>
     <string name="settings_lyrics_display">歌詞顯示</string>
     <string name="settings_lyric_font_size">字型大小</string>
+    <string name="size_small">小</string>
+    <string name="size_medium">中</string>
+    <string name="size_large">大</string>
     <string name="settings_lyric_visible_lines">顯示行數</string>
 <string name="action_back">返回</string>
 <string name="action_cancel">取消</string>
@@ -33,7 +46,8 @@
 <string name="action_close">關閉</string>
 <string name="action_refresh">重新整理</string>
 <string name="action_search">搜尋</string>
-<string name="action_settings">設定</string>
+<string name="action_more">更多</string>
+    <string name="action_settings">設定</string>
 <string name="action_share">分享</string>
 <string name="action_add">新增</string>
 <string name="action_remove">移除</string>

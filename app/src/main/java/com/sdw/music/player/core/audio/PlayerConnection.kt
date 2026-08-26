@@ -151,13 +151,18 @@ class PlayerConnection(private val context: Context) {
             controller?.let {
                 _isPlaying.value = it.isPlaying
                 _durationMs.value = it.duration.coerceAtLeast(0)
-                // [V3.3.6] DAC mode: skip index update (ExoPlayer has single item in DAC mode)
-                if (com.sdw.music.player.core.audio.UsbDacManager.isClaimed() != true) {
-                    _currentSongIndex.value = it.currentMediaItemIndex
+                // [fix] SimpleBasePlayer 会把 INDEX_UNSET 归一化成 0（见源码 getCurrentMediaItemIndexInternal），
+                // currentMediaItemIndex 恒 >= 0，不能用它判断「是否有真实播放歌曲」。
+                // 改用权威字段 MusicService.currentSong：未播放（null）时不写回，保持迷你条空态。
+                val restoredIdxRaw = it.currentMediaItemIndex
+                val hasRealSong = MusicService.currentSong != null
+                if (com.sdw.music.player.core.audio.UsbDacManager.isClaimed() != true && hasRealSong && restoredIdxRaw >= 0) {
+                    _currentSongIndex.value = restoredIdxRaw
                 }
                 // [V3.3.6] DAC mode: skip restoredIdx (index meaningless)
-                if (com.sdw.music.player.core.audio.UsbDacManager.isClaimed() != true) {
-                    val restoredIdx = it.currentMediaItemIndex
+                // [fix] 无真实播放歌曲时不把歌单第一首当当前歌曲，保持空态。
+                if (com.sdw.music.player.core.audio.UsbDacManager.isClaimed() != true && hasRealSong && restoredIdxRaw >= 0) {
+                    val restoredIdx = restoredIdxRaw
                     val songs = _songList.value
                     if (restoredIdx in songs.indices) {
                         _currentSong.value = songs[restoredIdx]
@@ -615,6 +620,12 @@ class PlayerConnection(private val context: Context) {
      */
     private fun restoreFromSavedState() {
         try {
+            // [fix] 迷你条「每次显示同一首歌」根因：此函数无条件把上次播放的歌写回 _currentSong，
+            // 与 PlayerViewModel.syncRestoreOrAutoPlay 的「autoPlay 关闭时保持空态」逻辑矛盾。
+            // 修复：不自动播放时不恢复迷你条（保持空态），与 ViewModel 一致。
+            val autoPlayEnabled = context.getSharedPreferences("sdw_music_prefs", Context.MODE_PRIVATE)
+                .getBoolean("auto_play_on_launch", false)
+            if (!autoPlayEnabled) return
             val prefs = context.getSharedPreferences("playback_state", Context.MODE_PRIVATE)
             val savedSongId = prefs.getLong("last_song_id", -1L)
             if (savedSongId <= 0) return

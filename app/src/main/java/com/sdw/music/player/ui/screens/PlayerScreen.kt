@@ -1,13 +1,19 @@
+﻿@file:OptIn(ExperimentalMaterial3Api::class)
+
 package com.sdw.music.player.ui.screens
+
+import androidx.compose.material3.ExperimentalMaterial3Api
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.LinearEasing
@@ -91,6 +97,7 @@ import com.sdw.music.player.LyricLine
 import com.sdw.music.player.LrcParser
 import com.sdw.music.player.BpmKeyCache
 import com.sdw.music.player.MusicService
+import com.sdw.music.player.MemoryManager
 import android.os.PowerManager
 import com.sdw.music.player.ui.theme.*
 
@@ -135,6 +142,8 @@ fun PlayerScreen(
     onDeleteSong: () -> Unit,
     onNavigateToAlbum: (albumName: String) -> Unit = {},
     onNavigateToArtist: (artistName: String) -> Unit = {},
+    onNavigateToAudioDiagnostic: () -> Unit = {},
+    onNavigateToMseb: () -> Unit = {},
     onPlayQueueIndex: (Int) -> Unit = {},
     onDismiss: (() -> Unit)? = null,
     audioSessionId: Int = 0,
@@ -149,10 +158,53 @@ fun PlayerScreen(
     var coverUri by remember { mutableStateOf(resolveCoverUri()) }
     // Re-resolve when song changes
     LaunchedEffect(state.currentSongId) { coverUri = resolveCoverUri() }
+
+    // 【V8.4】Crossfade UI 状态轮询：驱动氛围色交接 + 封面交叉淡化动画
+    var crossfadeInfo by remember { mutableStateOf(com.sdw.music.player.MusicService.CrossfadeUiInfo()) }
+    LaunchedEffect(Unit) {
+        while (isActive) {
+            crossfadeInfo = com.sdw.music.player.MusicService.instance?.crossfadeUiInfo
+                ?: com.sdw.music.player.MusicService.CrossfadeUiInfo()
+            delay(200)
+        }
+    }
+    // 【V8.4】crossfade 触发时预读 B 轨封面主色（供 accent 动画目标色用）
+    var crossfadeNextAccent by remember { mutableStateOf(0L) }
+    var crossfadeNextArt by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(crossfadeInfo.nextAlbumArt, crossfadeInfo.state) {
+        val nextArt = crossfadeInfo.nextAlbumArt
+        if (nextArt?.isNotBlank() == true) {
+            crossfadeNextArt = nextArt
+            val c = MemoryManager.extractAccentColor(
+                context, nextArt, state.currentSongId + 1000000L
+            )
+            if (c != null) crossfadeNextAccent = c.toLong() and 0xFFFFFFFFL
+        } else {
+            crossfadeNextArt = null
+            crossfadeNextAccent = 0L
+        }
+    }
+
     val hasCoverColor = state.accentColor != 0L && coverUri?.isNotEmpty() == true
+    // 【V8.4】状态机：ACTIVE=交叉淡化中（动画）；DONE=音频已交接但封面 URI 未切（保留叠加层防跳变）
+    val xfadeUiState = crossfadeInfo.state
+    val xfadeActive = xfadeUiState == com.sdw.music.player.MusicService.XfadeUiState.ACTIVE
+    // 叠加层显示条件：只在 ACTIVE/DONE 阶段显示（PRELOADING 时 crossfade 还没开始，B 不能提前盖住 A）
+    val xfadeOverlayVisible = (xfadeUiState == com.sdw.music.player.MusicService.XfadeUiState.ACTIVE
+            || xfadeUiState == com.sdw.music.player.MusicService.XfadeUiState.DONE)
+            && crossfadeNextArt?.isNotBlank() == true
+    // DONE 阶段封面 URI 已切（currentSongId 变化）时，叠加层撤除时机：coverUri 已等于 B 封面
+    val xfadeOverlayStale = xfadeOverlayVisible && !xfadeActive && coverUri == crossfadeNextArt
+    // accent 目标色：ACTIVE/DONE 阶段用 B 主色（DONE 等封面 URI 切完后由 state.accentColor 接管新歌主色）
+    val xfadeTargetAccent = if (xfadeUiState != com.sdw.music.player.MusicService.XfadeUiState.IDLE && crossfadeNextAccent != 0L)
+        Color(crossfadeNextAccent) else null
     val accentColor by animateColorAsState(
-        targetValue = if (hasCoverColor) Color(state.accentColor) else MaterialTheme.colorScheme.primary,
-        animationSpec = tween(600, easing = FastOutSlowInEasing),
+        targetValue = xfadeTargetAccent
+            ?: if (hasCoverColor) Color(state.accentColor) else MaterialTheme.colorScheme.primary,
+        animationSpec = tween(
+            if (xfadeActive) crossfadeInfo.durationMs.coerceIn(1000, 15000) else 600,
+            easing = FastOutSlowInEasing
+        ),
         label = "accentColor"
     )
     val textAccentColor = remember(accentColor) {
@@ -234,6 +286,7 @@ fun PlayerScreen(
     // EQ status poll
     var eqEnabled by remember { mutableStateOf(false) }
     var eqPresetName by remember { mutableStateOf<String?>(null) }
+    var msebActive by remember { mutableStateOf(false) }
     var vuSessionId by remember { mutableIntStateOf(audioSessionId) }
 
     val vuPrefs = remember { context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE) }
@@ -244,11 +297,16 @@ fun PlayerScreen(
             try {
                 // Native DSP EQ state (AAudio Direct, no ExoPlayer)
                 val svc = com.sdw.music.player.MusicService.instance
-                // 【V7.200】MSEB active → show "MSEB" instead of EqualizerManager preset name
-                val msebActive = com.sdw.music.player.MsebCalculator.isEnabled(context)
+                // 【V7.200】MSEB active → show real-time tone summary instead of fixed "MSEB"
+                msebActive = com.sdw.music.player.MsebCalculator.isEnabled(context)
                 eqEnabled = svc?.isDspEqEnabled() == true || EqualizerManager.isEnabled() || msebActive
                 eqPresetName = when {
-                    msebActive -> "MSEB"
+                    msebActive -> {
+                        val desc = com.sdw.music.player.MsebCalculator.describe(
+                            com.sdw.music.player.MsebCalculator.load(context))
+                        if (desc.startsWith("Flat") || desc == "Light touch") "MSEB"
+                        else "MSEB · " + desc.split(" · ").take(3).joinToString(" · ")
+                    }
                     eqEnabled -> EqualizerManager.getCurrentPresetName()
                     else -> null
                 }
@@ -406,6 +464,7 @@ fun PlayerScreen(
             val coverUri = state.currentSongAlbumArt
             if (coverUri?.isNotBlank() == true) {
                 // 封面模糊背景：小半径模糊保留图案轮廓，高透明度让颜色充分透出
+                // 【V8.5】整体过渡：uri 变化时 Crossfade 600ms 淡入淡出，避免背景瞬切
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -413,13 +472,37 @@ fun PlayerScreen(
                         .blur(28.dp),
                     contentAlignment = Alignment.Center
                 ) {
-                    Image(
-                        painter = rememberAsyncImagePainter(coverUri),
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop,
-                        alpha = 0.65f
-                    )
+                    Crossfade(
+                        targetState = coverUri,
+                        animationSpec = tween(600, easing = FastOutSlowInEasing),
+                        label = "coverBgFade"
+                    ) { uri ->
+                        Image(
+                            painter = rememberAsyncImagePainter(uri),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
+                            alpha = 0.65f
+                        )
+                    }
+                    // 【V8.4】Crossfade 封面背景交叉淡化：B 轨模糊背景从 A 下方浮现（alpha 0→0.65）
+                    // 【V8.5】alpha 从 0 启动渐显（Animatable），避免一出现就全显
+                    if (xfadeOverlayVisible && !xfadeOverlayStale) {
+                        val xfadeBgAlpha = remember(crossfadeNextArt) { Animatable(0f) }
+                        LaunchedEffect(crossfadeNextArt) {
+                            xfadeBgAlpha.animateTo(
+                                0.65f,
+                                animationSpec = tween(crossfadeInfo.durationMs.coerceIn(1000, 15000), easing = LinearEasing)
+                            )
+                        }
+                        Image(
+                            painter = rememberAsyncImagePainter(crossfadeNextArt),
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop,
+                            alpha = xfadeBgAlpha.value
+                        )
+                    }
                 }
             }
             // 氛围渐变：上下柔和压暗（中间透出封面，无亮带无光环）
@@ -477,6 +560,9 @@ fun PlayerScreen(
                 eqEnabled = eqEnabled,
                 lyricsLines = lyricsLines,
                 showMenu = showMenu,
+                fadeOverlayUri = if (xfadeOverlayVisible && !xfadeOverlayStale) crossfadeNextArt else null,
+                fadeOverlayDurationMs = crossfadeInfo.durationMs.coerceIn(1000, 15000),
+                instantCoverSwitch = xfadeUiState != com.sdw.music.player.MusicService.XfadeUiState.IDLE,
                 onToggleMenu = { showMenu = true },
                 onDismissMenu = { showMenu = false },
                 onNavigateBack = onNavigateBack,
@@ -495,7 +581,9 @@ fun PlayerScreen(
                 onShare = onShare,
                 onNavigateToLyrics = onNavigateToLyrics,
                 onSleepTimer = { showSleepDialog = true },
-                onNavigateToQueue = { showQueue = true }
+                onNavigateToQueue = { showQueue = true },
+                onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
+                onNavigateToMseb = onNavigateToMseb
             )
         } else if (isLandscape) {
             LandscapeLayout(
@@ -516,6 +604,9 @@ fun PlayerScreen(
                 vuStyleIdx = vuStyleIdx,
                 currentLyricLine = currentLyricLine,
                 showMenu = showMenu,
+                fadeOverlayUri = if (xfadeOverlayVisible && !xfadeOverlayStale) crossfadeNextArt else null,
+                fadeOverlayDurationMs = crossfadeInfo.durationMs.coerceIn(1000, 15000),
+                instantCoverSwitch = xfadeUiState != com.sdw.music.player.MusicService.XfadeUiState.IDLE,
                 onToggleMenu = { showMenu = true },
                 onDismissMenu = { showMenu = false },
                 onNavigateBack = onNavigateBack,
@@ -534,7 +625,9 @@ fun PlayerScreen(
                 onShare = onShare,
                 onNavigateToLyrics = onNavigateToLyrics,
                 onSleepTimer = { showSleepDialog = true },
-                onNavigateToQueue = { showQueue = true }
+                onNavigateToQueue = { showQueue = true },
+                onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
+                onNavigateToMseb = onNavigateToMseb
             )
         } else {
             PortraitLayout(
@@ -557,6 +650,9 @@ fun PlayerScreen(
                 currentLyricLine = currentLyricLine,
                 showMenu = showMenu,
                 portraitModifier = portraitModifier,
+                fadeOverlayUri = if (xfadeOverlayVisible && !xfadeOverlayStale) crossfadeNextArt else null,
+                fadeOverlayDurationMs = crossfadeInfo.durationMs.coerceIn(1000, 15000),
+                instantCoverSwitch = xfadeUiState != com.sdw.music.player.MusicService.XfadeUiState.IDLE,
                 onToggleMenu = { showMenu = true },
                 onDismissMenu = { showMenu = false },
                 onNavigateBack = onNavigateBack,
@@ -575,7 +671,9 @@ fun PlayerScreen(
                 onShare = onShare,
                 onNavigateToLyrics = onNavigateToLyrics,
                 onSleepTimer = { showSleepDialog = true },
-                onNavigateToQueue = { showQueue = true }
+                onNavigateToQueue = { showQueue = true },
+                onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
+                onNavigateToMseb = onNavigateToMseb
             )
         }
 
@@ -611,41 +709,48 @@ fun PlayerScreen(
             )
         }
 
-        // Sleep Timer Dialog
+        // Sleep Timer — 【V8.5】统一为 ModalBottomSheet，与队列面板风格一致
         if (showSleepDialog) {
-            AlertDialog(
+            val sleepSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+            ModalBottomSheet(
                 onDismissRequest = { showSleepDialog = false },
-                title = { Text(stringResource(R.string.title_sleep_timer)) },
-                text = {
-                    Column {
-                        listOf(15, 30, 60).forEach { min ->
-                            TextButton(
-                                onClick = {
-                                    MusicService.instance?.setSleepTimer(min)
-                                    showSleepDialog = false
-                                },
-                                modifier = Modifier.fillMaxWidth()
-                            ) {
-                                Text("${min} minutes", modifier = Modifier.fillMaxWidth())
-                            }
-                        }
-                        if (MusicService.instance?.isSleepTimerActive() == true) {
-                            TextButton(
-                                onClick = {
-                                    MusicService.instance?.cancelSleepTimer()
-                                    showSleepDialog = false
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                            ) {
-                                Text(stringResource(R.string.player_cancel_timer), modifier = Modifier.fillMaxWidth())
-                            }
+                sheetState = sleepSheetState,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.onBackground,
+                scrimColor = Color.Black.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp)
+            ) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 32.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(stringResource(R.string.title_sleep_timer), style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(vertical = 12.dp))
+                    listOf(15, 30, 60).forEach { min ->
+                        TextButton(
+                            onClick = {
+                                MusicService.instance?.setSleepTimer(min)
+                                showSleepDialog = false
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("${min} minutes", modifier = Modifier.fillMaxWidth())
                         }
                     }
-                },
-                confirmButton = {},
-                dismissButton = { TextButton(onClick = { showSleepDialog = false }) { Text(stringResource(R.string.action_close)) } }
-            )
+                    if (MusicService.instance?.isSleepTimerActive() == true) {
+                        TextButton(
+                            onClick = {
+                                MusicService.instance?.cancelSleepTimer()
+                                showSleepDialog = false
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                        ) {
+                            Text(stringResource(R.string.player_cancel_timer), modifier = Modifier.fillMaxWidth())
+                        }
+                    }
+                    TextButton(onClick = { showSleepDialog = false }) { Text(stringResource(R.string.action_close)) }
+                }
+            }
         }
 
     }
@@ -671,6 +776,11 @@ private fun FoldableLayout(coverUri: String?,
     eqEnabled: Boolean,
     lyricsLines: List<LyricLine>,
     showMenu: Boolean,
+    // 【V8.4】Crossfade 封面交叉淡化透传
+    fadeOverlayUri: String? = null,
+    fadeOverlayDurationMs: Int = 5000,
+    // 【V8.5】crossfade 交接期间换碟瞬时完成
+    instantCoverSwitch: Boolean = false,
     onToggleMenu: () -> Unit,
     onDismissMenu: () -> Unit,
     onNavigateBack: () -> Unit,
@@ -689,7 +799,9 @@ private fun FoldableLayout(coverUri: String?,
     onShare: () -> Unit,
     onNavigateToLyrics: () -> Unit,
     onSleepTimer: () -> Unit = {},
-    onNavigateToQueue: () -> Unit = {}
+    onNavigateToQueue: () -> Unit = {},
+    onNavigateToAudioDiagnostic: () -> Unit = {},
+    onNavigateToMseb: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)
@@ -743,7 +855,10 @@ private fun FoldableLayout(coverUri: String?,
                         onClick = { onNavigateToAlbum(state.currentSongAlbum) },
                         onDoubleTap = { if (isPlaying) onPause() else onPlay() },
                         onSwipePrevious = onPrevious,
-                        onSwipeNext = onNext
+                        onSwipeNext = onNext,
+                        fadeOverlayUri = fadeOverlayUri,
+                        instantCoverSwitch = instantCoverSwitch,
+                        fadeOverlayDurationMs = fadeOverlayDurationMs,
                     )
                 }
 
@@ -774,9 +889,10 @@ private fun FoldableLayout(coverUri: String?,
             }
 
             // Bottom: controls
-            PlayerEqLabel(eqPresetName, accentColor, textAccentColor)
+            PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
             Spacer(Modifier.height(4.dp))
             DacInfoBar(accentColor, textAccentColor, isPlaying,
+                onClick = onNavigateToAudioDiagnostic,
                 modifier = Modifier.align(Alignment.CenterHorizontally))
             Spacer(Modifier.height(4.dp))
 
@@ -879,6 +995,11 @@ private fun LandscapeLayout(coverUri: String?,
     vuStyleIdx: Int,
     currentLyricLine: String?,
     showMenu: Boolean,
+    // 【V8.4】Crossfade 封面交叉淡化透传
+    fadeOverlayUri: String? = null,
+    fadeOverlayDurationMs: Int = 5000,
+    // 【V8.5】crossfade 交接期间换碟瞬时完成
+    instantCoverSwitch: Boolean = false,
     onToggleMenu: () -> Unit,
     onDismissMenu: () -> Unit,
     onNavigateBack: () -> Unit,
@@ -897,7 +1018,9 @@ private fun LandscapeLayout(coverUri: String?,
     onShare: () -> Unit,
     onNavigateToLyrics: () -> Unit,
     onSleepTimer: () -> Unit = {},
-    onNavigateToQueue: () -> Unit = {}
+    onNavigateToQueue: () -> Unit = {},
+    onNavigateToAudioDiagnostic: () -> Unit = {},
+    onNavigateToMseb: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)
@@ -925,19 +1048,29 @@ private fun LandscapeLayout(coverUri: String?,
             ) {
                 // Center: song info
                 Spacer(Modifier.height(12.dp))
-                Text(
-                    state.currentSongTitle.ifEmpty { stringResource(R.string.player_not_playing) },
-                    style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onBackground,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
-                )
-                PlayerSongInfo(
-                    artist = state.currentSongArtist,
-                    format = state.currentSongFormat,
-                    textAccentColor = textAccentColor,
-                    onArtistClick = { name -> onNavigateToArtist(name) }
-                )
+                // 【V8.5】切歌时标题/歌手淡入淡出过渡
+                AnimatedContent(
+                    targetState = state.currentSongId,
+                    transitionSpec = {
+                        (fadeIn(tween(220, easing = FastOutSlowInEasing))).togetherWith(fadeOut(tween(180, easing = FastOutSlowInEasing)))
+                    }
+                ) { _ ->
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            state.currentSongTitle.ifEmpty { stringResource(R.string.player_not_playing) },
+                            style = MaterialTheme.typography.titleMedium,
+                            color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                        )
+                        PlayerSongInfo(
+                            artist = state.currentSongArtist,
+                            format = state.currentSongFormat,
+                            textAccentColor = textAccentColor,
+                            onArtistClick = { name -> onNavigateToArtist(name) }
+                        )
+                    }
+                }
                 Spacer(Modifier.height(6.dp))
                 PlayerInlineLyric(currentLyricLine, textAccentColor)
 
@@ -948,8 +1081,9 @@ private fun LandscapeLayout(coverUri: String?,
                 VuMeter(sub = bandLevels.sub, bass = bandLevels.bass, mid = bandLevels.mid, high = bandLevels.high, rms = bandLevels.rms, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, modifier = Modifier.padding(horizontal = 8.dp).heightIn(max = 50.dp))
                 Spacer(Modifier.height(6.dp))
             }
-            PlayerEqLabel(eqPresetName, accentColor, textAccentColor)
+            PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
             DacInfoBar(accentColor, textAccentColor, isPlaying,
+                onClick = onNavigateToAudioDiagnostic,
                 modifier = Modifier.align(Alignment.CenterHorizontally))
             Spacer(Modifier.height(2.dp))
             PlayerProgress(
@@ -1002,7 +1136,10 @@ private fun LandscapeLayout(coverUri: String?,
                 onClick = { onNavigateToAlbum(state.currentSongAlbum) },
                 onDoubleTap = { if (isPlaying) onPause() else onPlay() },
                 onSwipePrevious = onPrevious,
-                onSwipeNext = onNext
+                onSwipeNext = onNext,
+                fadeOverlayUri = fadeOverlayUri,
+                instantCoverSwitch = instantCoverSwitch,
+                fadeOverlayDurationMs = fadeOverlayDurationMs,
             )
         }
     }
@@ -1028,6 +1165,11 @@ private fun PortraitLayout(coverUri: String?,
     currentLyricLine: String?,
     showMenu: Boolean,
     portraitModifier: Modifier,
+    // 【V8.4】Crossfade 封面交叉淡化透传
+    fadeOverlayUri: String? = null,
+    fadeOverlayDurationMs: Int = 5000,
+    // 【V8.5】crossfade 交接期间换碟瞬时完成
+    instantCoverSwitch: Boolean = false,
     onToggleMenu: () -> Unit,
     onDismissMenu: () -> Unit,
     onNavigateBack: () -> Unit,
@@ -1046,7 +1188,9 @@ private fun PortraitLayout(coverUri: String?,
     onShare: () -> Unit,
     onNavigateToLyrics: () -> Unit,
     onSleepTimer: () -> Unit = {},
-    onNavigateToQueue: () -> Unit = {}
+    onNavigateToQueue: () -> Unit = {},
+    onNavigateToAudioDiagnostic: () -> Unit = {},
+    onNavigateToMseb: () -> Unit = {}
 ) {
     val hPadding = if (isCompact) 24.dp else 48.dp
     val infoPadding = if (isCompact) 20.dp else 32.dp
@@ -1096,18 +1240,28 @@ private fun PortraitLayout(coverUri: String?,
             modifier = Modifier.fillMaxWidth().padding(horizontal = infoPadding),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text(
-                state.currentSongTitle.ifEmpty { stringResource(R.string.player_not_playing) },
-                style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Normal),
-                color = MaterialTheme.colorScheme.onBackground, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
-            )
-            PlayerSongInfo(
-                artist = state.currentSongArtist,
-                format = state.currentSongFormat,
-                textAccentColor = textAccentColor,
-                onArtistClick = { name -> onNavigateToArtist(name) }
-            )
+            // 【V8.5】切歌时标题/歌手淡入淡出过渡
+            AnimatedContent(
+                targetState = state.currentSongId,
+                transitionSpec = {
+                    (fadeIn(tween(220, easing = FastOutSlowInEasing))).togetherWith(fadeOut(tween(180, easing = FastOutSlowInEasing)))
+                }
+            ) { _ ->
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        state.currentSongTitle.ifEmpty { stringResource(R.string.player_not_playing) },
+                        style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Normal),
+                        color = MaterialTheme.colorScheme.onBackground, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
+                    )
+                    PlayerSongInfo(
+                        artist = state.currentSongArtist,
+                        format = state.currentSongFormat,
+                        textAccentColor = textAccentColor,
+                        onArtistClick = { name -> onNavigateToArtist(name) }
+                    )
+                }
+            }
             Spacer(Modifier.height(14.dp))
             PlayerInlineLyric(currentLyricLine, textAccentColor)
         }
@@ -1128,6 +1282,9 @@ private fun PortraitLayout(coverUri: String?,
             onDoubleTap = { if (isPlaying) onPause() else onPlay() },
             onSwipePrevious = onPrevious,
             onSwipeNext = onNext,
+            fadeOverlayUri = fadeOverlayUri,
+            instantCoverSwitch = instantCoverSwitch,
+            fadeOverlayDurationMs = fadeOverlayDurationMs,
             modifier = Modifier.fillMaxWidth().height(artSize + 36.dp)
         )
 
@@ -1140,11 +1297,12 @@ private fun PortraitLayout(coverUri: String?,
         }
 
         // EQ label
-        PlayerEqLabel(eqPresetName, accentColor, textAccentColor)
+        PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
         Spacer(Modifier.height(8.dp))
 
         // V3.3.4: DAC info capsule (visible only in USB DAC exclusive mode)
         DacInfoBar(accentColor, textAccentColor, isPlaying,
+            onClick = onNavigateToAudioDiagnostic,
             modifier = Modifier.align(Alignment.CenterHorizontally))
         Spacer(Modifier.height(8.dp))
         // Progress

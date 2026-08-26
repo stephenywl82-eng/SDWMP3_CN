@@ -21,6 +21,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.shape.CircleShape
@@ -137,6 +138,11 @@ fun PlayerCoverArt(
     onDoubleTap: () -> Unit = {},
     onSwipePrevious: () -> Unit = {},
     onSwipeNext: () -> Unit = {},
+    // 【V8.4】Crossfade 封面交叉淡化：fadeOverlayUri 非空时叠加浮现（B 轨封面）
+    fadeOverlayUri: String? = null,
+    fadeOverlayDurationMs: Int = 5000,
+    // 【V8.5】crossfade 交接期间换碟瞬时完成（不做 350ms 换碟动画，B 已通过叠加层全显，避免“变两次”跳变）
+    instantCoverSwitch: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     Box(
@@ -181,15 +187,25 @@ fun PlayerCoverArt(
                 DefaultCoverImage(songTitle, songArtist, Modifier.size(sizeDp))
             } else {
                 // CD 换碟：旧碟缩小淡出、新碟放大淡入（绕中心缩放，旋转无关，方向稳定）
+                // crossfade 交接期间（instantCoverSwitch=true）瞬时完成，不做换碟动画
                 AnimatedContent(
                     targetState = artUri,
                     transitionSpec = {
-                        (fadeIn(tween(350, easing = FastOutSlowInEasing)) +
-                                scaleIn(tween(350, easing = FastOutSlowInEasing), initialScale = 0.70f))
-                            .togetherWith(
-                                fadeOut(tween(280, easing = FastOutSlowInEasing)) +
-                                        scaleOut(tween(280, easing = FastOutSlowInEasing), targetScale = 1.15f)
-                            )
+                        if (instantCoverSwitch) {
+                            (fadeIn(tween(0)) + scaleIn(tween(0), initialScale = 1f))
+                                .togetherWith(
+                                    fadeOut(tween(0)) + scaleOut(tween(0), targetScale = 1f)
+                                )
+                        } else {
+                            // 【V8.5】换碟改为交叉淡化：旧碟淡出同时新碟淡入（无空窗、无缩放跳变），
+                            // 观感更接近“两张封面平滑过渡”，而非旧碟缩走再放新碟
+                            (fadeIn(tween(420, easing = FastOutSlowInEasing)) +
+                                    scaleIn(tween(420, easing = FastOutSlowInEasing), initialScale = 0.92f))
+                                .togetherWith(
+                                    fadeOut(tween(320, easing = FastOutSlowInEasing)) +
+                                            scaleOut(tween(320, easing = FastOutSlowInEasing), targetScale = 1.02f)
+                                )
+                        }
                     },
                     label = "coverSwitch"
                 ) { uri ->
@@ -220,11 +236,35 @@ fun PlayerCoverArt(
                     }
                 }
             }
+            // 【V8.4】Crossfade 封面交叉淡化：B 轨封面从 A 封面下方浮现（同尺寸圆角裁剪）
+            // 【V8.5】alpha 从 0 启动渐显（Animatable），避免叠加层一出现就全显造成“提前变一次”
+            if (!fadeOverlayUri.isNullOrEmpty()) {
+                val overlayAlpha = remember(fadeOverlayUri) { Animatable(0f) }
+                LaunchedEffect(fadeOverlayUri) {
+                    overlayAlpha.animateTo(
+                        1f,
+                        animationSpec = tween(fadeOverlayDurationMs.coerceIn(1000, 15000), easing = LinearEasing)
+                    )
+                }
+                Box(modifier = Modifier.size(sizeDp), contentAlignment = Alignment.Center) {
+                    val overlayPainter = rememberAsyncImagePainter(
+                        model = fadeOverlayUri,
+                        contentScale = ContentScale.Crop
+                    )
+                    Image(
+                        painter = overlayPainter,
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(sizeDp)
+                            .clip(CircleShape),
+                        alpha = overlayAlpha.value
+                    )
+                }
+            }
         }
     }
 }
-
-/** Song info row: artist (clickable) + format badge. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun PlayerSongInfo(
@@ -235,9 +275,11 @@ fun PlayerSongInfo(
 ) {
     val artists = remember(artist) { splitArtists(artist) }
     val artistShadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 1f), blurRadius = 6f)
+    // 【V8.4】修复：整体居中——artist 不撑满（fill=false），格式徽章紧跟，整行 Arrangement.Center
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.padding(top = 4.dp)
+        horizontalArrangement = Arrangement.Center,
+        modifier = Modifier.padding(top = 4.dp).fillMaxWidth()
     ) {
         if (artists.size <= 1) {
             Text(
@@ -246,20 +288,19 @@ fun PlayerSongInfo(
                 color = textAccentColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f, fill = false).clickable { onArtistClick(artists.firstOrNull().orEmpty()) }
+                modifier = Modifier.clickable { onArtistClick(artists.firstOrNull().orEmpty()) }
             )
         } else {
             FlowRow(
-                modifier = Modifier.weight(1f, fill = false),
                 horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(0.dp)
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 for (i in artists.indices) {
                     Text(
                         artists[i],
                         style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
                         color = textAccentColor,
-                        maxLines = 1,
+                        maxLines = 2,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.clickable { onArtistClick(artists[i]) }
                     )
@@ -363,8 +404,8 @@ fun PlayerProgress(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            Text(formatDurationPlayer(positionMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outlineVariant)
-            Text(formatDurationPlayer(durationMs), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outlineVariant)
+            Text(formatDurationPlayer(positionMs), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.9f))
+            Text(formatDurationPlayer(durationMs), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.9f))
         }
     }
 }
@@ -501,22 +542,40 @@ fun PlayerBottomActions(
 fun PlayerEqLabel(
     eqPresetName: String?,
     accentColor: Color,
-    textAccentColor: Color
+    textAccentColor: Color,
+    onClick: (() -> Unit)? = null
 ) {
     if (eqPresetName != null) {
+        val shape = RoundedCornerShape(50)
         Box(
             modifier = Modifier.fillMaxWidth(),
             contentAlignment = Alignment.Center
         ) {
-            Surface(
-                color = accentColor.copy(alpha = 0.12f),
-                shape = RoundedCornerShape(16.dp)
+            // 纯描边胶囊：透明背景 + 细描边 + 指示灯圆点（HiFi 器材质感，不溢出）
+            Row(
+                modifier = Modifier
+                    .widthIn(max = 300.dp)
+                    .clip(shape)
+                    .border(BorderStroke(1.dp, accentColor.copy(alpha = 0.6f)), shape)
+                    .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+                    .padding(horizontal = 14.dp, vertical = 5.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
             ) {
+                // 指示灯圆点
+                Box(
+                    modifier = Modifier
+                        .size(6.dp)
+                        .clip(CircleShape)
+                        .background(accentColor)
+                )
+                Spacer(modifier = Modifier.width(7.dp))
                 Text(
                     text = eqPresetName,
-                    style = MaterialTheme.typography.labelLarge,
+                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
                     color = textAccentColor,
-                    modifier = Modifier.padding(horizontal = 18.dp, vertical = 5.dp)
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
                 )
             }
         }
@@ -575,6 +634,7 @@ fun DacInfoBar(
     accentColor: Color,
     textAccentColor: Color,
     isPlaying: Boolean,
+    onClick: (() -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     var dacName by remember { mutableStateOf("") }
@@ -618,6 +678,7 @@ fun DacInfoBar(
             .clip(RoundedCornerShape(50))
             .background(accentColor.copy(alpha = 0.08f))
             .border(1.dp, accentColor.copy(alpha = 0.25f), RoundedCornerShape(50))
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(horizontal = 14.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -722,7 +783,18 @@ fun QueueSheet(
                 Text("${queue.size} songs", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Spacer(Modifier.height(8.dp))
+            // 【V8.5】打开队列自动定位到当前播放歌曲，不用手动滑动查找
+            val listState = rememberLazyListState()
+            val currentIndex = remember(queue, currentSongId) {
+                queue.indexOfFirst { it.id == currentSongId }
+            }
+            LaunchedEffect(currentIndex, currentSongId) {
+                if (currentIndex >= 0) {
+                    listState.scrollToItem(currentIndex)
+                }
+            }
             LazyColumn(
+                state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
                     .fillMaxHeight()

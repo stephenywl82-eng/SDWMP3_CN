@@ -48,10 +48,15 @@ private fun jittered(v: Float, barIndex: Int, totalBars: Int, frameSeed: Long): 
         pos < 0.25f -> 0.6f + 0.4f * sin(pos * Math.PI.toFloat() * 4f)
         pos < 0.45f -> 1.0f - 0.15f * sin(pos * Math.PI.toFloat() * 2.5f)
         pos < 0.65f -> 0.85f + 0.15f * sin(pos * Math.PI.toFloat() * 3f)
-        else        -> 0.7f + 0.3f * sin(pos * Math.PI.toFloat() * 5f + frameSeed * 0.1f)
+        // 高频段：时间调制系数 0.1 → 0.003。原实现 frameSeed 每帧 +16，*0.1 后相位每帧跳 ~92°
+        // 导致右边几条每帧高度随机跳变，视觉呈剧烈闪烁/叠影；0.003 时每帧仅 ~0.05 弧度缓慢游走
+        else        -> 0.7f + 0.3f * sin(pos * Math.PI.toFloat() * 5f + frameSeed * 0.003f)
     }
     // Deterministic jitter using trig hash: avoids Random alloc per-bar per-frame
-    val h = sin((barIndex * 7919 + frameSeed % 1009).toFloat() * 0.73f) * 0.5f + 0.5f
+    // 注意：frameSeed 每帧 +16，若直接参与 hash 会让 h 每帧接近随机跳（视觉叠影）。
+    // 改为包一层慢速 sin：h 随帧在 0.35~1.0 间以 ~2Hz 速率缓变，保留频谱感但消除闪烁
+    val slow = (sin(frameSeed * 0.001f) + 1f) * 0.5f   // 0~1，~1Hz 缓变
+    val h = (sin((barIndex * 7919).toFloat() * 0.73f) * 0.5f + 0.5f) * 0.4f + slow * 0.6f
     val jitter = 0.85f + h * 0.30f
     return (v * shape * jitter).coerceIn(0f, 1f)
 }
@@ -193,7 +198,7 @@ private fun VuMixer(sub: Float, bass: Float, mid: Float, high: Float,
             val v = smooth[i].update(target)
             // Peak: instant rise, slow fall
             if (v > peaks[i]) peaks[i] = v
-            else peaks[i] += (v - peaks[i]) * 0.015f
+            else peaks[i] += (v - peaks[i]) * 0.04f   // 0.015→0.04：峰值块衰减加快，减少"主条+残留峰块"的叠影感
             val pk = peaks[i].coerceIn(0f, 1f)
             val x = gap + i * (stripW + gap)
             val half = stripW / 2f - 1.dp.toPx()

@@ -373,7 +373,7 @@ fun AudioQualityScreen(
                 }
                 HorizontalDivider(
                     Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    color = DividerColor
+                    color = MaterialTheme.colorScheme.outlineVariant
                 )
             }
 

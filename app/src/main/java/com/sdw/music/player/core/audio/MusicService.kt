@@ -176,6 +176,157 @@ class MusicService : MediaSessionService() {
     private val oboeSwitchLock = Any()  // 串行化切歌线程，防 native 全局状态并发损坏
     private var useOboeDirect: Boolean = false
 
+    // 【Crossfade】顺序自动交叉淡化（只 Oboe 路径，方案 B：先 mix 再 DSP）
+    private var crossfadeEnabled = false
+    private var crossfadeDurationMs = 5000
+    @Volatile private var crossfadeBusy = false  // 一次 crossfade 进行中（防重复触发）
+    private var crossfadeNextIndex = -1  // 已预加载的下一首索引（crossfade 完成后切元数据）
+    // 【能量切点】crossfade 触发窗口内的能量低谷检测（避开鼓点/高潮硬叠打架）
+    private var xfadeDipCount = 0        // 连续低谷采样计数（200ms/采样）
+    private var xfadePeakRms = 0f        // 窗口内能量峰值（带衰减）
+
+    // 【V8.4】Crossfade UI 状态推送：供播放界面做氛围色交接 + 封面交叉淡化动画
+    // 状态机：IDLE（无）→ PRELOADING（预加载 B，UI 预读封面/主色）→ ACTIVE（交叉淡化中）
+    //        → DONE（音频已交接，UI 保留叠加层直到封面 URI 切换，防“变两次”跳变）→ 下次播放清回 IDLE
+    enum class XfadeUiState { IDLE, PRELOADING, ACTIVE, DONE }
+    data class CrossfadeUiInfo(
+        val state: XfadeUiState = XfadeUiState.IDLE,  // 当前阶段
+        val durationMs: Int = 5000,         // crossfade 总时长
+        val nextTitle: String = "",         // 下一首歌名（B 轨）
+        val nextArtist: String = "",
+        val nextAlbumArt: String? = null,   // B 轨封面 URI
+        val nextAccentColor: Long = 0L      // B 轨主色（0 = 未提取）
+    )
+    @Volatile var crossfadeUiInfo = CrossfadeUiInfo()
+        private set
+
+    private val crossfadeMonitor = object : Runnable {
+        override fun run() {
+            // 无条件心跳：条件不满足也要重新调度自己，避免 monitor 永久停死
+            if (isDestroyed) return
+            // 每次 tick 动态读 prefs，不依赖字段时序（service 进程可能晚于开关设置才重启）
+            val cf = getSharedPreferences("settings", MODE_PRIVATE)
+            val enabled = cf.getBoolean("crossfade_enabled", false)
+            val dur = cf.getInt("crossfade_duration_ms", 5000)
+            crossfadeEnabled = enabled
+            crossfadeDurationMs = dur
+            var triggered = false
+            if (enabled && !crossfadeBusy) {
+                val p = oboeDirectPlayer
+                if (p != null && p.isPrepared && p.isPlaying == true) {
+                    val totalDur = p.getDurationMs()
+                    val pos = p.getCurrentPositionMs()
+                    if (totalDur > 0) {
+                        val remain = totalDur - pos
+                        // 【能量切点】进入候选区(remain<=dur)后，等能量低谷再切；
+                        // 找不到低谷则 remain<=1500ms 强制触发（兑底，保证不漏切）
+                        val FLOOR_MS = 1500
+                        var shouldTrigger = false
+                        if (remain <= dur) {
+                            val rms = p.getRmsLevel()
+                            xfadePeakRms = maxOf(xfadePeakRms * 0.995f, rms)
+                            if (rms < 0.15f && rms < xfadePeakRms * 0.4f) {
+                                xfadeDipCount++
+                            } else {
+                                xfadeDipCount = 0
+                            }
+                            if (remain <= FLOOR_MS || xfadeDipCount >= 2) {
+                                shouldTrigger = true
+                                xfadeDipCount = 0
+                                xfadePeakRms = 0f
+                            }
+                        }
+                        val songs = servicePlaylist.ifEmpty { SongRepository.getSongs() }
+                        val realIdx = currentIndex
+                        if (songs.isNotEmpty() && repeatMode != Player.REPEAT_MODE_ONE) {
+                            val nextIndex = if (isShuffleMode) {
+                                if (songs.size <= 1) -1 else (0 until songs.size).filter { it != realIdx }.random()
+                            } else {
+                                (realIdx + 1) % songs.size
+                            }
+                            if (nextIndex >= 0 && nextIndex != realIdx && shouldTrigger) {
+                                crossfadeBusy = true
+                                val nextSong = songs[nextIndex]
+                                val fp = nextSong.filePath.ifEmpty { nextSong.path }
+                                val path = if (fp.startsWith("content://")) resolveContentUriToPath(fp) else fp
+                                if (path != null) {
+                                    crossfadeNextIndex = nextIndex
+                                    Log.i(TAG, "Crossfade: preloading next: ${nextSong.title} (remain=$remain)")
+                                    // 【V8.4】预加载开始 → 推送 B 轨信息（UI 开始预读 B 封面/主色）
+                                    crossfadeUiInfo = CrossfadeUiInfo(
+                                        state = XfadeUiState.PRELOADING,
+                                        durationMs = dur,
+                                        nextTitle = nextSong.title,
+                                        nextArtist = nextSong.artist,
+                                        nextAlbumArt = nextSong.albumArtUri?.takeIf { it.isNotEmpty() },
+                                        nextAccentColor = 0L
+                                    )
+                                    if (p.openIncoming(path)) {
+                                        val ok = p.startCrossfade(dur)
+                                        if (ok) {
+                                            triggered = true
+                                            Log.i(TAG, "Crossfade: triggered ${dur}ms → ${nextSong.title}")
+                                            // 【V8.4】crossfade 正式开始 → UI 启动同步动画
+                                            crossfadeUiInfo = crossfadeUiInfo.copy(state = XfadeUiState.ACTIVE)
+                                            scheduleCrossfadeCompletionPoll(p, nextSong, nextIndex)
+                                        } else {
+                                            Log.w(TAG, "Crossfade: startCrossfade failed")
+                                            crossfadeUiInfo = CrossfadeUiInfo()  // 【V8.4】失败清状态
+                                            p.stopIncoming()
+                                        }
+                                    } else {
+                                        Log.w(TAG, "Crossfade: openIncoming failed")
+                                        crossfadeUiInfo = CrossfadeUiInfo()  // 【V8.4】失败清状态
+                                    }
+                                }
+                                if (!triggered) { crossfadeBusy = false; crossfadeNextIndex = -1 }
+                            }
+                        }
+                    }
+                }
+            }
+            handler.postDelayed(this, 200)
+        }
+    }
+    private fun scheduleCrossfadeCompletionPoll(p: OboeDirectPlayer, nextSong: Song, nextIndex: Int) {
+        // 轮询直到 active 轨翻转（crossfade 完成），然后切元数据 + 继续下一轮监控
+        val startActiveB = p.isActiveB()
+        val pollStart = System.currentTimeMillis()
+        val poller = object : Runnable {
+            override fun run() {
+                if (isDestroyed) { crossfadeBusy = false; return }
+                val nowB = p.isActiveB()
+                // crossfade 完成 = active 轨状态与触发前相反
+                if (nowB != startActiveB) {
+                    // 【V8.4】crossfade 完成 → DONE：UI 保留叠加层直到封面 URI 切换（防变两次跳变）
+                    crossfadeUiInfo = crossfadeUiInfo.copy(state = XfadeUiState.DONE)
+                    handler.post {
+                        currentSong = nextSong
+                        currentIndex = nextIndex
+                        notifySongChanged(nextSong)
+                        updateNotification()
+                    }
+                    crossfadeBusy = false
+                    crossfadeNextIndex = -1
+                    // 继续监控下一轮
+                    handler.postDelayed(crossfadeMonitor, 200)
+                    return
+                }
+                if (System.currentTimeMillis() - pollStart > crossfadeDurationMs + 3000L) {
+                    // 超时：crossfade 未完成（可能异常），恢复硬切兜底
+                    // 【V8.4】超时也清 UI 状态
+                    crossfadeUiInfo = CrossfadeUiInfo()
+                    crossfadeBusy = false
+                    crossfadeNextIndex = -1
+                    handler.postDelayed(crossfadeMonitor, 200)
+                    return
+                }
+                handler.postDelayed(this, 100)
+            }
+        }
+        handler.postDelayed(poller, 100)
+    }
+
     // USB DAC Exclusive mode controller
     private var usbDacController: UsbDacPlaybackController? = null
     private var dacPlayGeneration: Int = 0  // [V4.0.1] invalidate stale onCompletion
@@ -343,7 +494,13 @@ class MusicService : MediaSessionService() {
                     .build()
             }
 
-            val safeIndex = MusicService.currentIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
+            // [fix] 无真实播放歌曲时报告 INDEX_UNSET，避免 connect() 误把 index=0（歌单第一首）
+            // 当成「当前歌曲」写回 _currentSong，导致迷你条每次打开都显示同一首歌。
+            val safeIndex = if (song == null) {
+                C.INDEX_UNSET
+            } else {
+                MusicService.currentIndex.coerceIn(0, (songs.size - 1).coerceAtLeast(0))
+            }
             return State.Builder()
                 .setPlaybackState(playbackState)
                 .setPlayWhenReady(playing, Player.PLAY_WHEN_READY_CHANGE_REASON_USER_REQUEST)
@@ -369,10 +526,23 @@ class MusicService : MediaSessionService() {
             seekCommand: Int
         ): ListenableFuture<*> {
             val songs = this@MusicService.servicePlaylist.ifEmpty { SongRepository.getSongs() }
-            if (mediaItemIndex != MusicService.currentIndex && mediaItemIndex in songs.indices) {
-                this@MusicService.playSong(mediaItemIndex)
-            } else {
-                this@MusicService.seekTo(positionMs)
+            // [fix] 系统媒体卡片「下一曲/上一曲」按钮走 media3 默认 seek，其 getNextMediaItemIndex()
+            // 是纯顺序 +1、忽略 shuffleModeEnabled，若直接 playSong(mediaItemIndex) 会绕过
+            // playNext() 的 shuffle 随机逻辑 → 出现「shuffle 图标显示随机、切歌却按顺序」。
+            // 这里按 seekCommand 分流到权威 playNext()/playPrevious()；点歌单某首（SEEK_TO_MEDIA_ITEM）
+            // 仍走精确 index。
+            when (seekCommand) {
+                Player.COMMAND_SEEK_TO_NEXT,
+                Player.COMMAND_SEEK_TO_NEXT_MEDIA_ITEM -> this@MusicService.playNext()
+                Player.COMMAND_SEEK_TO_PREVIOUS,
+                Player.COMMAND_SEEK_TO_PREVIOUS_MEDIA_ITEM -> this@MusicService.playPrevious()
+                else -> {
+                    if (mediaItemIndex != MusicService.currentIndex && mediaItemIndex in songs.indices) {
+                        this@MusicService.playSong(mediaItemIndex)
+                    } else {
+                        this@MusicService.seekTo(positionMs)
+                    }
+                }
             }
             invalidateState()
             return Futures.immediateVoidFuture()
@@ -582,7 +752,6 @@ class MusicService : MediaSessionService() {
 
         /** ����(/) */
         @Volatile private var stoppedByIdlePolicy = false
-        @Volatile private var manualPause = false
 
         private fun notifyPlayStateChanged(isPlaying: Boolean) {
             // [v7.113] update last known state for widget query (handles Oboe JNI lag)
@@ -612,18 +781,13 @@ class MusicService : MediaSessionService() {
                 }
             }
             inst.stopDelayRunnable = r
-            // Manual pause: long idle (30 min). Auto-stop (song end): short idle from prefs.
-            val isManual = manualPause
-            val idleMs = if (isManual) {
-                1_800_000L  // 30 min for manual pause
-            } else {
-                when (inst.getSharedPreferences("sdw_music_prefs", MODE_PRIVATE).getString("idle_level", "频繁")) {
-                    "常用" -> 1_800_000L  // 30 min
-                    "频繁" -> 300_000L       // 5 min
-                    "偶尔" -> 3_000L             // 3 sec
-                    "受限" -> 0L            // immediate
-                    else -> 300_000L
-                }
+            // [fix] 让设置的 idle_level 真正说了算：手动暂停与自动播完统一按设置档位
+            val idleMs = when (inst.getSharedPreferences("sdw_music_prefs", MODE_PRIVATE).getString("idle_level", "频繁")) {
+                "常用" -> 1_800_000L  // 30 min
+                "频繁" -> 300_000L       // 5 min
+                "偶尔" -> 3_000L             // 3 sec
+                "受限" -> 0L            // immediate
+                else -> 300_000L
             }
             if (idleMs == 0L) {
                 Log.d(inst.TAG, "Idle level Restricted, stopping immediately")
@@ -821,6 +985,12 @@ class MusicService : MediaSessionService() {
         isShuffleMode = prefs.getBoolean("shuffle_mode", false)
         repeatMode = prefs.getInt("repeat_mode", Player.REPEAT_MODE_OFF)
         Log.d(TAG, "Restored shuffle mode: $isShuffleMode, repeat=$repeatMode")
+
+        // 【Crossfade】读取顺序自动交叉淡化开关
+        val cfPrefs = getSharedPreferences("settings", MODE_PRIVATE)
+        crossfadeEnabled = cfPrefs.getBoolean("crossfade_enabled", false)
+        crossfadeDurationMs = cfPrefs.getInt("crossfade_duration_ms", 5000)
+        Log.d(TAG, "Restored crossfade: enabled=$crossfadeEnabled, dur=$crossfadeDurationMs")
 
         // :,
         // 
@@ -1281,7 +1451,10 @@ class MusicService : MediaSessionService() {
                     },
                     onError = { msg ->
                         DebugLog.add(TAG, "USB DAC error: $msg")
-                        handler.post { playSongFallbackExo(index, songs) }
+                        // 【修复】解码异常不自动切歌、不 fallback ExoPlayer（用户明确不要）。
+                        // 解码线程 finally 已 releaseResources + isPlaying=false，流自然停住。
+                        // 保持静默，交给用户手动操作，避免「报错→切下一首」级联。
+                        handler.post { notifyPlayStateChanged(false) }
                     }
                 )
                 // [V3.3.4] flac/wav: open() reads the true rate itself (STREAMINFO/RIFF);
@@ -1403,7 +1576,12 @@ class MusicService : MediaSessionService() {
                 newPlayer.resetClipStats()
                 newPlayer.onCompletion = {
                     Log.i(TAG, "OboeDirect: song completed, playing next")
-                    handler.post { playNext() }
+                    handler.post {
+                        crossfadeBusy = false
+                        crossfadeNextIndex = -1
+                        crossfadeUiInfo = CrossfadeUiInfo()  // 【V8.4】手动/自然完成清 UI 状态
+                        playNext()
+                    }
                 }
                 newPlayer.onPlayStateChanged = { isPlaying ->
                     handler.post {
@@ -1472,6 +1650,9 @@ class MusicService : MediaSessionService() {
                     currentIndex = index
                     volumeGuard.resetMuteState()
                     oboeFailureCount = 0
+                    // 【能量切点】切歌后复位低谷检测状态，避免跨歌曲残留
+                    xfadeDipCount = 0
+                    xfadePeakRms = 0f
 
                     EqualizerManager.restoreSettings(this@MusicService)
 
@@ -1498,6 +1679,13 @@ class MusicService : MediaSessionService() {
                     notifyPlayStateChanged(true)
                     notifySongChanged(song)
                     updateNotification()
+
+                    // 【Crossfade】启动顺序自动交叉淡化监控（无条件启动，monitor 自行读 prefs 判断）
+                    handler.removeCallbacks(crossfadeMonitor)
+                    crossfadeBusy = false
+                    crossfadeNextIndex = -1
+                    crossfadeUiInfo = CrossfadeUiInfo()  // 【V8.4】新歌启动清 UI 状态
+                    handler.postDelayed(crossfadeMonitor, 500)
 
                     handler.postDelayed({
                         if (fftCallback != null && !visualizerManager.isReady()) { visualizerManager.setup() }
@@ -1654,6 +1842,34 @@ class MusicService : MediaSessionService() {
         }
     }
 
+    fun applyLoudness(enabled: Boolean, intensity: Float) {
+        if (isDacActive()) {
+            UsbDacManager.setLoudnessEnabled(enabled)
+            if (enabled) UsbDacManager.setLoudnessIntensity(intensity)
+        } else {
+            oboeDirectPlayer?.setLoudnessEnabled(enabled)
+            if (enabled) oboeDirectPlayer?.setLoudnessIntensity(intensity)
+        }
+    }
+
+    fun resetLoudness() {
+        if (isDacActive()) {
+            UsbDacManager.setLoudnessEnabled(false)
+        } else {
+            oboeDirectPlayer?.setLoudnessEnabled(false)
+        }
+    }
+
+    fun applyCrossfeed(amount: Float) {
+        if (isDacActive()) return
+        oboeDirectPlayer?.setCrossfeed(amount)
+    }
+
+    fun resetCrossfeed() {
+        if (isDacActive()) return
+        oboeDirectPlayer?.resetCrossfeed()
+    }
+
     /** ??v6.29??DSP EQ ��,?? SharedPreferences  */
     fun setCustomDspEq(
         enabled: Boolean,
@@ -1761,7 +1977,6 @@ class MusicService : MediaSessionService() {
 
     fun pause() {
         try {
-            manualPause = true
             Log.d(TAG, "pause() called, usbDacController=${usbDacController != null}")
             if (usbDacController != null) {
                 usbDacController?.pause()
@@ -1789,7 +2004,6 @@ class MusicService : MediaSessionService() {
 
     fun resume() {
         try {
-            manualPause = false
             requestAudioFocusIfNeeded(this)
             if (usbDacController != null) {
                 usbDacController?.resume()
@@ -1930,6 +2144,36 @@ class MusicService : MediaSessionService() {
         setShuffleMode(!isShuffleMode)
         return isShuffleMode
     }
+
+    /** 【Crossfade】设置顺序自动交叉淡化开关（只 Oboe 路径）。 */
+    fun setCrossfadeEnabled(enabled: Boolean) {
+        crossfadeEnabled = enabled
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putBoolean("crossfade_enabled", enabled).apply()
+        if (enabled) {
+            handler.removeCallbacks(crossfadeMonitor)
+            if (isOboeDirectMode() && oboeDirectPlayer?.isPlaying == true) {
+                handler.postDelayed(crossfadeMonitor, 300)
+            }
+        } else {
+            handler.removeCallbacks(crossfadeMonitor)
+            crossfadeBusy = false
+            crossfadeNextIndex = -1
+            crossfadeUiInfo = CrossfadeUiInfo()  // 【V8.4】关闭时清 UI 状态
+        }
+        Log.i(TAG, "Crossfade: enabled=$enabled")
+    }
+
+    fun isCrossfadeEnabled(): Boolean = crossfadeEnabled
+
+    fun setCrossfadeDurationMs(ms: Int) {
+        crossfadeDurationMs = ms.coerceIn(1000, 15000)
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putInt("crossfade_duration_ms", crossfadeDurationMs).apply()
+        Log.i(TAG, "Crossfade: duration=${crossfadeDurationMs}ms")
+    }
+
+    fun getCrossfadeDurationMs(): Int = crossfadeDurationMs
 
     fun setShuffleMode(enabled: Boolean) {
         isShuffleMode = enabled

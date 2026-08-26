@@ -1,8 +1,12 @@
 package com.sdw.music.player.ui.screens
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,18 +30,21 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sdw.music.player.R
 import com.sdw.music.player.AppLanguageManager
 import com.sdw.music.player.EqualizerManager
+import com.sdw.music.player.WallpaperManager
 import com.sdw.music.player.core.audio.UsbDacManager
+import com.sdw.music.player.MusicService
 import com.sdw.music.player.ui.theme.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.sdw.music.player.BuildConfig
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() -> Unit)? = null, onNavigateToAudioQuality: (() -> Unit)? = null, onNavigateToCoverEmbed: (() -> Unit)? = null) {
     val context = LocalContext.current
@@ -77,8 +84,8 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
         // V3.3.10: 提升 DebugLog 读取到 LazyColumn 外部，避免滚动时重组
-        val ktLog = remember { com.sdw.music.player.core.audio.DebugLog.get() }
-        val nativeLog = remember { UsbDacManager.getNativeDebugLog() ?: "" }
+        val ktLog = remember(refreshTrigger) { com.sdw.music.player.core.audio.DebugLog.get() }
+        val nativeLog = remember(refreshTrigger) { UsbDacManager.getNativeDebugLog() ?: "" }
         val fullLog = if (nativeLog.isNotEmpty()) "=== NATIVE (C++) ===\n$nativeLog\n=== KOTLIN ===\n$ktLog" else ktLog
         
         LazyColumn(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -96,9 +103,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     onClick = { }
                 )
                 // Duration options
-                Row(
+                FlowRow(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     listOf(10, 30, 60, 120, 150, 300).forEach { sec ->
                         val selected = minDuration == sec
@@ -110,9 +118,11 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                     .edit().putInt("min_duration", sec).apply()
                                 refreshTrigger++
                             },
-                            label = { Text("${sec}s", color = if (selected) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.onBackground) },
+                            label = { Text("${sec}s", color = MaterialTheme.colorScheme.onBackground, textAlign = TextAlign.Center, maxLines = 1, softWrap = false, modifier = Modifier.fillMaxWidth()) },
+                            modifier = Modifier.width(84.dp),
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
+                                selectedLabelColor = MaterialTheme.colorScheme.onBackground,
                                 containerColor = MaterialTheme.colorScheme.surface
                             )
                         )
@@ -121,9 +131,6 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 Spacer(Modifier.height(8.dp))
             }
 
-            item { SettingsDivider() }
-
-            item { SettingsDivider() }
             // === Hardware Exclusive Mode (Bypass Android Mixer) ===
             item {
                 SettingsSectionTitle(stringResource(R.string.settings_usb_dac))
@@ -230,6 +237,61 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 }
 
                 Spacer(Modifier.height(8.dp))
+            }
+            item {
+                val cfPref = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+                var cfEnabled by remember(refreshTrigger) {
+                    mutableStateOf(cfPref.getBoolean("crossfade_enabled", false))
+                }
+                SettingsSwitchItem(
+                    icon = Icons.Default.SwapHoriz,
+                    title = stringResource(R.string.settings_crossfade),
+                    subtitle = if (cfEnabled) stringResource(R.string.settings_crossfade_on) + " · " + stringResource(R.string.settings_crossfade_hint)
+                    else stringResource(R.string.settings_off),
+                    checked = cfEnabled,
+                    onCheckedChange = { enabled ->
+                        cfEnabled = enabled
+                        cfPref.edit().putBoolean("crossfade_enabled", enabled).apply()
+                        MusicService.instance?.setCrossfadeEnabled(enabled)
+                    }
+                )
+
+                // 时长选择（5s / 10s / 15s）
+                if (cfEnabled) {
+                    val curDur = cfPref.getInt("crossfade_duration_ms", 5000)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            stringResource(R.string.settings_crossfade_duration),
+                            color = MaterialTheme.colorScheme.onBackground,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        listOf(5000 to "5s", 10000 to "10s", 15000 to "15s").forEach { (ms, label) ->
+                            val selected = curDur == ms
+                            FilterChip(
+                                selected = selected,
+                                onClick = {
+                                    cfPref.edit().putInt("crossfade_duration_ms", ms).apply()
+                                    MusicService.instance?.setCrossfadeDurationMs(ms)
+                                    refreshTrigger++
+                                },
+                                label = { Text(label) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.25f),
+                                    selectedLabelColor = MaterialTheme.colorScheme.primary
+                                )
+                            )
+                            Spacer(Modifier.width(8.dp))
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
             }
             item {
                 val vuPref = context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE)
@@ -436,9 +498,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 idlePref.edit().putString("idle_level", level).apply()
                                 refreshTrigger++
                             },
-                            label = { Text(idleShortLabels[level] ?: level, color = if (selected) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, maxLines = 1) },
+                            label = { Text(idleShortLabels[level] ?: level, color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, maxLines = 1) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
+                                selectedLabelColor = MaterialTheme.colorScheme.onBackground,
                                 containerColor = MaterialTheme.colorScheme.surface
                             ),
                             modifier = Modifier.weight(1f)
@@ -448,29 +511,8 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 Spacer(Modifier.height(8.dp))
             }
             item {
-                // [v7.122] Show hint when system auto-syncs idle_level
-                val sysBucket = remember {
-                    try {
-                        val ctx = context
-                        val usm = ctx.getSystemService(android.content.Context.USAGE_STATS_SERVICE) as? android.app.usage.UsageStatsManager
-                        usm?.appStandbyBucket
-                    } catch (_: Exception) { null }
-                }
-                if (sysBucket != null && sysBucket != android.app.usage.UsageStatsManager.STANDBY_BUCKET_ACTIVE) {
-                    val bucketName = when (sysBucket) {
-                        android.app.usage.UsageStatsManager.STANDBY_BUCKET_WORKING_SET -> "常用"
-                        android.app.usage.UsageStatsManager.STANDBY_BUCKET_FREQUENT -> "频繁"
-                        android.app.usage.UsageStatsManager.STANDBY_BUCKET_RARE -> "偶尔"
-                        android.app.usage.UsageStatsManager.STANDBY_BUCKET_RESTRICTED -> "受限"
-                        else -> "偶尔"
-                    }
-                    Text(
-                        "Auto-sync: system standby = $bucketName → idle_level auto-mapped",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                        fontSize = 10.sp,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 4.dp)
-                    )
-                }
+                // [fix] 移除误导性的 Auto-sync 提示：standby bucket 自动覆盖实为死代码，未真正运行
+                Spacer(Modifier.height(4.dp))
             }
             item { SettingsDivider() }
 
@@ -512,6 +554,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     Card(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
+                        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                         shape = RoundedCornerShape(8.dp)
                     ) {
                         Column(modifier = Modifier.heightIn(max = 240.dp)) {
@@ -532,7 +575,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                              "\nUnderruns: ${UsbDacManager.getUnderrunCount()}"
                             ).also { clipboardManager.setText(AnnotatedString(it)) }
                         }) { Text(stringResource(R.string.action_copy), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp) }
-                        TextButton(onClick = { com.sdw.music.player.core.audio.DebugLog.clear(); refreshTrigger++ }) {
+                        TextButton(onClick = { com.sdw.music.player.core.audio.DebugLog.clear(); UsbDacManager.clearNativeDebugLog(); refreshTrigger++ }) {
                             Text(stringResource(R.string.action_clear), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                         }
                         TextButton(onClick = { refreshTrigger++ }) {
@@ -556,6 +599,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 Card(
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                     colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
                     shape = RoundedCornerShape(8.dp)
                 ) {
                     Column(modifier = Modifier.padding(12.dp)) {
@@ -659,6 +703,84 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
             }
             item { SettingsDivider() }
 
+            // === Custom Wallpaper ===
+            item {
+                SettingsSectionTitle(stringResource(R.string.settings_wallpaper))
+            }
+            item {
+                val imagePicker = rememberLauncherForActivityResult(
+                    ActivityResultContracts.GetContent()
+                ) { uri ->
+                    if (uri != null) {
+                        com.sdw.music.player.WallpaperManager.setWallpaper(context, uri)
+                        refreshTrigger++
+                    }
+                }
+                SettingsItem(
+                    icon = Icons.Default.Wallpaper,
+                    title = stringResource(R.string.settings_wallpaper_pick),
+                    subtitle = if (com.sdw.music.player.WallpaperManager.hasWallpaper())
+                        stringResource(R.string.settings_wallpaper_set)
+                    else stringResource(R.string.settings_wallpaper_none),
+                    onClick = { imagePicker.launch("image/*") }
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+            if (com.sdw.music.player.WallpaperManager.hasWallpaper()) {
+                item {
+                    // 取色感知开关
+                    SettingsSwitchItem(
+                        icon = Icons.Default.Palette,
+                        title = stringResource(R.string.settings_wallpaper_color_aware),
+                        subtitle = stringResource(R.string.settings_wallpaper_color_aware_desc),
+                        checked = com.sdw.music.player.WallpaperManager.colorAwareEnabled.value,
+                        onCheckedChange = { enabled ->
+                            com.sdw.music.player.WallpaperManager.setColorAware(context, enabled)
+                            refreshTrigger++
+                        }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+                item {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                        Text(
+                            stringResource(R.string.settings_wallpaper_blur),
+                            color = MaterialTheme.colorScheme.onBackground,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Slider(
+                            value = com.sdw.music.player.WallpaperManager.blurAmount.value,
+                            onValueChange = { com.sdw.music.player.WallpaperManager.setBlur(context, it) },
+                            valueRange = 0f..40f
+                        )
+                        Text(
+                            stringResource(R.string.settings_wallpaper_scrim),
+                            color = MaterialTheme.colorScheme.onBackground,
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                        Slider(
+                            value = com.sdw.music.player.WallpaperManager.scrimAmount.value,
+                            onValueChange = { com.sdw.music.player.WallpaperManager.setScrim(context, it) },
+                            valueRange = 0f..0.85f
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
+                item {
+                    SettingsItem(
+                        icon = Icons.Default.Delete,
+                        title = stringResource(R.string.settings_wallpaper_clear),
+                        subtitle = stringResource(R.string.settings_wallpaper_clear_desc),
+                        onClick = {
+                            com.sdw.music.player.WallpaperManager.clearWallpaper(context)
+                            refreshTrigger++
+                        }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+            }
+            item { SettingsDivider() }
+
             // === Lyrics Display ===
             item {
                 SettingsSectionTitle(stringResource(R.string.settings_lyrics_display))
@@ -677,7 +799,12 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    listOf(24, 28, 32).forEach { size ->
+                    // [fix] 字号选项显示「小/中/大」而非具体 sp 数值
+                    listOf(
+                        24 to stringResource(R.string.size_small),
+                        28 to stringResource(R.string.size_medium),
+                        32 to stringResource(R.string.size_large)
+                    ).forEach { (size, label) ->
                         val selected = lyricFontSize == size
                         FilterChip(
                             selected = selected,
@@ -686,9 +813,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 lyricPref.edit().putInt("lyric_font_size", size).apply()
                                 refreshTrigger++
                             },
-                            label = { Text("${size}sp", color = if (selected) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.onBackground, fontSize = 12.sp) },
+                            label = { Text(label, color = MaterialTheme.colorScheme.onBackground, fontSize = 12.sp) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
+                                selectedLabelColor = MaterialTheme.colorScheme.onBackground,
                                 containerColor = MaterialTheme.colorScheme.surface
                             )
                         )
@@ -716,9 +844,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 lyricPref.edit().putInt("lyric_visible_lines", n).apply()
                                 refreshTrigger++
                             },
-                            label = { Text("$n", color = if (selected) MaterialTheme.colorScheme.background else MaterialTheme.colorScheme.onBackground, fontSize = 12.sp) },
+                            label = { Text("$n", color = MaterialTheme.colorScheme.onBackground, fontSize = 12.sp) },
                             colors = FilterChipDefaults.filterChipColors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary,
+                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
+                                selectedLabelColor = MaterialTheme.colorScheme.onBackground,
                                 containerColor = MaterialTheme.colorScheme.surface
                             )
                         )
@@ -837,7 +966,7 @@ private fun SettingsDivider() {
     androidx.compose.material3.HorizontalDivider(
         modifier = Modifier.padding(start = 20.dp, end = 20.dp),
         thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
+        color = MaterialTheme.colorScheme.outlineVariant
     )
     Spacer(Modifier.height(12.dp))
 }

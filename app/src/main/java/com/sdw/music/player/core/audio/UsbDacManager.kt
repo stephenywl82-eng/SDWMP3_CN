@@ -32,6 +32,7 @@ object UsbDacManager {
     @Volatile private var isNativeLoaded = false
     @Volatile private var contextRef: Context? = null
     @Volatile private var permissionReceiver: BroadcastReceiver? = null
+    @Volatile private var hotplugReceiver: BroadcastReceiver? = null
     @Volatile private var streaming = false
     @Volatile private var initAttempted = false
     @Volatile private var cachedUsbDevice: UsbDevice? = null
@@ -68,6 +69,7 @@ object UsbDacManager {
         }
 
         registerPermissionReceiver(appCtx)
+        registerHotplugReceiver(appCtx)
         DebugLog.v(TAG, "init done, nativeLoaded=$isNativeLoaded")
     }
 
@@ -102,6 +104,9 @@ object UsbDacManager {
             }
         }
         lastFindDacsTime = now
+        // 【修复】设备消失时清除幽灵缓存：否则 getDacDevice() 一直返回已断开的 stale 对象，
+        // playSong 拿旧设备反复 claim 失败（openDevice FAIL / no permission）死循环。
+        if (dacs.isEmpty()) cachedUsbDevice = null
         DebugLog.add(TAG, "findDacs: result=${dacs.size} DAC(s) found")
         return dacs
     }
@@ -244,7 +249,13 @@ object UsbDacManager {
     fun stopAndRelease() {
         streaming = false; pendingClaim = null
         activeSampleRate = 0; activeBits = 0
-        if (isNativeLoaded) { nativeStop(); nativeRelease() }
+        if (isNativeLoaded) {
+            // [fix] use-after-free：FLAC 硬解线程 decodeLoop 可能仍持裸指针 drv 在 pushPcm，
+            // 若直接 nativeRelease()（native 层 delete gUsbDriver）会导致 use-after-free 崩溃。
+            // 必须先停 FLAC 解码线程，确保不再有线程触碰 driver 指针，再 release。
+            try { nativeFlacStop() } catch (_: Throwable) {}
+            nativeStop(); nativeRelease()
+        }
         DebugLog.add(TAG, "stopAndRelease")
     }
 
@@ -378,6 +389,60 @@ object UsbDacManager {
         }
     }
 
+    // ── ALAC 直解封装（镜像 flac 那套，非 ASCII 路径复制到 cache temp）──
+    private fun getAlacTempDir(): java.io.File {
+        val ctx = contextRef ?: return java.io.File("/data/local/tmp")
+        return java.io.File(ctx.cacheDir, "alac_temp").also { it.mkdirs() }
+    }
+    private var alacTempPath: String? = null
+
+    fun alacOpen(path: String): Boolean {
+        if (!isNativeLoaded) { DebugLog.add(TAG, "alacOpen: native not loaded"); return false }
+        return try {
+            val openPath = if (path.all { it.code <= 0x7F }) {
+                path
+            } else {
+                val tmp = java.io.File(getAlacTempDir(), "a_${path.hashCode().toUInt().toString(16)}.m4a")
+                if (!tmp.exists() || tmp.length() != java.io.File(path).length()) {
+                    DebugLog.add(TAG, "alacOpen: copying UTF-8 file to ASCII temp \"${tmp.name}\"")
+                    java.io.File(path).copyTo(tmp, overwrite = true)
+                }
+                alacTempPath = tmp.absolutePath
+                tmp.absolutePath
+            }
+            val ok = nativeAlacOpen(openPath)
+            DebugLog.add(TAG, "alacOpen(\"${path.takeLast(80)}\") = $ok")
+            ok
+        } catch (e: Throwable) {
+            DebugLog.add(TAG, "alacOpen EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
+            false
+        }
+    }
+    /** [sampleRate, channels, bits, durationMs] */
+    fun alacInfo(): IntArray {
+        if (!isNativeLoaded) return intArrayOf(0,0,0,0)
+        return try {
+            val info = nativeAlacInfo()
+            DebugLog.add(TAG, "alacInfo: ${info.contentToString()}")
+            info
+        } catch (e: Throwable) {
+            DebugLog.add(TAG, "alacInfo EXCEPTION: ${e.javaClass.simpleName}: ${e.message}")
+            intArrayOf(0,0,0,0)
+        }
+    }
+    fun alacStart(): Boolean = isNativeLoaded && try { nativeAlacStart() } catch (_: Throwable) { false }
+    fun alacPause(paused: Boolean) { if (isNativeLoaded) try { nativeAlacPause(paused) } catch (_: Throwable) {} }
+    fun alacSeek(ms: Long) { if (isNativeLoaded) try { nativeAlacSeek(ms) } catch (_: Throwable) {} }
+    fun alacStop() {
+        if (isNativeLoaded) try { nativeAlacStop() } catch (_: Throwable) {}
+        alacTempPath?.let { try { java.io.File(it).delete() } catch (_: Throwable) {} }; alacTempPath = null
+    }
+    fun alacIsEos(): Boolean = isNativeLoaded && try { nativeAlacIsEos() } catch (_: Throwable) { true }
+    fun alacPositionMs(): Long = if (isNativeLoaded) try { nativeAlacPositionMs() } catch (_: Throwable) { 0L } else 0L
+    fun alacTotalSamples(): Long {
+        val info = alacInfo(); return if (info[3] > 0) info[3].toLong() else 0L
+    }
+
     fun isStreaming(): Boolean = streaming && isNativeLoaded && nativeIsClaimed()
     // V3.3.3: claim held (stream may be paused after EOS keep-claim)
     fun isClaimed(): Boolean = isNativeLoaded && nativeIsClaimed()
@@ -400,6 +465,7 @@ object UsbDacManager {
     fun getDetailedDacInfo(): String? = if (isNativeLoaded) nativeGetDetailedInfo() else null
     fun getSupportedRates(): String = if (isNativeLoaded) (nativeGetSupportedRates() ?: "") else ""
     fun getNativeDebugLog(): String? = if (isNativeLoaded) nativeGetDebugLog() else null
+    fun clearNativeDebugLog() { if (isNativeLoaded) try { nativeClearDebugLog() } catch (_: Throwable) {} }
     fun getStats(): String? = if (isNativeLoaded) nativeGetStats() else null
 
     fun setVolume(v: Float) {
@@ -446,6 +512,11 @@ object UsbDacManager {
     fun setCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float) {
         if (isNativeLoaded) try { nativeSetCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb) } catch (_: Throwable) {}
     }
+
+    // 【V8.3】等响补偿（ISO 226）—— DAC 独占路径同样生效
+    fun setLoudnessEnabled(enabled: Boolean) { if (isNativeLoaded) try { nativeSetLoudnessEnabled(enabled) } catch (_: Throwable) {} }
+    fun setLoudnessIntensity(intensity: Float) { if (isNativeLoaded) try { nativeSetLoudnessIntensity(intensity) } catch (_: Throwable) {} }
+    fun setLoudnessOutGain(gain: Float) { if (isNativeLoaded) try { nativeSetLoudnessOutGain(gain) } catch (_: Throwable) {} }
 
     @Volatile private var currentVolume = 0.7f
     fun getSafeDacInfo(): String {
@@ -614,6 +685,37 @@ object UsbDacManager {
         return null
     }
 
+    private fun registerHotplugReceiver(context: Context) {
+        if (hotplugReceiver != null) return
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context, intent: Intent) {
+                when (intent.action) {
+                    UsbManager.ACTION_USB_DEVICE_DETACHED -> {
+                        // 设备拔除：只清幽灵缓存，不 stopAndRelease（FLAC 解码线程可能仍持有
+                        // driver 指针，nativeRelease 会 use-after-free）。native 层会随设备拔除
+                        // 自然失效；下次 findDacs 扫描 result=0 时也会清缓存。
+                        DebugLog.add(TAG, "hotplug: USB device detached, clearing cache")
+                        cachedUsbDevice = null
+                        lastFindDacsTime = 0L
+                    }
+                    UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
+                        DebugLog.add(TAG, "hotplug: USB device attached, clearing cache for re-scan")
+                        cachedUsbDevice = null
+                        lastFindDacsTime = 0L
+                    }
+                }
+            }
+        }
+        val filter = IntentFilter().apply {
+            addAction(UsbManager.ACTION_USB_DEVICE_DETACHED)
+            addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            context.registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        else @Suppress("UnsafeRegisteredReceiver") context.registerReceiver(receiver, filter)
+        hotplugReceiver = receiver
+    }
+
     private fun registerPermissionReceiver(context: Context) {
         if (permissionReceiver != null) return
         val receiver = object : BroadcastReceiver() {
@@ -662,6 +764,7 @@ object UsbDacManager {
     private external fun nativeGetSupportedRates(): String?
     private external fun nativeGetStats(): String?
     private external fun nativeGetDebugLog(): String?
+    private external fun nativeClearDebugLog()
     private external fun nativeSetVolume(volume: Float)
     private external fun nativeSetDitherEnabled(enabled: Boolean)
     private external fun nativeSetFeatureUnitOverride(unitId: Int, channel: Int, channels: Int, minDb: Float, maxDb: Float, resDb: Float)
@@ -678,6 +781,9 @@ object UsbDacManager {
     private external fun nativeResetTransient()
     private external fun nativeSetCompressorEnabled(enabled: Boolean)
     private external fun nativeSetCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float)
+    private external fun nativeSetLoudnessEnabled(enabled: Boolean)
+    private external fun nativeSetLoudnessIntensity(intensity: Float)
+    private external fun nativeSetLoudnessOutGain(gain: Float)
     private external fun nativeForceReset()
     fun forceReset() { if (isNativeLoaded) nativeForceReset() }
 
@@ -693,4 +799,15 @@ object UsbDacManager {
     private external fun nativeFlacGaplessSeek(path: String, targetSample: Long): Boolean
     private external fun nativeFlacTotalSamples(): Long
 private external fun nativeFlacReadLyrics(path: String): String?
+
+    // ── ALAC 直解（native Apple codec + 手搓 MP4 box 解析）──
+    private external fun nativeAlacOpen(path: String): Boolean
+    private external fun nativeAlacInfo(): IntArray
+    private external fun nativeAlacStart(): Boolean
+    private external fun nativeAlacPause(paused: Boolean)
+    private external fun nativeAlacSeek(ms: Long)
+    private external fun nativeAlacStop()
+    private external fun nativeAlacIsEos(): Boolean
+    private external fun nativeAlacPositionMs(): Long
+    private external fun nativeAlacTotalSamples(): Long
 }

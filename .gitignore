@@ -64,3 +64,10 @@ build*.bat
 
 # --- Temp debug scripts (2026-08-23) ---
 remove_*.py
+
+# local backups (never commit)
+backup_*.kt
+backup_*.cpp
+backup_*.h
+res_dead_backup*/
+jni_backup*/

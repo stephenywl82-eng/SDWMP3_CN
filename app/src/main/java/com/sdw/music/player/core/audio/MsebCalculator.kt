@@ -160,6 +160,8 @@ object MsebCalculator {
     private const val KEY_STAGE  = "soundstage"
     private const val KEY_IMG    = "imaging"
     private const val KEY_ENABLED = "enabled"
+    private const val KEY_DTS_ENABLED = "dts_enabled"
+    private const val KEY_PRESET_NAME = "preset_name"
 
     fun load(context: Context): MsebParams {
         val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -208,5 +210,44 @@ object MsebCalculator {
             .edit()
             .putBoolean(KEY_ENABLED, enabled)
             .apply()
+    }
+
+    /** 【V8.19】DTS 环绕（M/S 声场）独立快捷开关 — 不影响 MSEB 其他调音 */
+    fun isDtsEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_DTS_ENABLED, false)
+
+    fun setDtsEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_DTS_ENABLED, enabled)
+            .apply()
+    }
+
+    /** 【V8.20】当前应用中的 MSEB 预设名（"" = 手动调音/未命名）。 */
+    fun getPresetName(context: Context): String =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY_PRESET_NAME, "") ?: ""
+
+    /** 【V8.20】记录当前应用的预设名；手动调滑块时应传 "" 清除。 */
+    fun setPresetName(context: Context, name: String) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_PRESET_NAME, name)
+            .apply()
+    }
+
+    /**
+     * 【V8.19】DTS 开关开启时应生效的声场参数。
+     * 用户没调过声场/结像滑块（都为 0）时返回内置默认环绕参数，
+     * 保证"开 DTS 就有环绕效果"，不依赖 MSEB 滑块。
+     * 用户调过滑块则跟随滑块（DTS 作为总开关控制是否应用）。
+     */
+    fun dtsStageParams(context: Context): Pair<Float, Float> {
+        val params = load(context)
+        val ss = params.soundstage
+        val img = params.imaging
+        val hasUserStage = kotlin.math.abs(ss) > 0.1f || kotlin.math.abs(img) > 0.1f
+        return if (hasUserStage) ss to img else 5f to 0f
     }
 }

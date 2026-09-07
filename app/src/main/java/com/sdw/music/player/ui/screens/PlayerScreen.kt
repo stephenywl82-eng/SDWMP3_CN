@@ -1,4 +1,4 @@
-﻿@file:OptIn(ExperimentalMaterial3Api::class)
+@file:OptIn(ExperimentalMaterial3Api::class)
 
 package com.sdw.music.player.ui.screens
 
@@ -36,7 +36,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import android.util.Log
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
@@ -76,6 +78,9 @@ import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import android.app.Activity
@@ -83,6 +88,7 @@ import android.os.Build
 import android.content.res.Configuration
 import android.content.Context
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -104,6 +110,8 @@ import com.sdw.music.player.ui.theme.*
 import com.sdw.music.player.EqualizerManager
 import com.sdw.music.player.ui.components.VuMeter
 import com.sdw.music.player.ui.components.VuMeterStyle
+import com.sdw.music.player.ui.components.AddToPlaylistSheet
+import com.sdw.music.player.Song
 import com.sdw.music.player.ui.viewmodel.PlayerState
 import com.sdw.music.player.ui.animation.CoverPosition
 import com.sdw.music.player.ui.animation.SharedCoverState
@@ -220,6 +228,24 @@ fun PlayerScreen(
     var showMenu by remember { mutableStateOf(false) }
     var showQueue by remember { mutableStateOf(false) }
     var showSleepDialog by remember { mutableStateOf(false) }
+    // 【V8.7】播放界面右上角菜单 -> 添加到歌单
+    var showAddToPlaylist by remember { mutableStateOf(false) }
+    val currentSong = remember(state.currentSongId, state.songList, state.queue) {
+        state.songList.firstOrNull { it.id == state.currentSongId }
+            ?: state.queue.firstOrNull { it.id == state.currentSongId }
+    }
+
+    // 【V8.21】歌曲规格懒显示（Spec 对象 → 分段着色）：FLAC · 24bit · 96kHz · 4609kbps
+    var songSpec by remember { mutableStateOf<com.sdw.music.player.core.audio.SongSpecReader.Spec?>(null) }
+    LaunchedEffect(currentSong?.id) {
+        val song = currentSong
+        songSpec = null
+        if (song != null) {
+            songSpec = withContext(Dispatchers.IO) {
+                com.sdw.music.player.core.audio.SongSpecReader.specFor(song)
+            }
+        }
+    }
 
     // Sleep timer countdown display (poll every second while active)
     var sleepTimerRemaining by remember { mutableLongStateOf(0L) }
@@ -238,6 +264,11 @@ fun PlayerScreen(
         val idx = LrcParser.findCurrentLineIndex(lyricsLines, positionMs)
         if (idx in lyricsLines.indices) lyricsLines[idx].text else null
     } else null
+    // 【V8.7】三行歌词：当前行索引（用于取上一行/下一行）
+    val currentLyricIdx = if (lyricsLines.isNotEmpty()) {
+        val idx = LrcParser.findCurrentLineIndex(lyricsLines, positionMs)
+        if (idx in lyricsLines.indices) idx else -1
+    } else -1
 
     // BackHandler: system back triggers navigate back
     BackHandler(onBack = onNavigateBack)
@@ -254,11 +285,20 @@ fun PlayerScreen(
 
     val screenWidthDp = LocalConfiguration.current.screenWidthDp
     val screenHeightDp = LocalConfiguration.current.screenHeightDp
-    val isCompact = screenWidthDp < 400
+    val aspectRatio = screenWidthDp.toFloat() / screenHeightDp.toFloat()
+    // 【V8.8】Moto Razr 折叠机外屏：方形比例（razr50: 413x409≈1.01, razr50U: 488x414≈1.18），
+    // 区别于普通手机竖屏(~0.5)/横屏(>1.6)/内屏展开(≈2.4)。此形态需走紧凑布局。
+    val isRazrOuter = Build.MANUFACTURER.lowercase().contains("motorola") &&
+            Build.MODEL.lowercase().contains("razr") &&
+            screenWidthDp >= 360 && aspectRatio in 0.85f..1.35f
+    val isCompact = screenWidthDp < 400 || isRazrOuter
     val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
-    val isFoldable = screenWidthDp >= 420 && (screenWidthDp.toFloat() / screenHeightDp.toFloat()) in 0.7f..1.4f
+    val isFoldable = !isRazrOuter && screenWidthDp >= 420 && aspectRatio in 0.7f..1.4f
 
-    val artSize = if (isFoldable && isLandscape) (screenHeightDp * 0.68f).dp.coerceAtMost(260.dp)
+    val artSize = if (isRazrOuter) {
+        // 方形外屏：封面取宽度的 42%，上限 170dp，保证底部控制条/进度/操作全可见
+        (screenWidthDp * 0.42f).dp.coerceAtMost(170.dp)
+    } else if (isFoldable && isLandscape) (screenHeightDp * 0.68f).dp.coerceAtMost(260.dp)
                   else if (isLandscape) (screenHeightDp * 0.55f).dp.coerceAtMost(220.dp)
                   else (screenWidthDp * 0.55f).dp.coerceAtMost(240.dp)
 
@@ -287,7 +327,24 @@ fun PlayerScreen(
     var eqEnabled by remember { mutableStateOf(false) }
     var eqPresetName by remember { mutableStateOf<String?>(null) }
     var msebActive by remember { mutableStateOf(false) }
+    // 【V8.19】DTS 环绕（M/S 声场）独立快捷开关状态
+    var dtsOn by remember { mutableStateOf(com.sdw.music.player.MsebCalculator.isDtsEnabled(context)) }
     var vuSessionId by remember { mutableIntStateOf(audioSessionId) }
+
+    /** 【V8.19】DTS 环绕快捷开关：开→应用声场/结像（无滑块设置时用内置默认环绕），关→旁路 */
+    fun toggleDts() {
+        val ctx = context
+        val newOn = !com.sdw.music.player.MsebCalculator.isDtsEnabled(ctx)
+        com.sdw.music.player.MsebCalculator.setDtsEnabled(ctx, newOn)
+        dtsOn = newOn
+        val svc = com.sdw.music.player.MusicService.instance
+        if (newOn) {
+            val (ss, img) = com.sdw.music.player.MsebCalculator.dtsStageParams(ctx)
+            svc?.applyMsStage(ss, img)
+        } else {
+            svc?.resetMsStage()
+        }
+    }
 
     val vuPrefs = remember { context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE) }
     var vuEnabled by remember { mutableStateOf(vuPrefs.getBoolean("vu_meter_enabled", true)) }
@@ -299,13 +356,19 @@ fun PlayerScreen(
                 val svc = com.sdw.music.player.MusicService.instance
                 // 【V7.200】MSEB active → show real-time tone summary instead of fixed "MSEB"
                 msebActive = com.sdw.music.player.MsebCalculator.isEnabled(context)
+                dtsOn = com.sdw.music.player.MsebCalculator.isDtsEnabled(context)
                 eqEnabled = svc?.isDspEqEnabled() == true || EqualizerManager.isEnabled() || msebActive
                 eqPresetName = when {
                     msebActive -> {
-                        val desc = com.sdw.music.player.MsebCalculator.describe(
-                            com.sdw.music.player.MsebCalculator.load(context))
-                        if (desc.startsWith("Flat") || desc == "Light touch") "MSEB"
-                        else "MSEB · " + desc.split(" · ").take(3).joinToString(" · ")
+                        // 【V8.20】优先显示应用中的预设名（Vocal Sweet / Bass Monster / 自定义…）
+                        val pn = com.sdw.music.player.MsebCalculator.getPresetName(context)
+                        if (pn.isNotEmpty()) pn
+                        else {
+                            val desc = com.sdw.music.player.MsebCalculator.describe(
+                                com.sdw.music.player.MsebCalculator.load(context))
+                            if (desc.startsWith("Flat") || desc == "Light touch") "MSEB"
+                            else "MSEB · " + desc.split(" · ").take(3).joinToString(" · ")
+                        }
                     }
                     eqEnabled -> EqualizerManager.getCurrentPresetName()
                     else -> null
@@ -567,6 +630,7 @@ fun PlayerScreen(
                 onDismissMenu = { showMenu = false },
                 onNavigateBack = onNavigateBack,
                 onDeleteSong = onDeleteSong,
+                onAddToPlaylist = { if (currentSong != null) showAddToPlaylist = true },
                 onPlay = onPlay,
                 onPause = onPause,
                 onPrevious = onPrevious,
@@ -583,7 +647,10 @@ fun PlayerScreen(
                 onSleepTimer = { showSleepDialog = true },
                 onNavigateToQueue = { showQueue = true },
                 onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
-                onNavigateToMseb = onNavigateToMseb
+                dtsOn = dtsOn,
+                onToggleDts = ::toggleDts,
+                onNavigateToMseb = onNavigateToMseb,
+                songSpec = songSpec
             )
         } else if (isLandscape) {
             LandscapeLayout(
@@ -611,6 +678,7 @@ fun PlayerScreen(
                 onDismissMenu = { showMenu = false },
                 onNavigateBack = onNavigateBack,
                 onDeleteSong = onDeleteSong,
+                onAddToPlaylist = { if (currentSong != null) showAddToPlaylist = true },
                 onPlay = onPlay,
                 onPause = onPause,
                 onPrevious = onPrevious,
@@ -627,7 +695,10 @@ fun PlayerScreen(
                 onSleepTimer = { showSleepDialog = true },
                 onNavigateToQueue = { showQueue = true },
                 onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
-                onNavigateToMseb = onNavigateToMseb
+                dtsOn = dtsOn,
+                onToggleDts = ::toggleDts,
+                onNavigateToMseb = onNavigateToMseb,
+                songSpec = songSpec
             )
         } else {
             PortraitLayout(
@@ -639,6 +710,7 @@ fun PlayerScreen(
                 rotation = rotation.value,
                 artSize = artSize,
                 isCompact = isCompact,
+                isRazrOuter = isRazrOuter,
                 progressFraction = progressFraction,
                 positionMs = positionMs,
                 durationMs = durationMs,
@@ -648,6 +720,8 @@ fun PlayerScreen(
                 bandLevels = bandLevelsState.value,
                 vuStyleIdx = vuStyleIdx,
                 currentLyricLine = currentLyricLine,
+                lyricsLines = lyricsLines,
+                currentLyricIdx = currentLyricIdx,
                 showMenu = showMenu,
                 portraitModifier = portraitModifier,
                 fadeOverlayUri = if (xfadeOverlayVisible && !xfadeOverlayStale) crossfadeNextArt else null,
@@ -657,6 +731,7 @@ fun PlayerScreen(
                 onDismissMenu = { showMenu = false },
                 onNavigateBack = onNavigateBack,
                 onDeleteSong = onDeleteSong,
+                onAddToPlaylist = { if (currentSong != null) showAddToPlaylist = true },
                 onPlay = onPlay,
                 onPause = onPause,
                 onPrevious = onPrevious,
@@ -673,7 +748,10 @@ fun PlayerScreen(
                 onSleepTimer = { showSleepDialog = true },
                 onNavigateToQueue = { showQueue = true },
                 onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
-                onNavigateToMseb = onNavigateToMseb
+                dtsOn = dtsOn,
+                onToggleDts = ::toggleDts,
+                onNavigateToMseb = onNavigateToMseb,
+                songSpec = songSpec
             )
         }
 
@@ -706,6 +784,14 @@ fun PlayerScreen(
                 accentColor = accentColor,
                 onSongClick = onPlayQueueIndex,
                 onDismiss = { showQueue = false }
+            )
+        }
+
+        // 【V8.7】右上角菜单 -> 添加到歌单
+        if (showAddToPlaylist && currentSong != null) {
+            AddToPlaylistSheet(
+                song = currentSong,
+                onDismiss = { showAddToPlaylist = false }
             )
         }
 
@@ -785,6 +871,7 @@ private fun FoldableLayout(coverUri: String?,
     onDismissMenu: () -> Unit,
     onNavigateBack: () -> Unit,
     onDeleteSong: () -> Unit,
+    onAddToPlaylist: () -> Unit = {},
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -801,7 +888,12 @@ private fun FoldableLayout(coverUri: String?,
     onSleepTimer: () -> Unit = {},
     onNavigateToQueue: () -> Unit = {},
     onNavigateToAudioDiagnostic: () -> Unit = {},
-    onNavigateToMseb: () -> Unit = {}
+    onNavigateToMseb: () -> Unit = {},
+    // 【V8.19】DTS 环绕快捷开关
+    dtsOn: Boolean = false,
+    onToggleDts: () -> Unit = {},
+    // 【V8.21】歌曲规格显示（分段着色）
+    songSpec: com.sdw.music.player.core.audio.SongSpecReader.Spec? = null
 ) {
     Row(
         modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)
@@ -817,6 +909,7 @@ private fun FoldableLayout(coverUri: String?,
                 onDismissMenu = onDismissMenu,
                 onNavigateBack = onNavigateBack,
                 onDelete = onDeleteSong,
+                onAddToPlaylist = onAddToPlaylist,
                 onSleepTimer = onSleepTimer,
                 onNavigateToQueue = onNavigateToQueue,
                 modifier = Modifier.padding(horizontal = 0.dp, vertical = 4.dp)
@@ -889,10 +982,18 @@ private fun FoldableLayout(coverUri: String?,
             }
 
             // Bottom: controls
-            PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
+            }
             Spacer(Modifier.height(4.dp))
             DacInfoBar(accentColor, textAccentColor, isPlaying,
                 onClick = onNavigateToAudioDiagnostic,
+                modifier = Modifier.align(Alignment.CenterHorizontally))
+            OutputDeviceBar(accentColor, textAccentColor, isPlaying,
                 modifier = Modifier.align(Alignment.CenterHorizontally))
             Spacer(Modifier.height(4.dp))
 
@@ -901,8 +1002,30 @@ private fun FoldableLayout(coverUri: String?,
                 onSeekTo = { onSeekTo((durationMs * it).toLong()) },
                 modifier = Modifier.padding(horizontal = 8.dp)
             )
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(2.dp))
+            // 【V8.21】歌曲规格（SongSpecLabel 分段着色）
+                SongSpecLabel(
+                    spec = songSpec,
+                    accentColor = accentColor,
+                    textAccentColor = textAccentColor,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                )
+                Spacer(Modifier.height(2.dp))
 
+                // 【V8.19】DTS 环绕快捷开关 — 播放条上方左侧
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    PlayerDtsToggle(
+                        dtsOn = dtsOn,
+                        accentColor = accentColor,
+                        textAccentColor = textAccentColor,
+                        onClick = onToggleDts,
+                        onNavigateToMseb = onNavigateToMseb
+                    )
+                }
+                Spacer(Modifier.height(2.dp))
             PlayerControlBar(
                 shuffleEnabled = state.shuffleEnabled,
                 repeatMode = state.repeatMode,
@@ -1004,6 +1127,7 @@ private fun LandscapeLayout(coverUri: String?,
     onDismissMenu: () -> Unit,
     onNavigateBack: () -> Unit,
     onDeleteSong: () -> Unit,
+    onAddToPlaylist: () -> Unit = {},
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -1020,7 +1144,12 @@ private fun LandscapeLayout(coverUri: String?,
     onSleepTimer: () -> Unit = {},
     onNavigateToQueue: () -> Unit = {},
     onNavigateToAudioDiagnostic: () -> Unit = {},
-    onNavigateToMseb: () -> Unit = {}
+    onNavigateToMseb: () -> Unit = {},
+    // 【V8.19】DTS 环绕快捷开关
+    dtsOn: Boolean = false,
+    onToggleDts: () -> Unit = {},
+    // 【V8.21】歌曲规格显示（分段着色）
+    songSpec: com.sdw.music.player.core.audio.SongSpecReader.Spec? = null
 ) {
     Row(
         modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.displayCutout)
@@ -1037,11 +1166,13 @@ private fun LandscapeLayout(coverUri: String?,
                 onDismissMenu = onDismissMenu,
                 onNavigateBack = onNavigateBack,
                 onDelete = onDeleteSong,
+                onAddToPlaylist = onAddToPlaylist,
                 onSleepTimer = onSleepTimer,
                 onNavigateToQueue = onNavigateToQueue
             )
 
-            // Scrollable content area
+            // 【V8.21 fix】滚动区只放信息（标题/歌词/VU/EQ/DAC/进度/规格/DTS），
+            // PlayerControlBar/PlayerBottomActions 移出滚动区固定底部 —— 横屏旋转后控制键不再被推出屏幕
             Column(
                 modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -1081,17 +1212,48 @@ private fun LandscapeLayout(coverUri: String?,
                 VuMeter(sub = bandLevels.sub, bass = bandLevels.bass, mid = bandLevels.mid, high = bandLevels.high, rms = bandLevels.rms, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, modifier = Modifier.padding(horizontal = 8.dp).heightIn(max = 50.dp))
                 Spacer(Modifier.height(6.dp))
             }
-            PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
+            }
             DacInfoBar(accentColor, textAccentColor, isPlaying,
                 onClick = onNavigateToAudioDiagnostic,
                 modifier = Modifier.align(Alignment.CenterHorizontally))
-            Spacer(Modifier.height(2.dp))
+            OutputDeviceBar(accentColor, textAccentColor, isPlaying,
+                modifier = Modifier.align(Alignment.CenterHorizontally))
+            Spacer(Modifier.height(4.dp))
+            } // close scrollable inner Column（信息区：标题/歌词/VU/EQ/DAC条/输出条）
+
+            // 【V8.21 fix】固定底部控制区：进度/规格/DTS/控制键/底部操作 旋转后始终可见
             PlayerProgress(
                 progressFraction, durationMs, positionMs, accentColor,
-                onSeekTo = { onSeekTo((durationMs * it).toLong()) }
+                onSeekTo = { onSeekTo((durationMs * it).toLong()) },
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp)
             )
-            Spacer(Modifier.height(8.dp))
-
+            Spacer(Modifier.height(2.dp))
+            SongSpecLabel(
+                spec = songSpec,
+                accentColor = accentColor,
+                textAccentColor = textAccentColor,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+            )
+            Spacer(Modifier.height(2.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.Center
+            ) {
+                PlayerDtsToggle(
+                    dtsOn = dtsOn,
+                    accentColor = accentColor,
+                    textAccentColor = textAccentColor,
+                    onClick = onToggleDts,
+                    onNavigateToMseb = onNavigateToMseb
+                )
+            }
+            Spacer(Modifier.height(2.dp))
             PlayerControlBar(
                 shuffleEnabled = state.shuffleEnabled,
                 repeatMode = state.repeatMode,
@@ -1103,10 +1265,10 @@ private fun LandscapeLayout(coverUri: String?,
                 onPause = onPause,
                 onNext = onNext,
                 onCycleRepeat = onCycleRepeat,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
                 playButtonSize = 52.dp
             )
-            Spacer(Modifier.height(4.dp))
+            Spacer(Modifier.height(2.dp))
 
             PlayerBottomActions(
                 eqEnabled = eqEnabled,
@@ -1119,7 +1281,6 @@ private fun LandscapeLayout(coverUri: String?,
             )
 
             MotorolaWatermark(accentColor = accentColor)
-            } // close scrollable inner Column
         } // close outer left Column
 
         // Right: album art — height capped by artSize, centered vertically
@@ -1154,6 +1315,7 @@ private fun PortraitLayout(coverUri: String?,
     rotation: Float,
     artSize: androidx.compose.ui.unit.Dp,
     isCompact: Boolean,
+    isRazrOuter: Boolean = false,
     progressFraction: Float,
     positionMs: Long,
     durationMs: Long,
@@ -1163,6 +1325,8 @@ private fun PortraitLayout(coverUri: String?,
     bandLevels: BandLevels,
     vuStyleIdx: Int,
     currentLyricLine: String?,
+    lyricsLines: List<LyricLine>,
+    currentLyricIdx: Int,
     showMenu: Boolean,
     portraitModifier: Modifier,
     // 【V8.4】Crossfade 封面交叉淡化透传
@@ -1174,6 +1338,7 @@ private fun PortraitLayout(coverUri: String?,
     onDismissMenu: () -> Unit,
     onNavigateBack: () -> Unit,
     onDeleteSong: () -> Unit,
+    onAddToPlaylist: () -> Unit = {},
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onPrevious: () -> Unit,
@@ -1190,10 +1355,15 @@ private fun PortraitLayout(coverUri: String?,
     onSleepTimer: () -> Unit = {},
     onNavigateToQueue: () -> Unit = {},
     onNavigateToAudioDiagnostic: () -> Unit = {},
-    onNavigateToMseb: () -> Unit = {}
+    onNavigateToMseb: () -> Unit = {},
+    // 【V8.19】DTS 环绕快捷开关
+    dtsOn: Boolean = false,
+    onToggleDts: () -> Unit = {},
+    // 【V8.21】歌曲规格显示（分段着色）
+    songSpec: com.sdw.music.player.core.audio.SongSpecReader.Spec? = null
 ) {
-    val hPadding = if (isCompact) 24.dp else 48.dp
-    val infoPadding = if (isCompact) 20.dp else 32.dp
+    val hPadding = if (isRazrOuter) 12.dp else if (isCompact) 24.dp else 48.dp
+    val infoPadding = if (isRazrOuter) 14.dp else if (isCompact) 20.dp else 32.dp
 
     Column(
         modifier = Modifier.fillMaxSize()
@@ -1224,6 +1394,11 @@ private fun PortraitLayout(coverUri: String?,
                         leadingIcon = { Icon(Icons.Default.Timer, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
                     )
                     DropdownMenuItem(
+                        text = { Text(stringResource(R.string.playlist_add_to)) },
+                        onClick = { onDismissMenu(); onAddToPlaylist() },
+                        leadingIcon = { Icon(Icons.Default.QueueMusic, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    )
+                    DropdownMenuItem(
                         text = { Text(stringResource(R.string.player_delete_song), color = Color.Red) },
                         onClick = { onDismissMenu(); onDeleteSong() },
                         leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color.Red) }
@@ -1250,8 +1425,10 @@ private fun PortraitLayout(coverUri: String?,
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text(
                         state.currentSongTitle.ifEmpty { stringResource(R.string.player_not_playing) },
-                        style = MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Normal),
-                        color = MaterialTheme.colorScheme.onBackground, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        style = if (isRazrOuter) MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Normal)
+                                else MaterialTheme.typography.headlineMedium.copy(fontWeight = FontWeight.Normal),
+                        color = MaterialTheme.colorScheme.onBackground, maxLines = if (isRazrOuter) 1 else 2,
+                        overflow = TextOverflow.Ellipsis,
                         textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth()
                     )
                     PlayerSongInfo(
@@ -1262,57 +1439,138 @@ private fun PortraitLayout(coverUri: String?,
                     )
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            PlayerInlineLyric(currentLyricLine, textAccentColor)
+            // 【V8.7】Analog 模式歌词保持原位置（封面上方单行）；Mixer 模式歌词移到封面下三行
+            if (vuStyleIdx == VuMeterStyle.ANALOG_NEEDLE.ordinal) {
+                Spacer(Modifier.height(14.dp))
+                PlayerInlineLyric(currentLyricLine, textAccentColor)
+            }
         }
 
         Spacer(Modifier.height(8.dp))
 
         // Album art — fixed position, does not move with lyrics
-        PlayerCoverArt(
-            artUri = coverUri,
-            songTitle = state.currentSongTitle,
-            songArtist = state.currentSongArtist,
-            accentColor = accentColor,
-            isPlaying = isPlaying,
-            rotation = rotation,
-            sizeDp = artSize,
-            glowSizeDp = artSize + 36.dp,
-            onClick = { onNavigateToAlbum(state.currentSongAlbum) },
-            onDoubleTap = { if (isPlaying) onPause() else onPlay() },
-            onSwipePrevious = onPrevious,
-            onSwipeNext = onNext,
-            fadeOverlayUri = fadeOverlayUri,
-            instantCoverSwitch = instantCoverSwitch,
-            fadeOverlayDurationMs = fadeOverlayDurationMs,
-            modifier = Modifier.fillMaxWidth().height(artSize + 36.dp)
-        )
+        // 【V8.8】Razr 方形外屏：封面占剩余空间（weight 弹性 + BoxWithConstraints 动态算大小），
+        // 底部控制/进度/操作固定可见，封面大小随剩余空间自适应，永不溢出。
+        if (isRazrOuter) {
+            Box(
+                modifier = Modifier.weight(1f).fillMaxWidth().padding(vertical = 4.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                BoxWithConstraints {
+                    val maxArt = minOf(maxWidth * 0.72f, maxHeight, 190.dp)
+                    PlayerCoverArt(
+                        artUri = coverUri,
+                        songTitle = state.currentSongTitle,
+                        songArtist = state.currentSongArtist,
+                        accentColor = accentColor,
+                        isPlaying = isPlaying,
+                        rotation = rotation,
+                        sizeDp = maxArt,
+                        glowSizeDp = maxArt + 24.dp,
+                        onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+                        onDoubleTap = { if (isPlaying) onPause() else onPlay() },
+                        onSwipePrevious = onPrevious,
+                        onSwipeNext = onNext,
+                        fadeOverlayUri = fadeOverlayUri,
+                        instantCoverSwitch = instantCoverSwitch,
+                        fadeOverlayDurationMs = fadeOverlayDurationMs,
+                        modifier = Modifier.size(maxArt + 24.dp)
+                    )
+                }
+            }
+        } else {
+            PlayerCoverArt(
+                artUri = coverUri,
+                songTitle = state.currentSongTitle,
+                songArtist = state.currentSongArtist,
+                accentColor = accentColor,
+                isPlaying = isPlaying,
+                rotation = rotation,
+                sizeDp = artSize,
+                glowSizeDp = artSize + 36.dp,
+                onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+                onDoubleTap = { if (isPlaying) onPause() else onPlay() },
+                onSwipePrevious = onPrevious,
+                onSwipeNext = onNext,
+                fadeOverlayUri = fadeOverlayUri,
+                instantCoverSwitch = instantCoverSwitch,
+                fadeOverlayDurationMs = fadeOverlayDurationMs,
+                modifier = Modifier.fillMaxWidth().height(artSize + 36.dp)
+            )
+        }
+
+        // 【V8.7】Mixer 模式：封面下、频谱表上，三行歌词（中间行高亮当前歌词）
+        // 【V8.8】Razr 方形外屏：不显示三行（空间不足），统一用顶部单行歌词
+        if (vuStyleIdx != VuMeterStyle.ANALOG_NEEDLE.ordinal && !isRazrOuter) {
+            Spacer(Modifier.height(10.dp))
+            InlineLyric3(
+                lyricsLines = lyricsLines,
+                currentIdx = currentLyricIdx,
+                highlight = true,
+                color = textAccentColor,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = infoPadding)
+            )
+        }
 
         Spacer(Modifier.weight(1f))
 
         // VU Meter
-        if (vuEnabled) {
+        if (vuEnabled && !isRazrOuter) {
                 VuMeter(sub = bandLevels.sub, bass = bandLevels.bass, mid = bandLevels.mid, high = bandLevels.high, rms = bandLevels.rms, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, modifier = Modifier.padding(horizontal = infoPadding))
             Spacer(Modifier.height(6.dp))
         }
 
         // EQ label
-        PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
-        Spacer(Modifier.height(8.dp))
+        if (!isRazrOuter) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb)
+            }
+            Spacer(Modifier.height(8.dp))
+        }
 
         // V3.3.4: DAC info capsule (visible only in USB DAC exclusive mode)
-        DacInfoBar(accentColor, textAccentColor, isPlaying,
-            onClick = onNavigateToAudioDiagnostic,
-            modifier = Modifier.align(Alignment.CenterHorizontally))
-        Spacer(Modifier.height(8.dp))
+        if (!isRazrOuter) {
+            DacInfoBar(accentColor, textAccentColor, isPlaying,
+                onClick = onNavigateToAudioDiagnostic,
+                modifier = Modifier.align(Alignment.CenterHorizontally))
+            OutputDeviceBar(accentColor, textAccentColor, isPlaying,
+                modifier = Modifier.align(Alignment.CenterHorizontally))
+            Spacer(Modifier.height(8.dp))
+        }
         // Progress
         PlayerProgress(
             progressFraction, durationMs, positionMs, accentColor,
             onSeekTo = { onSeekTo((durationMs * it).toLong()) },
             modifier = Modifier.padding(horizontal = infoPadding)
         )
-        Spacer(Modifier.height(16.dp))
+        Spacer(Modifier.height(6.dp))
+        // 【V8.21】歌曲规格（SongSpecLabel 分段着色）
+        SongSpecLabel(
+            spec = songSpec,
+            accentColor = accentColor,
+            textAccentColor = textAccentColor,
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+        )
+        Spacer(Modifier.height(2.dp))
 
+        // 【V8.19】DTS 环绕快捷开关 — 播放条上方左侧
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            PlayerDtsToggle(
+                dtsOn = dtsOn,
+                accentColor = accentColor,
+                textAccentColor = textAccentColor,
+                onClick = onToggleDts,
+                onNavigateToMseb = onNavigateToMseb
+            )
+        }
+        Spacer(Modifier.height(2.dp))
         // Controls
         PlayerControlBar(
             shuffleEnabled = state.shuffleEnabled,
@@ -1340,7 +1598,9 @@ private fun PortraitLayout(coverUri: String?,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = hPadding)
         )
 
-        MotorolaWatermark(accentColor = accentColor)
+        if (!isRazrOuter) {
+            MotorolaWatermark(accentColor = accentColor)
+        }
     }
 }
 
@@ -1363,13 +1623,6 @@ private fun MotorolaWatermark(accentColor: Color) {
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(
-            modifier = Modifier
-                .padding(horizontal = 64.dp)
-                .height(0.5.dp)
-                .fillMaxWidth()
-                .background(accentColor.copy(alpha = 0.2f))
-        )
         Spacer(Modifier.height(10.dp))
         Text(
             text = "Motorola $deviceName",

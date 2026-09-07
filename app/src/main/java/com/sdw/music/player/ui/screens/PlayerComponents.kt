@@ -15,6 +15,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -48,13 +50,18 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
@@ -65,6 +72,7 @@ import com.sdw.music.player.R
 import com.sdw.music.player.ui.animation.CoverPosition
 import com.sdw.music.player.ui.animation.SharedCoverState
 import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.AddToPlaylistSheet
 import com.sdw.music.player.ui.theme.*
 import kotlinx.coroutines.delay
 import kotlin.math.exp
@@ -81,6 +89,7 @@ fun PlayerTopBar(
     onDismissMenu: () -> Unit,
     onNavigateBack: () -> Unit,
     onDelete: () -> Unit,
+    onAddToPlaylist: () -> Unit = {},
     onSleepTimer: () -> Unit = {},
     onNavigateToQueue: () -> Unit = {},
     modifier: Modifier = Modifier
@@ -112,13 +121,19 @@ fun PlayerTopBar(
                         leadingIcon = { Icon(Icons.Default.Timer, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
                     )
                     DropdownMenuItem(
+                        text = { Text(stringResource(R.string.playlist_add_to)) },
+                        onClick = { onDismissMenu(); onAddToPlaylist() },
+                        leadingIcon = { Icon(Icons.Default.QueueMusic, null, tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    )
+                    DropdownMenuItem(
                         text = { Text(stringResource(R.string.player_delete_song), color = Color.Red) },
                         onClick = { onDismissMenu(); onDelete() },
                         leadingIcon = { Icon(Icons.Default.Delete, null, tint = Color.Red) }
                     )
-                }
+                                }
             }
         }
+
     }
 }
 
@@ -281,39 +296,18 @@ fun PlayerSongInfo(
         horizontalArrangement = Arrangement.Center,
         modifier = Modifier.padding(top = 4.dp).fillMaxWidth()
     ) {
-        if (artists.size <= 1) {
-            Text(
-                artists.firstOrNull()?.ifEmpty { " " } ?: " ",
-                style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
-                color = textAccentColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.clickable { onArtistClick(artists.firstOrNull().orEmpty()) }
-            )
-        } else {
-            FlowRow(
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-                verticalArrangement = Arrangement.spacedBy(2.dp)
-            ) {
-                for (i in artists.indices) {
-                    Text(
-                        artists[i],
-                        style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
-                        color = textAccentColor,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.clickable { onArtistClick(artists[i]) }
-                    )
-                    if (i < artists.lastIndex) {
-                        Text(
-                            "·",
-                            style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
-                            color = textAccentColor.copy(alpha = 0.5f)
-                        )
-                    }
-                }
-            }
-        }
+        // 【2026-09-02】固定单行：多歌手只显示前 3 个 + "…"，整体单个 Text 单行省略
+        // 之前多歌手走 FlowRow 换行 → 歌手多时撑成多行 → 下半部 (歌词/封面/VuMeter) 被移位
+        val displayArtists = if (artists.size <= 3) artists else artists.take(3) + listOf("…")
+        val artistText = displayArtists.joinToString(" · ")
+        Text(
+            artistText.ifEmpty { " " },
+            style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
+            color = textAccentColor,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.clickable { onArtistClick(artists.firstOrNull().orEmpty()) }
+        )
         if (format.isNotEmpty()) {
             Surface(
                 modifier = Modifier.padding(start = 8.dp),
@@ -546,38 +540,130 @@ fun PlayerEqLabel(
     onClick: (() -> Unit)? = null
 ) {
     if (eqPresetName != null) {
-        val shape = RoundedCornerShape(50)
-        Box(
-            modifier = Modifier.fillMaxWidth(),
-            contentAlignment = Alignment.Center
+        // 【V8.21】去边框/背景/指示灯 → 纯文字胶囊（与 DTS 一致，同排不杂乱）。
+        // 带笔形小图标表示可点击进入 MSEB 设置。
+        Row(
+            modifier = Modifier
+                .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+                .padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.Center
         ) {
-            // 纯描边胶囊：透明背景 + 细描边 + 指示灯圆点（HiFi 器材质感，不溢出）
-            Row(
-                modifier = Modifier
-                    .widthIn(max = 300.dp)
-                    .clip(shape)
-                    .border(BorderStroke(1.dp, accentColor.copy(alpha = 0.6f)), shape)
-                    .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-                    .padding(horizontal = 14.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.Center
-            ) {
-                // 指示灯圆点
-                Box(
-                    modifier = Modifier
-                        .size(6.dp)
-                        .clip(CircleShape)
-                        .background(accentColor)
-                )
-                Spacer(modifier = Modifier.width(7.dp))
-                Text(
-                    text = eqPresetName,
-                    style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
-                    color = textAccentColor,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+            Text(
+                text = eqPresetName,
+                style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
+                color = textAccentColor,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            if (onClick != null) {
+                Spacer(modifier = Modifier.width(2.dp))
+                Icon(
+                    Icons.Default.Settings,
+                    contentDescription = null,
+                    tint = textAccentColor.copy(alpha = 0.6f),
+                    modifier = Modifier.size(13.dp)
                 )
             }
+        }
+    }
+}
+
+/** 【V8.19】DTS 环绕（M/S 声场）快捷开关胶囊 — 独立于 MSEB 其他调音 */
+@Composable
+fun PlayerDtsToggle(
+    dtsOn: Boolean,
+    accentColor: Color,
+    textAccentColor: Color,
+    onClick: () -> Unit,
+    onNavigateToMseb: (() -> Unit)? = null
+) {
+    val shape = RoundedCornerShape(50)
+    Row(
+        modifier = Modifier
+            .widthIn(max = 300.dp)
+            .clip(shape)
+            .background(
+                if (dtsOn) accentColor.copy(alpha = 0.16f)
+                else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.08f)
+            )
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        // 【V8.20】去掉指示灯圆点（视觉更简洁）
+        Text(
+            text = stringResource(if (dtsOn) R.string.dts_on else R.string.dts_off),
+            style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
+            color = if (dtsOn) textAccentColor else MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        if (onNavigateToMseb != null) {
+            Spacer(modifier = Modifier.width(6.dp))
+            Icon(
+                Icons.Default.Settings,
+                contentDescription = null,
+                tint = if (dtsOn) textAccentColor.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                modifier = Modifier.size(14.dp).clickable(onClick = onNavigateToMseb)
+            )
+        }
+    }
+}
+
+/** 【V8.7】三行歌词：封面下、频谱表上。上一行/当前行(高亮)/下一行。 */
+@Composable
+fun InlineLyric3(
+    lyricsLines: List<com.sdw.music.player.LyricLine>,
+    currentIdx: Int,
+    highlight: Boolean,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    val curLine = lyricsLines.getOrNull(currentIdx)?.text
+    val nextLine = if (currentIdx >= 0 && currentIdx + 1 < lyricsLines.size) lyricsLines.getOrNull(currentIdx + 1)?.text else null
+    val noLyrics = curLine.isNullOrBlank() && nextLine.isNullOrBlank()
+
+    // 【V8.22】当前行自动折行最多2行+下一句1行：长句完整可读，固定 64dp 不跳动
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .height(64.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
+    ) {
+        // 当前行（高亮：accent 色 + 略大；长句自动折行，最多2行，超长省略）
+        if (!curLine.isNullOrBlank()) {
+            Text(
+                text = curLine,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = 17.sp,
+                    lineHeight = 22.sp,
+                    shadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 1f), blurRadius = 6f)
+                ),
+                color = if (highlight) color else color.copy(alpha = 0.75f),
+                textAlign = TextAlign.Center,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+            )
+        }
+        // 下一句（1行，超长省略）
+        if (!nextLine.isNullOrBlank()) {
+            Text(
+                text = nextLine,
+                style = MaterialTheme.typography.bodySmall.copy(
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    shadow = Shadow(color = Color.Black.copy(alpha = 0.6f), offset = Offset(0f, 1f), blurRadius = 4f)
+                ),
+                color = color.copy(alpha = 0.4f),
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp)
+            )
         }
     }
 }
@@ -589,26 +675,24 @@ fun PlayerInlineLyric(
     color: Color,
     modifier: Modifier = Modifier
 ) {
-    // Reserve fixed 2-line height so album cover doesn't jump when lyrics appear/disappear
-    val lineHeight = with(LocalDensity.current) { MaterialTheme.typography.bodyLarge.fontSize.value * 1.4f }
+    // 【V8.20】固定单行高度（约 1 行），超长省略号截断，杜绝歌词换行导致布局跳动
     Box(
-        modifier = modifier.fillMaxWidth().heightIn(min = (lineHeight * 2f).dp),
+        modifier = modifier.fillMaxWidth().height(28.dp),
         contentAlignment = Alignment.Center
     ) {
         if (!lyricLine.isNullOrBlank()) {
-            Text(
-                lyricLine,
-                style = MaterialTheme.typography.bodyLarge.copy(
+            MarqueeText(
+                text = lyricLine,
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
                     shadow = Shadow(
                         color = Color.Black.copy(alpha = 0.85f),
                         offset = Offset(0f, 1f),
                         blurRadius = 6f
                     )
                 ),
-                color = color,
-                maxLines = 2,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth()
+                color = color
             )
         }
     }
@@ -629,6 +713,106 @@ internal fun formatDurationPlayer(ms: Long): String {
 // V3.3.4: DAC info capsule bar - DAC model | 48kHz / 24bit | Hi-Res gold badge
 // Shown only in USB DAC exclusive mode (auto-hides when claim absent)
 // ============================================================================
+
+
+/** 【V8.21】跑马灯文本：单行不换行；文字超过可用宽度时，
+ *  静止约 1.2s 后缓慢左滚至句尾停住（直到文字变化重置），完整可读不截断。
+ *  不超长时静止居中；固定高度不影响布局。
+ */
+@Composable
+fun MarqueeText(
+    text: String,
+    style: androidx.compose.ui.text.TextStyle,
+    color: Color,
+    textAlign: TextAlign = TextAlign.Center,
+    modifier: Modifier = Modifier,
+    marqueeDurationMs: Int = 6000
+) {
+    var textW by remember { mutableStateOf(0) }
+    var viewW by remember { mutableStateOf(0) }
+    val overflow = viewW > 0 && textW > viewW
+    val dist = (textW - viewW + 24f).coerceAtLeast(1f)
+
+    val anim = remember(text) { Animatable(0f) }
+    LaunchedEffect(text, overflow, dist) {
+        if (overflow) {
+            delay(1200)
+            anim.animateTo(
+                targetValue = -dist,
+                animationSpec = tween(durationMillis = marqueeDurationMs, easing = LinearEasing)
+            )
+        }
+    }
+
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .onSizeChanged { viewW = it.width },
+        contentAlignment = if (overflow) Alignment.CenterStart else Alignment.Center
+    ) {
+        Text(
+            text = text,
+            style = style,
+            color = color,
+            textAlign = textAlign,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip,
+            onTextLayout = { result ->
+                if (result.hasVisualOverflow) {
+                    if (textW != result.size.width) textW = result.size.width
+                } else if (textW != 0) textW = 0
+            },
+            modifier = Modifier.graphicsLayer {
+                translationX = if (overflow) anim.value else 0f
+            }
+        )
+    }
+}
+
+
+/** 【V8.21】歌曲规格分段着色标签：FLAC · 24bit · 96kHz · 4609kbps
+ *  HiRes（≥24bit 或 ≥88.2kHz）：全段金色，格式加粗；
+ *  普通：格式名 accent 色，参数 onSurfaceVariant，HiRes 徽标感不另加框。
+ */
+@Composable
+fun SongSpecLabel(
+    spec: com.sdw.music.player.core.audio.SongSpecReader.Spec?,
+    accentColor: Color,
+    textAccentColor: Color,
+    modifier: Modifier = Modifier
+) {
+    if (spec == null) return
+    val gold = Color(0xFFFFD54F)
+    val hiRes = spec.isHiRes
+    val paramColor = if (hiRes) gold
+        else MaterialTheme.colorScheme.onSurfaceVariant
+    val fmtColor = if (hiRes) gold else textAccentColor
+    val sep = " · "
+    val annotated = buildAnnotatedString {
+        withStyle(SpanStyle(color = fmtColor, fontWeight = if (hiRes) FontWeight.Bold else FontWeight.Medium)) {
+            append(spec.format)
+        }
+        if (spec.bitDepth > 0) {
+            withStyle(SpanStyle(color = paramColor)) { append(sep + "${spec.bitDepth}bit") }
+        }
+        if (spec.sampleRate > 0) {
+            withStyle(SpanStyle(color = paramColor)) { append(sep + "${spec.sampleRate / 1000.0}kHz") }
+        }
+        if (spec.bitrate > 0) {
+            withStyle(SpanStyle(color = paramColor)) { append(sep + "${spec.bitrate}kbps") }
+        }
+    }
+    Text(
+        text = annotated,
+        style = MaterialTheme.typography.labelSmall.copy(fontSize = 11.sp),
+        textAlign = TextAlign.Center,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = modifier
+    )
+}
+
 @Composable
 fun DacInfoBar(
     accentColor: Color,
@@ -720,6 +904,70 @@ fun DacInfoBar(
 }
 
 @Composable
+fun OutputDeviceBar(
+    accentColor: Color,
+    textAccentColor: Color,
+    isPlaying: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    var btName by remember { mutableStateOf("") }
+    var btActive by remember { mutableStateOf(false) }
+
+    // 轮询蓝牙输出状态（无 DAC 时才显示，频率低不影响性能）
+    LaunchedEffect(Unit) {
+        while (true) {
+            // DAC 独占激活时蓝牙不可能同时输出，直接跳过
+            val dacClaimed = try {
+                com.sdw.music.player.core.audio.UsbDacManager.isClaimed()
+            } catch (_: Throwable) { false }
+            if (!dacClaimed) {
+                btActive = com.sdw.music.player.util.BluetoothOutput.isBluetoothActive(context)
+                if (btActive) {
+                    btName = com.sdw.music.player.util.BluetoothOutput.getActiveBluetoothName(context)
+                } else {
+                    btName = ""
+                }
+            } else {
+                btActive = false
+                btName = ""
+            }
+            android.util.Log.d("OutputDeviceBar", "dacClaimed=$dacClaimed btActive=$btActive btName='$btName'")
+            kotlinx.coroutines.delay(2000L)
+        }
+    }
+
+    // 无蓝牙输出 → 不显示
+    if (!btActive || btName.isEmpty()) return
+
+    val infinite = rememberInfiniteTransition(label = "btDot")
+    val pulse by infinite.animateFloat(
+        initialValue = 0.35f, targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "btDotA"
+    )
+    val dotAlpha = if (isPlaying) pulse else 1f
+
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(accentColor.copy(alpha = 0.08f))
+            .border(1.dp, accentColor.copy(alpha = 0.25f), RoundedCornerShape(50))
+            .padding(horizontal = 14.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(6.dp).background(textAccentColor.copy(alpha = dotAlpha), CircleShape))
+        Spacer(Modifier.width(7.dp))
+        Text(
+            btName,
+            fontSize = androidx.compose.ui.unit.TextUnit(11f, androidx.compose.ui.unit.TextUnitType.Sp),
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
+            color = textAccentColor, maxLines = 1, overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 130.dp)
+        )
+    }
+}
+
+@Composable
 private fun DacInfoDivider(color: Color) {
     Spacer(Modifier.width(9.dp))
     Box(Modifier.width(1.dp).height(10.dp).background(color.copy(alpha = 0.2f)))
@@ -730,7 +978,7 @@ private fun DacInfoDivider(color: Color) {
 // Queue Sheet - ModalBottomSheet showing the full play queue
 // ============================================================================
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun QueueSheet(
     queue: List<Song>,
@@ -740,8 +988,9 @@ fun QueueSheet(
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val bgColor = MaterialTheme.colorScheme.surface
+    var longPressSong by remember { mutableStateOf<com.sdw.music.player.Song?>(null) }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -808,10 +1057,13 @@ fun QueueSheet(
                             .background(
                                 if (isCurrent) accentColor.copy(alpha = 0.08f) else Color.Transparent
                             )
-                            .clickable {
-                                onSongClick(idx)
-                                onDismiss()
-                            }
+                                                        .combinedClickable(
+                                onClick = {
+                                    onSongClick(idx)
+                                    onDismiss()
+                                },
+                                onLongClick = { longPressSong = song }
+                            )
                             .padding(start = 0.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -898,4 +1150,12 @@ fun QueueSheet(
             }
         }
     }
+    // 【V8.7】长按添加歌单
+    longPressSong?.let { song ->
+        AddToPlaylistSheet(
+            song = song,
+            onDismiss = { longPressSong = null }
+        )
+    }
+
 }

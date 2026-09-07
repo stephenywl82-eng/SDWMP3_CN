@@ -8,6 +8,8 @@ import android.provider.Settings
 import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -31,6 +33,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import coil.compose.AsyncImage
 import com.sdw.music.player.R
+import com.sdw.music.player.ui.components.AddToPlaylistSheet
 import com.sdw.music.player.Song
 import com.sdw.music.player.core.audio.AudioCoverEmbedder
 import com.sdw.music.player.core.audio.CoverDownloader
@@ -43,7 +46,7 @@ import kotlinx.coroutines.withContext
  * 封面下载 & 嵌入工具页（整合自 CoverEmbed 独立应用）。
  * 列出无封面歌曲 → 单曲点嵌 / 一键批量嵌入。
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun CoverEmbedScreen(
     songs: List<Song>,
@@ -63,6 +66,7 @@ fun CoverEmbedScreen(
     }
 
     var showAll by remember { mutableStateOf(false) }
+    var longPressSong by remember { mutableStateOf<Song?>(null) }
     var embedding by remember { mutableStateOf<Set<Long>>(emptySet()) }
     var embedAllRunning by remember { mutableStateOf(false) }
     var progress by remember { mutableStateOf("") }
@@ -260,12 +264,13 @@ fun CoverEmbedScreen(
 
             LazyColumn(Modifier.fillMaxSize()) {
                 items(displayed, key = { it.id }) { song ->
-                    CoverEmbedRow(
+                                        CoverEmbedRow(
                         song = song,
                         isEmbedding = song.id in embedding,
                         onClick = {
                             scope.launch { embedSingle(song) }
-                        }
+                        },
+                        onLongClick = { longPressSong = song }
                     )
                 }
                 if (displayed.isEmpty() && !scanning) {
@@ -278,8 +283,16 @@ fun CoverEmbedScreen(
                         }
                     }
                 }
-            }
+                        }
         }
+    }
+
+    // 【V8.7】长按添加歌单
+    longPressSong?.let { song ->
+        AddToPlaylistSheet(
+            song = song,
+            onDismiss = { longPressSong = null }
+        )
     }
 }
 
@@ -295,17 +308,23 @@ private fun hasAlbumArt(context: android.content.Context, albumArtUri: String): 
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CoverEmbedRow(
     song: Song,
     isEmbedding: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {}
 ) {
     val context = LocalContext.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(enabled = !isEmbedding) { onClick() }
+                        .combinedClickable(
+                enabled = !isEmbedding,
+                onClick = { onClick() },
+                onLongClick = { if (!isEmbedding) onLongClick() }
+            )
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

@@ -100,6 +100,8 @@
 <string name="settings_crossfade">交叉淡化</string>
 <string name="settings_crossfade_on">开 · 曲目间自动无缝交叉淡化</string>
 <string name="settings_crossfade_duration">交叉淡化时长</string>
+<string name="settings_crossfade_smart_align">智能对齐</string>
+<string name="settings_crossfade_smart_align_sub">检测静音段，交叉过渡更自然</string>
 <string name="settings_crossfade_hint">仅适用于自动切歌</string>
 <string name="settings_vu_on">开 · 播放器实时VU表</string>
 <string name="settings_debug_log">调试日志面板</string>
@@ -183,6 +185,13 @@
 <string name="placeholder_new_playlist">新建歌单</string>
 <string name="picker_select_songs">选择要添加的歌曲</string>
 <string name="picker_already_in">已在歌单中</string>
+<string name="playlist_create_new">新建歌单</string>
+<string name="playlist_add_to">添加到歌单</string>
+<string name="playlist_added_to">已添加到 %1$s</string>
+<string name="playlist_already_in">已在 %1$s</string>
+<string name="playlist_in_playlist">在歌单中</string>
+<string name="playlist_name_hint">歌单名称</string>
+<string name="playlist_no_playlists">暂无歌单</string>
 <string name="picker_will_add">歌曲将被添加到该歌单。</string>
 <string name="quality_loaded_cache">已加载 %1$d 缓存</string>
 <string name="quality_scanning">扫描中...</string>
@@ -369,4 +378,22 @@
     <string name="cover_embed_all_result">完成 %1$d 首，失败 %2$d 首</string>
     <string name="cover_embed_need_storage">嵌入封面需要「所有文件访问」权限才能写入标签</string>
     <string name="cover_embed_grant">去授权</string>
+    <string name="playlist_sort_bpm">按BPM排序</string>
+    <string name="playlist_scan_bpm">扫描BPM</string>
+    <string name="settings_shuffle_bpm_match">随机播放匹配BPM</string>
+    <string name="settings_shuffle_bpm_match_sub">随机播放时优先选节奏相近的歌曲</string>
+    <string name="settings_scan_bpm">扫描BPM（全库）</string>
+    <string name="settings_scan_bpm_sub">为无标签歌曲检测节奏（后台，可退出）</string>
+    <string name="settings_shuffle_mode">随机播放模式</string>
+    <string name="settings_shuffle_mode_random">纯随机</string>
+    <string name="settings_shuffle_mode_bpm">BPM匹配</string>
+    <string name="settings_shuffle_mode_sub">BPM匹配优先选节奏相近的歌（±5），过渡更顺滑</string>
+    <string name="settings_force_rescan_hint">已缓存歌曲会被跳过；需要全部重测时：</string>
+    <string name="settings_force_rescan">强制重扫全部</string>
+    <string name="bpm_scan_done">BPM 扫描完成：检测到 %1$d 首</string>
+    <string name="bpm_scan_none">未发现新的 BPM</string>
+    <string name="settings_bt_pre">蓝牙预补偿</string>
+    <string name="settings_bt_pre_desc">Bluetooth A2DP 预补偿 · SBC/AAC 高频瞬态增强（LHDC/有线自动旁路）</string>
+    <string name="dts_on">DTS 环绕</string>
+    <string name="dts_off">DTS 环绕 · 关</string>
 </resources>

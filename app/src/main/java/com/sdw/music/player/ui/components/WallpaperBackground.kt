@@ -35,22 +35,28 @@ fun WallpaperBackground() {
     val brightness = WallpaperManager.wallpaperBrightness.value
     val context = LocalContext.current
 
-    // Palette 亮度分析：取壁纸主色，算感知亮度（0..1），回写 WallpaperManager
+    // 亮度分析：全图下采样逐像素平均感知亮度（0..1），回写 WallpaperManager。
+    // 【2026-09-04】原 palette vibrant swatch 会漏掉白色主体（白车身非"鲜艳色"被忽略、
+    // 误取暗色边缘），导致亮壁纸误判为暗、白字失效。全图平均更贴近真实观感。
     LaunchedEffect(path) {
         val b = withContext(Dispatchers.IO) {
             runCatching {
-                val opts = BitmapFactory.Options().apply { inSampleSize = 8 }
+                val opts = BitmapFactory.Options().apply { inSampleSize = 16 }
                 val bmp = BitmapFactory.decodeFile(path, opts) ?: return@runCatching 0.5f
-                val p = androidx.palette.graphics.Palette.from(bmp).generate()
-                val swatch = p.vibrantSwatch ?: p.lightVibrantSwatch
-                ?: p.dominantSwatch ?: p.mutedSwatch ?: p.lightMutedSwatch
-                val rgb = swatch?.rgb ?: return@runCatching 0.5f
+                var sum = 0.0
+                var count = 0
+                for (x in 0 until bmp.width step 2) {
+                    for (y in 0 until bmp.height step 2) {
+                        val rgb = bmp.getPixel(x, y)
+                        val r = ((rgb shr 16) and 0xFF) / 255f
+                        val g = ((rgb shr 8) and 0xFF) / 255f
+                        val bl = (rgb and 0xFF) / 255f
+                        sum += 0.299 * r + 0.587 * g + 0.114 * bl
+                        count++
+                    }
+                }
                 bmp.recycle()
-                // 感知亮度（Rec.601 luma），范围 0..1
-                val r = ((rgb shr 16) and 0xFF) / 255f
-                val g = ((rgb shr 8) and 0xFF) / 255f
-                val bl = (rgb and 0xFF) / 255f
-                0.299f * r + 0.587f * g + 0.114f * bl
+                if (count == 0) 0.5f else (sum / count).toFloat()
             }.getOrDefault(0.5f)
         }
         WallpaperManager.updateBrightness(b)

@@ -3,6 +3,7 @@ package com.sdw.music.player.ui.components
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
@@ -76,7 +77,10 @@ fun LyricViewCompose(
     showTranslation: Boolean = true,
     showProgressBar: Boolean = false,
     fontSize: Int = 28,
-    visibleLines: Int = 7
+    visibleLines: Int = 7,
+    fadeColor: ComposeColor = MaterialTheme.colorScheme.surface,
+    showTopFade: Boolean = true,
+    showBottomFade: Boolean = true
 ) {
     val highlightTextSize = fontSize.sp
     val normalTextSize = (fontSize - 6).coerceAtLeast(12).sp
@@ -113,14 +117,7 @@ fun LyricViewCompose(
     val displayIndex = floor(smoothScroll.value).toInt().coerceIn(0, lastIndex)
     val subPixel = smoothScroll.value - displayIndex
 
-    val centerScale = remember { Animatable(1f) }
-    LaunchedEffect(displayIndex) {
-        centerScale.snapTo(0.88f)
-        centerScale.animateTo(1f, tween(400))
-    }
-
-    // 渐隐遮罩颜色 = 背景色（surface）
-    val fadeColor = MaterialTheme.colorScheme.surface
+    // 渐隐遮罩颜色 = 背景色（默认 surface，全屏歌词传黑色与模糊背景融合）
 
     Box(modifier = modifier, contentAlignment = Alignment.Center) {
         Column(
@@ -181,7 +178,12 @@ fun LyricViewCompose(
 
                 val fontSizeSp = if (isCenter) highlightTextSize else normalTextSize
                 val fontWeight = if (isCenter) FontWeight.Normal else FontWeight.Normal
-                val textColor = if (isCenter) ComposeColor.White else ComposeColor(0xE0FFFFFF)
+                val targetColor = if (isCenter) ComposeColor.White else ComposeColor(0xA0FFFFFF)
+                val textColor by animateColorAsState(
+                    targetValue = targetColor,
+                    animationSpec = tween(500, easing = FastOutSlowInEasing),
+                    label = "lyricColor"
+                )
                 val shadow = if (isCenter) {
                     // 当前行 glow 改用主题/封面取色（accent），与播放界面呼应，替代原硬编码金色
                     Shadow(accent.copy(alpha = 0.85f), blurRadius = 22f)
@@ -203,8 +205,7 @@ fun LyricViewCompose(
                     .then(
                         if (isCenter) {
                             Modifier.graphicsLayer {
-                                scaleX = centerScale.value
-                                scaleY = centerScale.value
+                                alpha = 1f
                             }
                         } else {
                             Modifier
@@ -221,29 +222,33 @@ fun LyricViewCompose(
             }
         }
 
-        // 上下渐隐遮罩：让歌词在边缘自然淡出
-        Box(
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxWidth()
-                .height(56.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(fadeColor, fadeColor.copy(alpha = 0f))
+        // 上下渐隐遮罩：让歌词在边缘自然淡出（顶部渐隐可选，全屏歌词顶部有操作栏时禁用避免黑带）
+        if (showTopFade) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(fadeColor, fadeColor.copy(alpha = 0f))
+                        )
                     )
-                )
-        )
-        Box(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                .height(56.dp)
-                .background(
-                    Brush.verticalGradient(
-                        listOf(fadeColor.copy(alpha = 0f), fadeColor)
+            )
+        }
+        if (showBottomFade) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .height(40.dp)
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(fadeColor.copy(alpha = 0f), fadeColor.copy(alpha = 0.7f))
+                        )
                     )
-                )
-        )
+            )
+        }
 
         // 右侧进度条：显示当前行在整首歌的位置比例
         if (showProgressBar && lyrics.isNotEmpty()) {

@@ -1,4 +1,4 @@
-﻿import java.util.Properties
+import java.util.Properties
 
 plugins {
     id("com.android.application")
@@ -23,8 +23,8 @@ android {
         applicationId = "com.sdw.music.player.cn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 21
-        versionName = "8.6"
+        versionCode = 47
+        versionName = "8.32"
 
         ndk {
             abiFilters += listOf("arm64-v8a")

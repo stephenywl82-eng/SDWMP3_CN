@@ -68,6 +68,7 @@ import androidx.compose.ui.geometry.Size
 import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.Song
 import com.sdw.music.player.ui.theme.*
+import com.sdw.music.player.ui.theme.LocalWallpaperEffectiveLight
 import androidx.media3.common.Player
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInWindow
@@ -75,6 +76,9 @@ import kotlinx.coroutines.launch
 import androidx.compose.ui.platform.LocalContext
 
 import com.sdw.music.player.MusicService
+import com.sdw.music.player.WallpaperManager
+import com.sdw.music.player.ui.components.AddToPlaylistSheet
+import com.sdw.music.player.ui.components.BpmBadge
 
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -119,6 +123,7 @@ fun SongListScreen(
     durationMs: androidx.compose.runtime.State<Long>
 ) {
     var searchQuery by remember { mutableStateOf("") }
+    var longPressSong by remember { mutableStateOf<Song?>(null) }
     var isSearching by remember { mutableStateOf(false) }
     var filterMode by remember { mutableStateOf("all") }
     val activeColor = if (accentColor != 0L) Color(accentColor) else MaterialTheme.colorScheme.primary
@@ -278,6 +283,7 @@ fun SongListScreen(
                         detailPaneVisible = true
                         onSongClick(song)
                     },
+                    onLongClick = { song -> longPressSong = song },
                     scope = scope
                 )
             }
@@ -502,7 +508,7 @@ fun SongListScreen(
                                 isPlaying = currentPlayingSong?.id == song.id && isPlaying,
                                 accentColor = activeColor,
                                 onClick = { onSongClick(song) },
-                                onLongClick = { }
+                                onLongClick = { longPressSong = song }
                             )
                         }
                     }
@@ -559,8 +565,13 @@ fun SongListScreen(
                         fontWeight = if (isCurrent) androidx.compose.ui.text.font.FontWeight.Bold
                                      else androidx.compose.ui.text.font.FontWeight.Normal,
                         color = if (isCurrent) activeColor
-                                else if (hasGroup) MaterialTheme.colorScheme.onSurfaceVariant
-                                else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                                else if (hasGroup) {
+                                    when {
+                                        !WallpaperManager.hasWallpaper() -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        LocalWallpaperEffectiveLight.current -> Color.Black.copy(alpha = 0.78f)
+                                        else -> Color.White.copy(alpha = 0.9f)
+                                    }
+                                } else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
                         modifier = Modifier.clickable(enabled = hasGroup) {
                             groupFirstIndices[letter]?.let { idx ->
                                 scope.launch { listState.animateScrollToItem(idx) }
@@ -616,6 +627,14 @@ fun SongListScreen(
                 modifier = Modifier.padding(bottom = 24.dp)
             )
         }
+
+    // 【V8.7】长按添加歌单
+    longPressSong?.let { song ->
+        AddToPlaylistSheet(
+            song = song,
+            onDismiss = { longPressSong = null }
+        )
+    }
     }
 }
 }
@@ -639,6 +658,7 @@ private fun TabletSongListContent(
     isPlaying: Boolean,
     activeColor: Color,
     onSongClick: (Song) -> Unit,
+    onLongClick: (Song) -> Unit,
     scope: kotlinx.coroutines.CoroutineScope
 ) {
     Box(modifier = Modifier.fillMaxSize()) {
@@ -670,7 +690,7 @@ private fun TabletSongListContent(
                         isPlaying = currentPlayingSong?.id == song.id && isPlaying,
                         accentColor = activeColor,
                         onClick = { onSongClick(song) },
-                        onLongClick = { }
+                        onLongClick = { onLongClick(song) }
                     )
                 }
             }
@@ -693,10 +713,15 @@ private fun TabletSongListContent(
                     fontSize = if (isCurrent) 11.sp else 9.sp,
                     fontWeight = if (isCurrent) androidx.compose.ui.text.font.FontWeight.Bold
                                  else androidx.compose.ui.text.font.FontWeight.Normal,
-                    color = if (isCurrent) activeColor
-                            else if (hasGroup) MaterialTheme.colorScheme.onSurfaceVariant
-                            else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
-                    modifier = Modifier.clickable(enabled = hasGroup) {
+                        color = if (isCurrent) activeColor
+                                else if (hasGroup) {
+                                    when {
+                                        !WallpaperManager.hasWallpaper() -> MaterialTheme.colorScheme.onSurfaceVariant
+                                        LocalWallpaperEffectiveLight.current -> Color.Black.copy(alpha = 0.78f)
+                                        else -> Color.White.copy(alpha = 0.9f)
+                                    }
+                                } else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                        modifier = Modifier.clickable(enabled = hasGroup) {
                         groupFirstIndices[letter]?.let { idx ->
                             scope.launch { listState.animateScrollToItem(idx) }
                         }
@@ -705,6 +730,7 @@ private fun TabletSongListContent(
             }
         }
     }
+
 }
 
 private fun formatDuration(ms: Long): String {
@@ -731,8 +757,20 @@ private fun RowScope.SmartTile(
     isSelected: Boolean,
     onClick: () -> Unit
 ) {
-    val bgColor = if (isSelected) color.copy(alpha = 0.15f) else Color.Transparent
-    val contentColor = if (isSelected) color else MaterialTheme.colorScheme.onSurfaceVariant
+    // 【2026-09-04】壁纸模式自适应：亮壁纸深字/暗壁纸白字 + 玻璃底
+    val wpLight = LocalWallpaperEffectiveLight.current
+    val onWallpaper = WallpaperManager.hasWallpaper()
+    val bgColor = when {
+        isSelected -> color.copy(alpha = if (onWallpaper) 0.35f else 0.15f)
+        onWallpaper -> Color.Black.copy(alpha = 0.28f)
+        else -> Color.Transparent
+    }
+    val contentColor = when {
+        isSelected -> color
+        !onWallpaper -> MaterialTheme.colorScheme.onSurfaceVariant
+        wpLight -> Color.Black.copy(alpha = 0.78f)
+        else -> Color.White.copy(alpha = 0.85f)
+    }
     
     Surface(
         modifier = Modifier
@@ -777,8 +815,16 @@ fun SongItem(
     onLongClick: (Int) -> Unit
 ) {
     val context = LocalContext.current
+    // 【2026-09-04】壁纸模式自适应：亮壁纸→深字（配白描边），暗壁纸→白字
+    val wpLight = LocalWallpaperEffectiveLight.current
+    val onWallpaper = WallpaperManager.hasWallpaper()
     val textColor = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
-    val subColor = if (isPlaying) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f) else MaterialTheme.colorScheme.onSurfaceVariant
+    val subColor = when {
+        !onWallpaper && isPlaying -> MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
+        !onWallpaper -> MaterialTheme.colorScheme.onSurfaceVariant
+        wpLight -> Color.Black.copy(alpha = if (isPlaying) 0.9f else 0.72f)
+        else -> Color.White.copy(alpha = if (isPlaying) 0.92f else 0.78f)
+    }
     
     Row(
         modifier = Modifier
@@ -830,6 +876,10 @@ fun SongItem(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
+            if (song.bpm > 0) {
+                Spacer(Modifier.height(3.dp))
+                BpmBadge(song.bpm)
+            }
         }
         
         // Duration

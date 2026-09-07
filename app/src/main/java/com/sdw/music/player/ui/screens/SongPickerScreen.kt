@@ -5,8 +5,10 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -22,14 +24,24 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import coil.compose.AsyncImage
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
+import coil.request.ImageRequest
+import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.Song
 import com.sdw.music.player.R
 import com.sdw.music.player.SongRepository
 import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.AddToPlaylistSheet
+import com.sdw.music.player.util.PinyinUtils
 import com.sdw.music.player.ui.theme.*
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -55,23 +67,45 @@ fun SongPickerScreen(
     var selectedIds by remember { mutableStateOf(setOf<Long>()) }
 
     var showConfirm by remember { mutableStateOf(false) }
+    var longPressSong by remember { mutableStateOf<Song?>(null) }
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
 
 
 
     val filteredSongs = remember(allSongs, searchQuery) {
-
         if (searchQuery.isBlank()) allSongs
-
         else allSongs.filter {
-
             it.title.contains(searchQuery, ignoreCase = true) ||
-
             it.artist.contains(searchQuery, ignoreCase = true) ||
-
             it.album.contains(searchQuery, ignoreCase = true)
-
         }
+    }
 
+    // 【V8.7】A-Z 拼音首字母分组（中文歌名可跳转）；搜索激活时隐藏滑块
+    val showSidebar = searchQuery.isBlank() && filteredSongs.size > 20
+    val groupedItems = remember(filteredSongs) {
+        val byKey = linkedMapOf<String, MutableList<Song>>()
+        for (s in filteredSongs) {
+            val key = PinyinUtils.getInitial(s.title).toString().uppercase().ifEmpty { "#" }
+            byKey.getOrPut(key) { mutableListOf() }.add(s)
+        }
+        buildList {
+            for ((key, songs) in byKey) {
+                add(Pair(key, null as Song?))  // header marker
+                songs.forEach { add(Pair(key, it)) }
+            }
+        }
+    }
+    val listState = rememberLazyListState()
+    val headerIndices = remember(groupedItems) {
+        groupedItems.mapIndexedNotNull { i, (k, s) -> if (s == null) i to k else null }
+    }
+    val activeHeader = remember {
+        derivedStateOf {
+            val first = listState.firstVisibleItemIndex
+            headerIndices.lastOrNull { it.first <= first }?.second ?: headerIndices.firstOrNull()?.second ?: "#"
+        }
     }
 
 
@@ -138,7 +172,7 @@ fun SongPickerScreen(
 
     ) { padding ->
 
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
 
             // Search bar
 
@@ -208,21 +242,31 @@ fun SongPickerScreen(
 
             } else {
 
+                Box(modifier = Modifier.fillMaxSize()) {
                 LazyColumn(
-
                     modifier = Modifier.fillMaxSize(),
-
+                    state = listState,
                     contentPadding = PaddingValues(bottom = 16.dp)
-
                 ) {
-
                     item { Spacer(Modifier.height(4.dp)) }
-
-                    itemsIndexed(filteredSongs, key = { _, s -> s.id }) { _, song ->
-
-                        val isSelected = selectedIds.contains(song.id)
-
-                        val isAlreadyIn = existingSongIds.contains(song.id)
+                    groupedItems.forEach { (key, song) ->
+                        if (song == null) {
+                            item(key = "header_$key") {
+                                Text(
+                                    key,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.outlineVariant,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.background.copy(alpha = 0.9f))
+                                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                                )
+                            }
+                        } else {
+                        itemsIndexed(listOf(song), key = { _, s -> s.id }) { _, songNonNull ->
+                        val isSelected = selectedIds.contains(songNonNull.id)
+                        val isAlreadyIn = existingSongIds.contains(songNonNull.id)
 
 
 
@@ -241,20 +285,16 @@ fun SongPickerScreen(
                                         if (!isAlreadyIn) {
 
                                             selectedIds = if (isSelected) {
-
-                                                selectedIds - song.id
-
+                                            selectedIds - songNonNull.id
                                             } else {
-
-                                                selectedIds + song.id
-
+                                            selectedIds + songNonNull.id
                                             }
 
                                         }
 
                                     },
 
-                                    onLongClick = {}
+                                    onLongClick = { longPressSong = songNonNull }
 
                                 ),
 
@@ -341,63 +381,32 @@ fun SongPickerScreen(
                                 // Album art
 
                                 Box(
-
-                                    modifier = Modifier
-
-                                        .size(44.dp)
-
-                                        .clip(RoundedCornerShape(6.dp))
-
-                                        .background(MaterialTheme.colorScheme.surfaceVariant),
-
+                                    modifier = Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)),
                                     contentAlignment = Alignment.Center
-
                                 ) {
-
-                                    val imgPainter = rememberAsyncImagePainter(
-
-                                        model = song.albumArtUri,
-
-                                        contentScale = ContentScale.Crop
-
+                                    DefaultCoverImage(
+                                        songTitle = songNonNull.title,
+                                        songArtist = songNonNull.artist,
+                                        modifier = Modifier.fillMaxSize(),
+                                        shape = RoundedCornerShape(6.dp)
                                     )
-
-                                    val imgState = imgPainter.state
-
-                                    if (imgState is AsyncImagePainter.State.Loading ||
-
-                                        imgState is AsyncImagePainter.State.Error
-
-                                    ) {
-
-                                        DefaultCoverImage(
-
-                                            songTitle = song.title,
-
-                                            songArtist = song.artist,
-
-                                            modifier = Modifier.fillMaxSize(),
-
-                                            shape = RoundedCornerShape(6.dp)
-
-                                        )
-
-                                    } else {
-
-                                        Image(
-
-                                            painter = imgPainter,
-
-                                            contentDescription = null,
-
-                                            modifier = Modifier.fillMaxSize(),
-
-                                            contentScale = ContentScale.Crop
-
-                                        )
-
-                                    }
-
+                                    val painter = rememberAsyncImagePainter(
+                                        model = remember(songNonNull.albumArtUri) {
+                                            ImageRequest.Builder(context)
+                                                .data(songNonNull.albumArtUri)
+                                                .size(88, 88)
+                                                .allowHardware(false)
+                                                .crossfade(false)
+                                                .build()
+                                        },
+                                        contentScale = ContentScale.Crop
+                                    )
+                                    Image(
+                                        painter = painter,
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
                                 }
 
 
@@ -410,7 +419,7 @@ fun SongPickerScreen(
 
                                     Text(
 
-                                        song.title,
+                                        songNonNull.title,
 
                                         color = if (isAlreadyIn) MaterialTheme.colorScheme.outlineVariant else MaterialTheme.colorScheme.onBackground,
 
@@ -424,7 +433,7 @@ fun SongPickerScreen(
 
                                     Text(
 
-                                        "${song.artist.ifBlank { "Unknown Artist" }} • ${song.album.ifBlank { stringResource(R.string.unknown_album) }}",
+                                        "${songNonNull.artist.ifBlank { "Unknown Artist" }} • ${songNonNull.album.ifBlank { stringResource(R.string.unknown_album) }}",
 
                                         color = MaterialTheme.colorScheme.outlineVariant,
 
@@ -456,22 +465,68 @@ fun SongPickerScreen(
 
                                 }
 
-                            }
-
                         }
 
+                        }
                     }
 
+                }
+
+                }  // close forEach
+                }  // close LazyColumn
+
+                // 右侧 A-Z 滑块（Box overlay，与列表平级）
+                if (showSidebar) {
+                    val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ#"
+                    val sidebarHeight = alphabet.length * 22
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.CenterEnd)
+                            .padding(end = 4.dp)
+                            .width(24.dp)
+                            .height(sidebarHeight.dp)
+                            .pointerInput(headerIndices) {
+                                detectVerticalDragGestures(
+                                    onDragStart = { offset ->
+                                        val idx = (offset.y / size.height * alphabet.length).toInt()
+                                            .coerceIn(0, alphabet.length - 1)
+                                        headerIndices.firstOrNull { it.second == alphabet[idx].toString() }?.first?.let { pos ->
+                                            scope.launch { listState.scrollToItem(pos) }
+                                        }
+                                    },
+                                    onVerticalDrag = { change, _ ->
+                                        val y = change.position.y.coerceIn(0f, size.height.toFloat())
+                                        val idx = (y / size.height * alphabet.length).toInt()
+                                            .coerceIn(0, alphabet.length - 1)
+                                        headerIndices.firstOrNull { it.second == alphabet[idx].toString() }?.first?.let { pos ->
+                                            scope.launch { listState.scrollToItem(pos) }
+                                        }
+                                    }
+                                )
+                            },
+                        verticalArrangement = Arrangement.SpaceEvenly
+                    ) {
+                        alphabet.forEach { c ->
+                            Text(
+                                text = c.toString(),
+                                fontSize = if (activeHeader.value == c.toString()) 11.sp else 9.sp,
+                                fontWeight = if (activeHeader.value == c.toString()) FontWeight.Bold else FontWeight.Normal,
+                                color = if (activeHeader.value == c.toString()) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 2.dp)
+                            )
+                        }
+                    }
                 }
 
             }
 
         }
 
+
+
+
     }
-
-
-
     // Confirm dialog
 
     if (showConfirm) {
@@ -528,6 +583,13 @@ fun SongPickerScreen(
 
     }
 
+    // 【V8.7】长按添加歌单
+    longPressSong?.let { song ->
+        AddToPlaylistSheet(
+            song = song,
+            onDismiss = { longPressSong = null }
+        )
+    }
+
 }
-
-
+}

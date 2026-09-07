@@ -389,7 +389,11 @@ object EqualizerManager {
         // 【V8.3】DAC 独占模式：开关路由到 USB DAC 原生 DSP
         if (MusicService.instance?.isDacActive() == true) {
             UsbDacManager.setDspEnabled(enabled)
-            if (!enabled) UsbDacManager.resetDspEq5Band()
+            if (!enabled) {
+                UsbDacManager.resetDspEq5Band()
+                // DSP 关闭 → 耳机校准一并清除
+                clearAutoEq(context)
+            }
             saveSettings(context, enabled, getCurrentPresetId(context))
             _enabled.value = enabled
             Log.d(TAG, "DAC DSP enabled=$enabled")
@@ -401,7 +405,11 @@ object EqualizerManager {
             val oboe = MusicService.instance?.oboeDirectPlayer
             if (oboe != null) {
                 oboe.setDspEnabled(enabled)
-                if (!enabled) oboe.resetDspEq5Band()
+                if (!enabled) {
+                    oboe.resetDspEq5Band()
+                    // DSP 关闭 → 耳机校准一并清除
+                    clearAutoEq(context)
+                }
                 saveSettings(context, enabled, getCurrentPresetId(context))
                 _enabled.value = enabled
                 Log.d(TAG, "Oboe DSP enabled=$enabled")
@@ -413,6 +421,10 @@ object EqualizerManager {
             equalizer?.enabled = enabled
         } catch (e: Exception) {
             Log.e(TAG, "setEnabled failed: ${e.message}")
+        }
+        if (!enabled) {
+            // DSP 关闭 → 耳机校准一并清除
+            clearAutoEq(context)
         }
         saveSettings(context, enabled, getCurrentPresetId(context))
         _enabled.value = enabled

@@ -1,4 +1,4 @@
-﻿package com.sdw.music.player
+package com.sdw.music.player
 
 import android.content.Context
 import android.util.Log
@@ -66,7 +66,9 @@ class OboeDirectPlayer(private val context: Context) {
     private external fun nativeIsSharedMode(): Boolean
     // ---- Crossfade 双轨 native 方法 ----
     private external fun nativeOpenIncomingFd(fd: Int, offset: Long, length: Long): Boolean
-    private external fun nativeStartCrossfade(durationMs: Int): Boolean
+    private external fun nativeStartCrossfade(durationMs: Int, bStartMs: Int): Boolean
+    private external fun nativePreScanPath(fd: Int, length: Long, windowMs: Int, mode: Int, seekFromMs: Long): Int  // 【V8.9】双层预扫描：0=尾部(seekFromMs起) 1=开头前奏
+    private external fun nativeSeekIncomingMs(ms: Int): Boolean
     private external fun nativeStopIncoming()
     private external fun nativeIsActiveB(): Boolean
     private external fun nativeReleaseInactive()
@@ -142,6 +144,7 @@ class OboeDirectPlayer(private val context: Context) {
     private external fun nativeSetDitherEnabled(enabled: Boolean)
     private external fun nativeIsDitherEnabled(): Boolean
     private external fun nativeSetDcBlockEnabled(enabled: Boolean)
+    private external fun nativeSetBtPreEmphasis(enabled: Boolean, codecDb: Float)
     private external fun nativeIsDcBlockEnabled(): Boolean
 
     // 【V7.30】Brand Presets移植
@@ -170,7 +173,7 @@ class OboeDirectPlayer(private val context: Context) {
                 } else {
                     Log.w(TAG, "File does not exist: $filePath")
                 }
-            } catch (e: Exception) {
+            } catch (e: Throwable) {
                 Log.w(TAG, "FD open exception: ${e.message}, trying path")
             }
             
@@ -189,7 +192,7 @@ class OboeDirectPlayer(private val context: Context) {
                 onError?.invoke("Failed to open file")
             }
             return opened
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "Exception in open: ${e.message}")
             isPrepared = false
             onError?.invoke(e.message ?: "Unknown error")
@@ -215,7 +218,7 @@ class OboeDirectPlayer(private val context: Context) {
                 startCompletionMonitor()
             }
             return result
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "Exception in play: ${e.message}")
             onError?.invoke(e.message ?: "Play error")
             return false
@@ -231,7 +234,7 @@ class OboeDirectPlayer(private val context: Context) {
             nativePause()
             isPlaying = false
             onPlayStateChanged?.invoke(false)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "Exception in pause: ${e.message}")
         }
     }
@@ -249,7 +252,7 @@ class OboeDirectPlayer(private val context: Context) {
                 startCompletionMonitor()
             }
             return result
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "Exception in resume: ${e.message}")
             return false
         }
@@ -262,7 +265,7 @@ class OboeDirectPlayer(private val context: Context) {
         if (!isPrepared) return
         try {
             nativeSeekTo(positionMs * 1000) // ms → us
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "Exception in seekTo: ${e.message}")
         }
     }
@@ -277,12 +280,12 @@ class OboeDirectPlayer(private val context: Context) {
         monitorThread?.interrupt()
         try {
             monitorThread?.join(500)  // 等待最多 500ms
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
         monitorThread = null
         
         try {
             nativeStop()
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "Exception in stop: ${e.message}")
         }
         isPrepared = false
@@ -291,10 +294,10 @@ class OboeDirectPlayer(private val context: Context) {
         }
         currentFilePath = null
         // 【V7.21】Close FD
-        try { parcelFd?.close() } catch (_: Exception) {}
+        try { parcelFd?.close() } catch (_: Throwable) {}
         parcelFd = null
         // 【Crossfade】清理 incoming 轨 FD
-        try { incomingParcelFd?.close() } catch (_: Exception) {}
+        try { incomingParcelFd?.close() } catch (_: Throwable) {}
         incomingParcelFd = null
     }
 
@@ -308,41 +311,64 @@ class OboeDirectPlayer(private val context: Context) {
                 Log.w(TAG, "openIncoming: file not exist: $filePath")
                 return false
             }
-            try { incomingParcelFd?.close() } catch (_: Exception) {}
+            try { incomingParcelFd?.close() } catch (_: Throwable) {}
             incomingParcelFd = android.os.ParcelFileDescriptor.open(file, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
             val fd = incomingParcelFd!!.fd
             val length = file.length()
             val ok = nativeOpenIncomingFd(fd, 0L, length)
             if (!ok) {
-                try { incomingParcelFd?.close() } catch (_: Exception) {}
+                try { incomingParcelFd?.close() } catch (_: Throwable) {}
                 incomingParcelFd = null
             }
             Log.i(TAG, "openIncoming: $filePath -> $ok")
             return ok
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "openIncoming exception: ${e.message}")
             return false
         }
     }
 
-    /** 触发 A→B 交叉淡化（durationMs 毫秒）。incoming 必须已 open。 */
-    fun startCrossfade(durationMs: Int): Boolean = try { nativeStartCrossfade(durationMs) } catch (e: Exception) { Log.e(TAG, "startCrossfade: ${e.message}"); false }
+    /** 触发 A→B 交叉淡化（durationMs 毫秒）。incoming 必须已 open。bStartMs=B 轨起点(ms)，用于完成时进度条位置。 */
+    fun startCrossfade(durationMs: Int, bStartMs: Int = 0): Boolean = try { nativeStartCrossfade(durationMs, bStartMs) } catch (e: Throwable) { Log.e(TAG, "startCrossfade: ${e.message}"); false }
+
+    /** 【V8.9】双层预扫描：
+     *  mode=0：扫 path 尾部（从 seekFromMs 起），返回最长低能量段起点(ms)（A 轨用）
+     *  mode=1：扫 path 开头前奏，返回前奏静音段长度(ms)（B 轨用）
+     *  找不到返回 -1。 */
+    fun preScanPath(path: String, windowMs: Int = 100, mode: Int = 0, seekFromMs: Long = 0L): Int {
+        return try {
+            val file = java.io.File(path)
+            if (!file.exists()) { Log.w(TAG, "preScanPath: file not exist: $path"); -1 }
+            else {
+                val pfd = android.os.ParcelFileDescriptor.open(file, android.os.ParcelFileDescriptor.MODE_READ_ONLY)
+                try {
+                    val len = file.length()
+                    nativePreScanPath(pfd.fd, len, windowMs, mode, seekFromMs)
+                } finally {
+                    try { pfd.close() } catch (_: Throwable) {}
+                }
+            }
+        } catch (e: Throwable) { Log.e(TAG, "preScanPath: ${e.message}"); -1 }
+    }
+
+    /** 【V8.15】B 轨从副歌起点播：crossfade 前 seek 空闲槽到指定 ms。 */
+    fun seekIncoming(ms: Int): Boolean = try { nativeSeekIncomingMs(ms) } catch (e: Throwable) { Log.e(TAG, "seekIncoming: ${e.message}"); false }
 
     /** 停止并释放 incoming 轨。 */
-    fun stopIncoming() { try { nativeStopIncoming() } catch (_: Exception) {}; try { incomingParcelFd?.close() } catch (_: Exception) {}; incomingParcelFd = null }
+    fun stopIncoming() { try { nativeStopIncoming() } catch (_: Throwable) {}; try { incomingParcelFd?.close() } catch (_: Throwable) {}; incomingParcelFd = null }
 
     /** 当前 active 轨是否为 B。 */
-    fun isActiveB(): Boolean = try { nativeIsActiveB() } catch (_: Exception) { false }
+    fun isActiveB(): Boolean = try { nativeIsActiveB() } catch (_: Throwable) { false }
 
     /** 释放非活动轨（crossfade 完成后回收旧轨）。 */
-    fun releaseInactive() { try { nativeReleaseInactive() } catch (_: Exception) {}; try { incomingParcelFd?.close() } catch (_: Exception) {}; incomingParcelFd = null }
+    fun releaseInactive() { try { nativeReleaseInactive() } catch (_: Throwable) {}; try { incomingParcelFd?.close() } catch (_: Throwable) {}; incomingParcelFd = null }
 
     /**
      * Get current playback position in milliseconds.
      */
     fun getCurrentPositionMs(): Long {
         if (!isPrepared) return 0
-        return try { nativeGetPositionMs() } catch (_: Exception) { 0 }
+        return try { nativeGetPositionMs() } catch (_: Throwable) { 0 }
     }
 
     /**
@@ -350,7 +376,7 @@ class OboeDirectPlayer(private val context: Context) {
      */
     fun getDurationMs(): Long {
         if (!isPrepared) return 0
-        return try { nativeGetDurationMs() } catch (_: Exception) { 0 }
+        return try { nativeGetDurationMs() } catch (_: Throwable) { 0 }
     }
 
     // ---- Completion monitor ----
@@ -382,19 +408,19 @@ class OboeDirectPlayer(private val context: Context) {
                         onPlayStateChanged?.invoke(false)
                         onCompletion?.invoke()
                     }
-                } catch (_: Exception) {}
+                } catch (_: Throwable) {}
             }
         }.apply { isDaemon = true; start() }
     }
 
     // ---- Diagnostics ----
 
-    fun getSampleRate(): Int = if (isPrepared) try { nativeGetSampleRate() } catch (_: Exception) { 0 } else 0
-    fun getChannelCount(): Int = if (isPrepared) try { nativeGetChannelCount() } catch (_: Exception) { 0 } else 0
-    fun isExclusiveMode(): Boolean = if (isPrepared) try { nativeIsExclusive() } catch (_: Exception) { false } else false
+    fun getSampleRate(): Int = if (isPrepared) try { nativeGetSampleRate() } catch (_: Throwable) { 0 } else 0
+    fun getChannelCount(): Int = if (isPrepared) try { nativeGetChannelCount() } catch (_: Throwable) { 0 } else 0
+    fun isExclusiveMode(): Boolean = if (isPrepared) try { nativeIsExclusive() } catch (_: Throwable) { false } else false
 
     /** Get current sharing mode: true = Shared, false = Exclusive */
-    fun isSharedMode(): Boolean = try { nativeIsSharedMode() } catch (_: Exception) { false }
+    fun isSharedMode(): Boolean = try { nativeIsSharedMode() } catch (_: Throwable) { false }
 
     // ---- DSP EQ API ----
 
@@ -419,7 +445,7 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeSetDspEq(enabled, highShelfFreq, highShelfDb, highShelfQ,
                             peakingFreq, peakingDb, peakingQ, preGainDb)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "DSP EQ error: ${e.message}")
         }
     }
@@ -428,14 +454,14 @@ class OboeDirectPlayer(private val context: Context) {
     fun resetDspEq() {
         try {
             nativeResetDspEq()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【v6.29】独立 DSP On关
     fun setDspEnabled(enabled: Boolean) {
         try {
             nativeSetDspEnabled(enabled)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setDspEnabled error: ${e.message}")
         }
     }
@@ -443,7 +469,7 @@ class OboeDirectPlayer(private val context: Context) {
     fun isDspEnabled(): Boolean {
         return try {
             nativeIsDspEnabled()
-        } catch (_: Exception) {
+        } catch (_: Throwable) {
             false
         }
     }
@@ -464,7 +490,7 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeSetSampleRateNative(nativeSampleRate)
             Log.i(TAG, "Native sample rate set: $nativeSampleRate Hz")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setSampleRateNative error: ${e.message}")
         }
     }
@@ -474,14 +500,14 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeSetOutputDeviceId(deviceId)
             Log.i(TAG, "Output device set: $deviceId")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setOutputDevice error: ${e.message}")
         }
     }
 
     /** 获取已Settings的原生采样率 */
     fun getSampleRateNative(): Int {
-        return try { nativeGetSampleRateNative() } catch (_: Exception) { 0 }
+        return try { nativeGetSampleRateNative() } catch (_: Throwable) { 0 }
     }
 
     // ============================================================================
@@ -493,69 +519,69 @@ class OboeDirectPlayer(private val context: Context) {
      * 解读：> 5% = 增益过高，0.1%~5% = 刚好，< 0.1% = 保护过度
      */
     fun getClipRatio(): Float {
-        return try { nativeGetClipRatio() } catch (_: Exception) { 0f }
+        return try { nativeGetClipRatio() } catch (_: Throwable) { 0f }
     }
 
     fun getClipCount(): Int {
-        return try { nativeGetClipCount() } catch (_: Exception) { 0 }
+        return try { nativeGetClipCount() } catch (_: Throwable) { 0 }
     }
 
     fun getTotalSampleCount(): Float {
-        return try { nativeGetTotalSamples() } catch (_: Exception) { 0f }
+        return try { nativeGetTotalSamples() } catch (_: Throwable) { 0f }
     }
 
     /** 实时 RMS 振幅（0~1），Oboe 回调计算，用于节拍可视化 */
     fun getRmsLevel(): Float {
-        return try { nativeGetRmsLevel() } catch (_: Exception) { 0f }
+        return try { nativeGetRmsLevel() } catch (_: Throwable) { 0f }
     }
 
     /** 实时频谱分频能量（0~1），Oboe 回调双二阶滤波计算 */
-    fun getBandSub(): Float = try { nativeGetBandSub() } catch (_: Exception) { 0f }
-    fun getBandBass(): Float = try { nativeGetBandBass() } catch (_: Exception) { 0f }
-    fun getBandMid(): Float = try { nativeGetBandMid() } catch (_: Exception) { 0f }
-    fun getBandHigh(): Float = try { nativeGetBandHigh() } catch (_: Exception) { 0f }
+    fun getBandSub(): Float = try { nativeGetBandSub() } catch (_: Throwable) { 0f }
+    fun getBandBass(): Float = try { nativeGetBandBass() } catch (_: Throwable) { 0f }
+    fun getBandMid(): Float = try { nativeGetBandMid() } catch (_: Throwable) { 0f }
+    fun getBandHigh(): Float = try { nativeGetBandHigh() } catch (_: Throwable) { 0f }
     // 8-band raw FFT
-    fun getBand0(): Float = try { nativeGetBand0() } catch (_: Exception) { 0f }
-    fun getBand1(): Float = try { nativeGetBand1() } catch (_: Exception) { 0f }
-    fun getBand2(): Float = try { nativeGetBand2() } catch (_: Exception) { 0f }
-    fun getBand3(): Float = try { nativeGetBand3() } catch (_: Exception) { 0f }
-    fun getBand4(): Float = try { nativeGetBand4() } catch (_: Exception) { 0f }
-    fun getBand5(): Float = try { nativeGetBand5() } catch (_: Exception) { 0f }
-    fun getBand6(): Float = try { nativeGetBand6() } catch (_: Exception) { 0f }
-    fun getBand7(): Float = try { nativeGetBand7() } catch (_: Exception) { 0f }
+    fun getBand0(): Float = try { nativeGetBand0() } catch (_: Throwable) { 0f }
+    fun getBand1(): Float = try { nativeGetBand1() } catch (_: Throwable) { 0f }
+    fun getBand2(): Float = try { nativeGetBand2() } catch (_: Throwable) { 0f }
+    fun getBand3(): Float = try { nativeGetBand3() } catch (_: Throwable) { 0f }
+    fun getBand4(): Float = try { nativeGetBand4() } catch (_: Throwable) { 0f }
+    fun getBand5(): Float = try { nativeGetBand5() } catch (_: Throwable) { 0f }
+    fun getBand6(): Float = try { nativeGetBand6() } catch (_: Throwable) { 0f }
+    fun getBand7(): Float = try { nativeGetBand7() } catch (_: Throwable) { 0f }
     /** All 8 bands as FloatArray for FFT display */
     fun getBands8(): FloatArray = try {
         floatArrayOf(nativeGetBand0(), nativeGetBand1(), nativeGetBand2(), nativeGetBand3(),
                      nativeGetBand4(), nativeGetBand5(), nativeGetBand6(), nativeGetBand7())
-    } catch (_: Exception) { FloatArray(8) }
+    } catch (_: Throwable) { FloatArray(8) }
 
     /** 重置峰值统计（切歌时调用） */
     fun resetClipStats() {
-        try { nativeResetClipStats() } catch (_: Exception) {}
+        try { nativeResetClipStats() } catch (_: Throwable) {}
     }
 
     /** 【V7.08】静音测试：强制输出静音（验证音频路径） */
     fun setSilenceTest(enabled: Boolean) {
-        try { nativeSetSilenceTest(enabled) } catch (_: Exception) {}
+        try { nativeSetSilenceTest(enabled) } catch (_: Throwable) {}
     }
 
     /** 【V7.09】正弦波自检：播放 440Hz 测试音验证 Oboe 是否工作 */
     fun setSineTest(enabled: Boolean) {
-        try { nativeSetSineTest(enabled) } catch (_: Exception) {}
+        try { nativeSetSineTest(enabled) } catch (_: Throwable) {}
     }
 
     /** 【V7.24】正弦测试是否运行中 */
     fun isSineTestRunning(): Boolean {
-        return try { nativeIsSineTestRunning() } catch (_: Exception) { false }
+        return try { nativeIsSineTestRunning() } catch (_: Throwable) { false }
     }
 
     /** 【V7.08】DSP Close时累计的采样数（>0 = Oboe 在工作但 DSP Close） */
     fun getDspDisabledSampleCount(): Long {
-        return try { nativeGetDspDisabledSamples() } catch (_: Exception) { 0L }
+        return try { nativeGetDspDisabledSamples() } catch (_: Throwable) { 0L }
     }
 
     fun getClipDebugInfo(): String {
-        val callbacks = try { nativeGetCallbackCount() } catch (_: Exception) { 0L }
+        val callbacks = try { nativeGetCallbackCount() } catch (_: Throwable) { 0L }
         val ratio = getClipRatio()
         val count = getClipCount()
         val total = getTotalSampleCount().toLong()
@@ -587,7 +613,7 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeSetDspEq5Band(gainsDb, freqsHz)
             Log.i(TAG, "DSP 5-band EQ preset applied")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setDspEq5Band error: ${e.message}")
         }
     }
@@ -597,14 +623,14 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeResetDspEq5Band()
             Log.i(TAG, "DSP 5-band EQ preset cleared")
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V7.200】MSEB activation guard — C++ will refuse to overwrite 5-band EQ when MSEB is active
     fun setMsebActive(active: Boolean) {
         try {
             nativeSetMsebActive(active)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V8.2】MSEB 10-band subjective EQ（11 主观维度 → 10 biquads，crossfade 无感切换）
@@ -612,7 +638,7 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeSetMseb10Band(gainsDb, freqsHz, qValues)
             Log.i(TAG, "MSEB 10-band applied")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setMseb10Band error: ${e.message}")
         }
     }
@@ -620,72 +646,72 @@ class OboeDirectPlayer(private val context: Context) {
     fun resetMseb10Band() {
         try {
             nativeResetMseb10Band()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V8.3】M/S 声场（跨声道矩阵）
     fun setMsStage(soundstage: Float, imaging: Float) {
         try {
             nativeSetMsStage(soundstage, imaging)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun resetMsStage() {
         try {
             nativeResetMsStage()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V8.3】瞬态整形（impulseResponse 维度映射，-1..+1）
     fun setTransient(amount: Float) {
         try {
             nativeSetTransient(amount)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun resetTransient() {
         try {
             nativeResetTransient()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V8.3】动态压缩（Master Bus Compressor，独立全局模块）
     fun setCompressorEnabled(enabled: Boolean) {
         try {
             nativeSetCompressorEnabled(enabled)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun setCompressorParams(thresholdDb: Float, ratio: Float, attackMs: Float, releaseMs: Float, makeupDb: Float) {
         try {
             nativeSetCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V8.3】等响补偿（ISO 226）
     fun setLoudnessEnabled(enabled: Boolean) {
         try {
             nativeSetLoudnessEnabled(enabled)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun setLoudnessIntensity(intensity: Float) {
         try {
             nativeSetLoudnessIntensity(intensity)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V8.3】Crossfeed（消除头中效应，仅 Oboe，amount 0~1）
     fun setCrossfeed(amount: Float) {
         try {
             nativeSetCrossfeed(amount)
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     fun resetCrossfeed() {
         try {
             nativeResetCrossfeed()
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V7.86】AutoEQ 10-band — On源 AutoEQ 项目风格耳机修正
@@ -701,7 +727,7 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeSetAutoEq10Band(gainsDb, freqsHz, qValues, filterTypes, preampDb)
             Log.i(TAG, "AutoEQ 10-band applied: preamp=${preampDb}dB")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setAutoEq10Band error: ${e.message}")
         }
     }
@@ -711,7 +737,7 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeResetAutoEq()
             Log.i(TAG, "AutoEQ cleared, default DSP restored")
-        } catch (_: Exception) {}
+        } catch (_: Throwable) {}
     }
 
     // 【V7.05】夜间模式 — softClip 阈值降低，声音温润厚实
@@ -719,13 +745,13 @@ class OboeDirectPlayer(private val context: Context) {
         try {
             nativeSetNightMode(enabled)
             Log.i(TAG, "Night mode: $enabled")
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setNightMode error: ${e.message}")
         }
     }
 
     fun isNightMode(): Boolean {
-        return try { nativeIsNightMode() } catch (_: Exception) { false }
+        return try { nativeIsNightMode() } catch (_: Throwable) { false }
     }
 
     fun toggleNightMode() {
@@ -736,26 +762,35 @@ class OboeDirectPlayer(private val context: Context) {
     fun setDitherEnabled(enabled: Boolean) {
         try {
             nativeSetDitherEnabled(enabled)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setDitherEnabled error: ${e.message}")
         }
     }
 
     fun isDitherEnabled(): Boolean {
-        return try { nativeIsDitherEnabled() } catch (_: Exception) { true }
+        return try { nativeIsDitherEnabled() } catch (_: Throwable) { true }
     }
 
     // 【V7.05】DC Blocker On关
     fun setDcBlockEnabled(enabled: Boolean) {
         try {
             nativeSetDcBlockEnabled(enabled)
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             Log.e(TAG, "setDcBlockEnabled error: ${e.message}")
         }
     }
 
     fun isDcBlockEnabled(): Boolean {
-        return try { nativeIsDcBlockEnabled() } catch (_: Exception) { true }
+        return try { nativeIsDcBlockEnabled() } catch (_: Throwable) { true }
+    }
+
+    // 【2026-09-07】A2DP 编码前预补偿（蓝牙 SBC/AAC 高频瞬态补偿）
+    fun setBtPreEmphasis(enabled: Boolean, codecDb: Float) {
+        try {
+            nativeSetBtPreEmphasis(enabled, codecDb)
+        } catch (e: Throwable) {
+            Log.e(TAG, "setBtPreEmphasis error: ${e.message}")
+        }
     }
 
     // ============================================================================
@@ -769,12 +804,12 @@ class OboeDirectPlayer(private val context: Context) {
 
     /** 获取 Oboe 回调计数（>0 表示 Oboe 正在工作） */
     fun getCallbackCount(): Long {
-        return try { nativeGetCallbackCount() } catch (_: Exception) { 0L }
+        return try { nativeGetCallbackCount() } catch (_: Throwable) { 0L }
     }
 
     /** 重置回调计数 */
     fun resetCallbackCount() {
-        try { nativeResetCallbackCount() } catch (_: Exception) {}
+        try { nativeResetCallbackCount() } catch (_: Throwable) {}
     }
 
     /** 【V7.10】完整诊断信息 */
@@ -825,7 +860,7 @@ class OboeDirectPlayer(private val context: Context) {
             appendLine("  文件: ${fileRate}Hz | 流: ${streamRate}Hz")
             appendLine("  声道: ${getChannelCount()}")
             // 【V7.27】速率诊断
-            try { nativeGetSpeedDiag()?.let { appendLine("  ⏱ 速率诊断: $it") } } catch (_: Exception) {}
+            try { nativeGetSpeedDiag()?.let { appendLine("  ⏱ 速率诊断: $it") } } catch (_: Throwable) {}
             if (fileRate != streamRate) {
                 appendLine("  ⚠️ 文件/流采样率不匹配！可能加速")
             }
@@ -845,51 +880,51 @@ class OboeDirectPlayer(private val context: Context) {
 
     /** 获取流采样率 */
     fun getStreamSampleRate(): Int {
-        return try { nativeGetStreamSampleRate() } catch (_: Exception) { 0 }
+        return try { nativeGetStreamSampleRate() } catch (_: Throwable) { 0 }
     }
 
     /** 获取流错误码 */
     fun getStreamError(): Int {
-        return try { nativeGetStreamError() } catch (_: Exception) { 0 }
+        return try { nativeGetStreamError() } catch (_: Throwable) { 0 }
     }
 
     /** 解码器线程是否运行 */
     fun isDecoderThreadRunning(): Boolean {
-        return try { nativeIsDecoderThreadRunning() } catch (_: Exception) { false }
+        return try { nativeIsDecoderThreadRunning() } catch (_: Throwable) { false }
     }
 
     /** 解码器输出帧数 */
     fun getDecoderFramesOutput(): Int {
-        return try { nativeGetDecoderFramesOutput() } catch (_: Exception) { 0 }
+        return try { nativeGetDecoderFramesOutput() } catch (_: Throwable) { 0 }
     }
 
     /** Ring buffer 填充量 */
     fun getRingBufferFill(): Int {
-        return try { nativeGetRingBufferFill() } catch (_: Exception) { 0 }
+        return try { nativeGetRingBufferFill() } catch (_: Throwable) { 0 }
     }
 
     /** 解码器是否输出 float */
     fun isDecoderFloat(): Boolean {
-        return try { nativeIsDecoderFloat() } catch (_: Exception) { false }
+        return try { nativeIsDecoderFloat() } catch (_: Throwable) { false }
     }
 
     /** nativeOpen 执行步骤 */
     fun getOpenStep(): Int {
-        return try { nativeGetOpenStep() } catch (_: Exception) { 0 }
+        return try { nativeGetOpenStep() } catch (_: Throwable) { 0 }
     }
 
     /** nativeOpen 错误码 */
     fun getOpenErrorCode(): Int {
-        return try { nativeGetOpenErrorCode() } catch (_: Exception) { 0 }
+        return try { nativeGetOpenErrorCode() } catch (_: Throwable) { 0 }
     }
 
     /** 【V7.39】RingBuffer underrun 次数 */
     fun getUnderrunCount(): Long {
-        return try { nativeGetUnderrunCount() } catch (_: Exception) { 0L }
+        return try { nativeGetUnderrunCount() } catch (_: Throwable) { 0L }
     }
 
     fun resetUnderrunCount() {
-        try { nativeResetUnderrunCount() } catch (_: Exception) {}
+        try { nativeResetUnderrunCount() } catch (_: Throwable) {}
     }
 
     private external fun nativeGetUnderrunCount(): Long

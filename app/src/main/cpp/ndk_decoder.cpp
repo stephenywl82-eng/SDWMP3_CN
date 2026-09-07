@@ -39,7 +39,41 @@ bool NDKDecoder::open(const char* filePath) {
         return false;
     }
 
+    return setupTracksAndCodec();
+}
+
+bool NDKDecoder::openFd(int fd, int64_t offset, int64_t length) {
+    // Stop any running decode thread first (joins thread, safely deletes codec)
+    stop();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    eos_.store(false);
+    currentPositionUs_.store(0);
+    trackIndex_ = -1;
+
+    // Create extractor
+    extractor_ = AMediaExtractor_new();
+    if (!extractor_) {
+        LOGE("Failed to create AMediaExtractor");
+        return false;
+    }
+
+    // Set file source from fd (scoped-storage safe)
+    int result = AMediaExtractor_setDataSourceFd(extractor_, fd, offset, length);
+    if (result != AMEDIA_OK) {
+        LOGE("Failed to set data source fd (error %d)", result);
+        AMediaExtractor_delete(extractor_);
+        extractor_ = nullptr;
+        return false;
+    }
+
+    return setupTracksAndCodec();
+}
+
+bool NDKDecoder::setupTracksAndCodec() {
     // Find audio track
+
     size_t numTracks = AMediaExtractor_getTrackCount(extractor_);
     LOGI("File has %zu tracks", numTracks);
 
@@ -93,6 +127,28 @@ bool NDKDecoder::open(const char* filePath) {
                 if (ch > 0) AMediaFormat_setInt32(configureFormat, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch);
                 if (dur > 0) AMediaFormat_setInt64(configureFormat, AMEDIAFORMAT_KEY_DURATION, dur);
             }
+            // Copy Codec Specific Data buffers (csd-0/csd-1/csd-2) — essential for AAC/M4A!
+            // AAC decoder cannot configure without AudioSpecificConfig from csd-0.
+            // (主播放链路 oboe_bridge.cpp 的 openIncoming 全部调 copyCsdBuffers，这里漏了导致
+            //  BPM 扫描 m4a/aac 解码 60s 超时拿不到 PCM —— 2026-09-01 修复)
+            {
+                void* cdata = nullptr; size_t csize = 0;
+                if (AMediaFormat_getBuffer(format, "csd-0", &cdata, &csize) && cdata && csize > 0) {
+                    AMediaFormat_setBuffer(configureFormat, "csd-0", cdata, csize);
+                }
+                cdata = nullptr; csize = 0;
+                if (AMediaFormat_getBuffer(format, "csd-1", &cdata, &csize) && cdata && csize > 0) {
+                    AMediaFormat_setBuffer(configureFormat, "csd-1", cdata, csize);
+                }
+                cdata = nullptr; csize = 0;
+                if (AMediaFormat_getBuffer(format, "csd-2", &cdata, &csize) && cdata && csize > 0) {
+                    AMediaFormat_setBuffer(configureFormat, "csd-2", cdata, csize);
+                }
+                int32_t maxIn = 0;
+                if (AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, &maxIn) && maxIn > 0) {
+                    AMediaFormat_setInt32(configureFormat, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, maxIn);
+                }
+            }
             // Request float PCM output
             AMediaFormat_setInt32(configureFormat, "pcm-encoding", 0x4); // ENCODING_PCM_FLOAT = 4
             // Don't specify output sample rate — decoder outputs at source rate
@@ -138,12 +194,13 @@ bool NDKDecoder::startDecode(PCMCallback callback) {
         return false;
     }
 
-    stop(); // Stop any previous decode
+    // NOTE: 不能在此调 stop()——open/openFd 已创建 codec_/extractor_，
+    // stop() 会无条件 delete 它们，导致 decodeLoop 里 enqueueInputBuffer 空指针崩溃（fault 0x0）
+    stopRequested_.store(false);
+    paused_.store(false);
 
     decoding_.store(true);
     eos_.store(false);
-    stopRequested_.store(false);
-    paused_.store(false);
 
     decodeThread_ = std::thread(&NDKDecoder::decodeLoop, this, callback);
     return true;

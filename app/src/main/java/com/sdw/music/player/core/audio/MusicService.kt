@@ -40,6 +40,7 @@ import com.sdw.music.player.core.audio.helpers.VisualizerManager
 import com.sdw.music.player.core.audio.UsbDacManager
 import com.sdw.music.player.core.audio.UsbDacPlaybackController
 import com.sdw.music.player.core.audio.DebugLog
+import com.sdw.music.player.core.audio.BtCodecTracker
 import com.sdw.music.player.R
 import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
@@ -176,6 +177,14 @@ class MusicService : MediaSessionService() {
     private val oboeSwitchLock = Any()  // 串行化切歌线程，防 native 全局状态并发损坏
     private var useOboeDirect: Boolean = false
 
+    // =====================================================================
+    // 【CROSSFADE ENGINE 区】顺序自动交叉淡化（只 Oboe 路径）
+    // 状态字段 181-211 · monitor 228-487 · 触发 489-534 · 完成轮询 536-610
+    // 宿主依赖：oboeDirectPlayer/handler/currentSong/servicePlaylist/pickNextIndex/
+    //           updateNotification/isDacActive/resolveContentUriToPath 等
+    // 设计：两阶段 preloading + 拍点对齐 + 副歌预扫 + 能量低谷检测 + FLOOR 兜底
+    // =====================================================================
+
     // 【Crossfade】顺序自动交叉淡化（只 Oboe 路径，方案 B：先 mix 再 DSP）
     private var crossfadeEnabled = false
     private var crossfadeDurationMs = 5000
@@ -184,6 +193,30 @@ class MusicService : MediaSessionService() {
     // 【能量切点】crossfade 触发窗口内的能量低谷检测（避开鼓点/高潮硬叠打架）
     private var xfadeDipCount = 0        // 连续低谷采样计数（200ms/采样）
     private var xfadePeakRms = 0f        // 窗口内能量峰值（带衰减）
+    // 【V8.9 Crossfade 优化①·双层预扫描】
+    // A 轨尾部低能量段起点(ms)（绝对时间戳）：播放开始时预扫，决定触发时机
+    private var xfadeAQuietStartMs = -1L
+    private var xfadeAPrescanDone = false
+    // 【V8.15 A 轨副歌出】A 轨最后一个副歌结束位置(ms)：预扫 mode=3 得到，副歌唱完即触发 crossfade
+    @Volatile private var xfadeAChorusEndMs = -1L
+    // 【V8.16】本次 crossfade B 轨起点(ms)：B 上位后重扫副歌结束只扫该点之后，防止"播几十秒又切"
+    @Volatile private var xfadeLastBStartMs = -1L
+    // 【V8.17】BPM/副歌模式开关：settings shuffle_mode != "random" 时启用副歌逻辑（B从副歌进+A副歌完切）；
+    // 纯随机("random")时禁用副歌，回归 5/10/15s 定时 + 能量低谷原始逻辑
+    @Volatile private var bpmChorusMode = true
+    // B 轨开头前奏静音段长度(ms)：openIncoming 后预扫，决定交叉窗口对齐；-1=无静音前奏
+    private var xfadeBIntroMs = -1L
+    private var xfadeBPrescanDone = false
+// 【V8.15】B 轨副歌起点(ms)：预扫 mode=2 得到，crossfade 时 B 从副歌进；-1=未找到
+private var xfadeBChorusMs = -1L
+    // 【V8.15】两阶段 crossfade：preloading 提前（候选窗口），预扫完成后才触发
+    @Volatile private var xfadePreloading = false
+    @Volatile private var xfadePreloadReady = false  // 【2026-09-02】B 轨 openIncoming 后台完成标志
+    // 【V8.24 A 轨拍点触发】拍点延迟已安排标志（防 monitor 每 tick 重复 postDelayed）
+    @Volatile private var xfadeBeatPending = false          // 正在预加载 B（尚未触发）
+    @Volatile private var xfadePreloadPath: String? = null // 预加载中的 B 路径
+    @Volatile private var xfadePreloadIndex = -1           // 预加载中的 B 索引
+    @Volatile private var xfadePreloadSong: Song? = null   // 预加载中的 B 歌曲
 
     // 【V8.4】Crossfade UI 状态推送：供播放界面做氛围色交接 + 封面交叉淡化动画
     // 状态机：IDLE（无）→ PRELOADING（预加载 B，UI 预读封面/主色）→ ACTIVE（交叉淡化中）
@@ -208,12 +241,19 @@ class MusicService : MediaSessionService() {
             val cf = getSharedPreferences("settings", MODE_PRIVATE)
             val enabled = cf.getBoolean("crossfade_enabled", false)
             val dur = cf.getInt("crossfade_duration_ms", 5000)
+            val smartAlign = cf.getBoolean("crossfade_smart_align", true)
+            // 【V8.17】纯随机模式（shuffle_mode=random）禁用副歌逻辑，回归定时+能量低谷
+            bpmChorusMode = cf.getString("shuffle_mode", "random") == "bpm"
             crossfadeEnabled = enabled
             crossfadeDurationMs = dur
+            // 智能对齐关闭时禁用预扫描分支（回退实时 RMS 检测）
+            if (!smartAlign) { xfadeAPrescanDone = false; xfadeBPrescanDone = false }
+            // 纯随机模式：禁用副歌相关状态（A 副歌触发、B 副歌起点）
+            if (!bpmChorusMode) { xfadeAChorusEndMs = -1L; xfadeBChorusMs = -1L }
             var triggered = false
             if (enabled && !crossfadeBusy) {
                 val p = oboeDirectPlayer
-                if (p != null && p.isPrepared && p.isPlaying == true) {
+                if (p != null && p.isPrepared) {
                     val totalDur = p.getDurationMs()
                     val pos = p.getCurrentPositionMs()
                     if (totalDur > 0) {
@@ -222,64 +262,228 @@ class MusicService : MediaSessionService() {
                         // 找不到低谷则 remain<=1500ms 强制触发（兑底，保证不漏切）
                         val FLOOR_MS = 1500
                         var shouldTrigger = false
-                        if (remain <= dur) {
-                            val rms = p.getRmsLevel()
-                            xfadePeakRms = maxOf(xfadePeakRms * 0.995f, rms)
-                            if (rms < 0.15f && rms < xfadePeakRms * 0.4f) {
-                                xfadeDipCount++
-                            } else {
-                                xfadeDipCount = 0
+                        // 【V8.15 A 轨副歌出】副歌唱完即触发：pos 越过最后副歌结束位置（留 8s 尾奏过渡）
+                        // 【V8.17】仅 BPM 匹配模式启用；纯随机模式跳过（回归定时+能量低谷）
+                        if (bpmChorusMode && xfadeAChorusEndMs > 0) {
+                            // 【V8.16】剩余可播时长 < 30s 时不用副歌触发（B 从后半进场会很快又切）
+                            val remainAfterChorus = xfadeAChorusEndMs - pos
+                            if (remainAfterChorus >= 30000L) {
+                                val chorusLead = 8000L  // 副歌结束前 8s 进入预加载窗口
+                                if (pos >= xfadeAChorusEndMs - chorusLead && remain > dur) {
+                                    shouldTrigger = true
+                                    Log.i(TAG, "Crossfade: A-chorus-end trigger pos=$pos chorusEnd=${xfadeAChorusEndMs} remain=$remain dur=$dur")
+                                }
                             }
-                            if (remain <= FLOOR_MS || xfadeDipCount >= 2) {
+                        }
+                        // 【V8.9 优化①·双层预扫描】
+                        // A 轨：播放开始时预扫尾部，拿到「A 轨结尾前低能量段起点」= 最佳交叉点
+                        //   触发条件：remain<=dur 且 pos 已越过 A 静音段起点（交叉落在静音窗口内）
+                        // B 轨：开头前奏静音段长度，用于对齐参考（B 前奏安静时可从容 fade in）
+                        if (xfadeAPrescanDone && xfadeAQuietStartMs > 0) {
+                            if (remain <= dur && pos >= xfadeAQuietStartMs - 300) {
                                 shouldTrigger = true
-                                xfadeDipCount = 0
-                                xfadePeakRms = 0f
+                                Log.i(TAG, "Crossfade: prescan-A trigger pos=$pos aQuietStart=${xfadeAQuietStartMs} remain=$remain dur=$dur")
+                            }
+                            // 兜底：A 预扫对齐失败（A 无静音段/已错过）仍用 FLOOR_MS 保证不漏切
+                            if (!shouldTrigger && remain <= FLOOR_MS) shouldTrigger = true
+                        } else {
+                            if (remain <= dur) {
+                                val rms = p.getRmsLevel()
+                                xfadePeakRms = maxOf(xfadePeakRms * 0.995f, rms)
+                                if (rms < 0.15f && rms < xfadePeakRms * 0.4f) {
+                                    xfadeDipCount++
+                                } else {
+                                    xfadeDipCount = 0
+                                }
+                                if (remain <= FLOOR_MS || xfadeDipCount >= 2) {
+                                    shouldTrigger = true
+                                    xfadeDipCount = 0
+                                    xfadePeakRms = 0f
+                                }
                             }
                         }
                         val songs = servicePlaylist.ifEmpty { SongRepository.getSongs() }
                         val realIdx = currentIndex
                         if (songs.isNotEmpty() && repeatMode != Player.REPEAT_MODE_ONE) {
-                            val nextIndex = if (isShuffleMode) {
-                                if (songs.size <= 1) -1 else (0 until songs.size).filter { it != realIdx }.random()
-                            } else {
-                                (realIdx + 1) % songs.size
-                            }
-                            if (nextIndex >= 0 && nextIndex != realIdx && shouldTrigger) {
-                                crossfadeBusy = true
-                                val nextSong = songs[nextIndex]
-                                val fp = nextSong.filePath.ifEmpty { nextSong.path }
-                                val path = if (fp.startsWith("content://")) resolveContentUriToPath(fp) else fp
-                                if (path != null) {
-                                    crossfadeNextIndex = nextIndex
-                                    Log.i(TAG, "Crossfade: preloading next: ${nextSong.title} (remain=$remain)")
-                                    // 【V8.4】预加载开始 → 推送 B 轨信息（UI 开始预读 B 封面/主色）
-                                    crossfadeUiInfo = CrossfadeUiInfo(
-                                        state = XfadeUiState.PRELOADING,
-                                        durationMs = dur,
-                                        nextTitle = nextSong.title,
-                                        nextArtist = nextSong.artist,
-                                        nextAlbumArt = nextSong.albumArtUri?.takeIf { it.isNotEmpty() },
-                                        nextAccentColor = 0L
-                                    )
-                                    if (p.openIncoming(path)) {
-                                        val ok = p.startCrossfade(dur)
-                                        if (ok) {
-                                            triggered = true
-                                            Log.i(TAG, "Crossfade: triggered ${dur}ms → ${nextSong.title}")
-                                            // 【V8.4】crossfade 正式开始 → UI 启动同步动画
-                                            crossfadeUiInfo = crossfadeUiInfo.copy(state = XfadeUiState.ACTIVE)
-                                            scheduleCrossfadeCompletionPoll(p, nextSong, nextIndex)
-                                        } else {
-                                            Log.w(TAG, "Crossfade: startCrossfade failed")
-                                            crossfadeUiInfo = CrossfadeUiInfo()  // 【V8.4】失败清状态
-                                            p.stopIncoming()
+                            // 【v8.15】复用 pickNextIndex：crossfade 自动切歌也走 BPM 匹配（随机开启时）
+                            // 【V8.24】预加载已在进行时不再每 tick 重新选歌（此前每 200ms 随机重选+刷日志）
+                            val nextIndex = if (!xfadePreloading) {
+                                pickNextIndex(songs, realIdx).takeIf { it != realIdx } ?: -1
+                            } else xfadePreloadIndex
+                            if (nextIndex >= 0 && nextIndex != realIdx) {
+                                // ===== 阶段1：候选窗口（A 副歌结束前 8s 或 remain<=dur+8s，取先到）→ 启动预加载+副歌预扫（不触发） =====
+                                val preloadByChorus = xfadeAChorusEndMs > 0 && pos >= xfadeAChorusEndMs - 8000
+                                val preloadByRemain = remain <= dur + 8000
+                                if (!xfadePreloading && (preloadByChorus || preloadByRemain)) {
+                                    xfadePreloading = true
+                                    xfadePreloadIndex = nextIndex
+                                    xfadePreloadSong = songs[nextIndex]
+                                    val preFp = songs[nextIndex].filePath.ifEmpty { songs[nextIndex].path }
+                                    xfadePreloadPath = if (preFp.startsWith("content://")) resolveContentUriToPath(preFp) else preFp
+                                    val prePath = xfadePreloadPath
+                                    if (prePath != null) {
+                                        Log.i(TAG, "Crossfade: PRELOADING ${songs[nextIndex].title} (remain=$remain, window=${dur + 8000})")
+                                        crossfadeUiInfo = CrossfadeUiInfo(
+                                            state = XfadeUiState.PRELOADING,
+                                            durationMs = dur,
+                                            nextTitle = songs[nextIndex].title,
+                                            nextArtist = songs[nextIndex].artist,
+                                            nextAlbumArt = songs[nextIndex].albumArtUri?.takeIf { it.isNotEmpty() },
+                                            nextAccentColor = 0L
+                                        )
+                                        // 【2026-09-02 fix】openIncoming 移后台线程——原在主线程同步执行，
+                                        // 大 m4a/MediaCodec configure 数百 ms~秒级 → 主线程阻塞 → UI 卡死
+                                        xfadePreloadReady = false
+                                        Thread {
+                                            try {
+                                                val ok = p.openIncoming(prePath)
+                                                xfadePreloadReady = ok
+                                                if (!ok) {
+                                                    Log.w(TAG, "Crossfade: openIncoming failed (preload, bg)")
+                                                    xfadePreloading = false
+                                                    xfadePreloadPath = null
+                                                    xfadePreloadSong = null
+                                                    xfadePreloadIndex = -1
+                                                }
+                                            } catch (e: Throwable) {
+                                                Log.w(TAG, "Crossfade: openIncoming exception ${e.message}")
+                                                xfadePreloadReady = false
+                                            }
+                                        }.apply { isDaemon = true }.start()
+                                        // 副歌预扫（后台线程，~3-5s）—— 仅 BPM 匹配模式；纯随机跳过（B 从头播）
+                                        // 预扫与 openIncoming 各自独立 extractor 并发跑, 无冲突
+                                        xfadeBChorusMs = -1L
+                                        if (bpmChorusMode) {
+                                            val scanPath = prePath
+                                            Thread {
+                                                try {
+                                                    val chorus = p.preScanPath(scanPath, 100, mode = 2)
+                                                    xfadeBChorusMs = chorus.toLong()
+                                                    if (chorus > 0) Log.i(TAG, "Crossfade: prescan-B chorus=$chorus ms")
+                                                    else Log.i(TAG, "Crossfade: prescan-B no chorus (start from 0)")
+                                                } catch (e: Exception) {
+                                                    Log.w(TAG, "Crossfade: prescan-B chorus failed ${e.message}")
+                                                    xfadeBChorusMs = -1L
+                                                }
+                                            }.apply { isDaemon = true }.start()
                                         }
                                     } else {
-                                        Log.w(TAG, "Crossfade: openIncoming failed")
-                                        crossfadeUiInfo = CrossfadeUiInfo()  // 【V8.4】失败清状态
+                                        xfadePreloading = false
+                                        xfadePreloadPath = null
+                                        xfadePreloadSong = null
                                     }
                                 }
-                                if (!triggered) { crossfadeBusy = false; crossfadeNextIndex = -1 }
+                                // ===== 阶段2：预加载已就绪 + 触发条件满足 → 真正 crossfade =====
+                                // 【V8.24 A 轨拍点触发】shouldTrigger 满足时，若 A 轨 BPM 已知且 BPM 匹配模式，
+                                // 延迟到 A 轨下一个强拍再触发（delay = beatMs - pos%beatMs），
+                                // 与 B 轨已对齐的副歌拍点同步交接 → 拍上无缝
+                                if (xfadePreloading && xfadePreloadReady && shouldTrigger) {
+                                    val aBpmForBeat = if (bpmChorusMode) {
+                                        com.sdw.music.player.BpmKeyCache.init(this@MusicService)
+                                        val aPath = currentSong?.let { it.filePath.ifEmpty { it.path } } ?: ""
+                                        if (aPath.isNotBlank()) com.sdw.music.player.BpmKeyCache.get(aPath)?.first ?: 0 else 0
+                                    } else 0
+                                    var beatDelay = 0L
+                                    if (aBpmForBeat in 40..220) {
+                                        val beatMs = 60000L / aBpmForBeat
+                                        val posInBeat = pos % beatMs
+                                        beatDelay = beatMs - posInBeat
+                                        // 已贴拍（≤250ms）直接触发；否则延迟到拍点
+                                        if (beatDelay > 250L) {
+                                            if (!xfadeBeatPending) {
+                                                xfadeBeatPending = true
+                                                val prePath = xfadePreloadPath
+                                                val preSong = xfadePreloadSong
+                                                val preIndex = xfadePreloadIndex
+                                                Log.i(TAG, "Crossfade: beat-align trigger in ${beatDelay}ms (bpm=$aBpmForBeat pos=$pos beatMs=$beatMs)")
+                                                handler.postDelayed({
+                                                    xfadeBeatPending = false
+                                                    // 拍点到达：清预加载态，执行真实触发
+                                                    if (prePath != null && preSong != null) {
+                                                        xfadePreloading = false
+                                                        xfadePreloadPath = null
+                                                        xfadePreloadSong = null
+                                                        doCrossfadeTrigger(p, preSong, preIndex, dur)
+                                                    } else {
+                                                        crossfadeBusy = false
+                                                    }
+                                                    // 触发后由 scheduleCrossfadeCompletionPoll 恢复 monitor 调度
+                                                }, beatDelay)
+                                            }
+                                            // 已安排拍点，本 tick 不再走立即触发
+                                            triggered = false
+                                        } else {
+                                            xfadeBeatPending = false
+                                            val prePath = xfadePreloadPath
+                                            val preSong = xfadePreloadSong
+                                            val preIndex = xfadePreloadIndex
+                                            xfadePreloading = false
+                                            xfadePreloadPath = null
+                                            xfadePreloadSong = null
+                                            if (prePath != null && preSong != null) {
+                                                doCrossfadeTrigger(p, preSong, preIndex, dur)
+                                                triggered = true
+                                            } else {
+                                                crossfadeBusy = false
+                                            }
+                                        }
+                                    } else {
+                                        xfadeBeatPending = false
+                                        val prePath = xfadePreloadPath
+                                        val preSong = xfadePreloadSong
+                                        val preIndex = xfadePreloadIndex
+                                        xfadePreloading = false
+                                        xfadePreloadPath = null
+                                        xfadePreloadSong = null
+                                        if (prePath != null && preSong != null) {
+                                            doCrossfadeTrigger(p, preSong, preIndex, dur)
+                                            triggered = true
+                                        } else {
+                                            crossfadeBusy = false
+                                        }
+                                    }
+                                }
+                                // 【V8.24 修复】A 轨播完(EOS)但预加载已就绪时强制接管：
+                                // remain<=FLOOR_MS 正常兜底；A 轨已 EOS（isPlaying=false 或 pos 逼近/越过结尾）也强制
+                                val aEosNoTakeover = p.isPlaying != true && xfadePreloading
+                                if (!triggered && xfadePreloading && xfadePreloadReady && (remain <= 1500 || aEosNoTakeover)) {
+                                    // 预加载就绪但触发条件未满足且已到 FLOOR_MS → 强制触发（兜底）
+                                    val prePath = xfadePreloadPath
+                                    val preSong = xfadePreloadSong
+                                    val preIndex = xfadePreloadIndex
+                                    xfadePreloading = false
+                                    xfadePreloadPath = null
+                                    xfadePreloadSong = null
+                                    if (prePath != null && preSong != null) {
+                                        crossfadeBusy = true
+                                        crossfadeNextIndex = preIndex
+                                        Log.i(TAG, "Crossfade: FLOOR trigger ${preSong.title} (remain=$remain)")
+                                        var chorusMs = xfadeBChorusMs
+                                        val deadline = System.currentTimeMillis() + 3000
+                                        while (chorusMs < 0 && System.currentTimeMillis() < deadline) {
+                                            try { Thread.sleep(50) } catch (_: InterruptedException) {}
+                                            chorusMs = xfadeBChorusMs
+                                        }
+                                        if (chorusMs > 0 && bpmChorusMode) {  // 【V8.17】纯随机不 seek 副歌
+                                            xfadeLastBStartMs = chorusMs.toLong()  // 【V8.16】记录 B 起点
+                                            val seeked = p.seekIncoming(chorusMs.toInt())
+                                            if (seeked) Log.i(TAG, "Crossfade: B starts at chorus ${chorusMs}ms (floor)")
+                                        } else {
+                                            xfadeLastBStartMs = -1L
+                                        }
+                                        val cfDur = adaptiveXfadeDur(preSong)
+                                        val ok = p.startCrossfade(cfDur, if (chorusMs > 0 && bpmChorusMode) chorusMs.toInt() else 0)
+                                        if (ok) {
+                                            Log.i(TAG, "Crossfade: triggered ${cfDur}ms → ${preSong.title} (floor, dur=$dur)")
+                                            crossfadeUiInfo = crossfadeUiInfo.copy(state = XfadeUiState.ACTIVE)
+                                            scheduleCrossfadeCompletionPoll(p, preSong, preIndex)
+                                        } else {
+                                            Log.w(TAG, "Crossfade: startCrossfade failed (floor)")
+                                            crossfadeUiInfo = CrossfadeUiInfo()
+                                            p.stopIncoming()
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -288,6 +492,54 @@ class MusicService : MediaSessionService() {
             handler.postDelayed(this, 200)
         }
     }
+
+    // 【V8.24 A 轨拍点触发】阶段2 真实触发体（立即触发与拍点延迟共用）
+    private fun doCrossfadeTrigger(p: OboeDirectPlayer, preSong: Song, preIndex: Int, dur: Int) {
+        // 【2026-09-02 fix】整体后台执行——原在主线程等 chorus 预扫最多 3s（Thread.sleep 阻塞主线程
+        // → crossfade 触发瞬间 UI 卡顿）。UI 更新用 handler.post 切回主线程。
+        Thread {
+            try {
+                doCrossfadeTriggerBg(p, preSong, preIndex, dur)
+            } catch (e: Throwable) {
+                Log.w(TAG, "Crossfade: trigger bg exception ${e.message}")
+                crossfadeBusy = false
+                handler.post { crossfadeUiInfo = CrossfadeUiInfo() }
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    private fun doCrossfadeTriggerBg(p: OboeDirectPlayer, preSong: Song, preIndex: Int, dur: Int) {
+        crossfadeBusy = true
+        crossfadeNextIndex = preIndex
+        Log.i(TAG, "Crossfade: preloading next: ${preSong.title}")
+        // 等 chorus 预扫完成（最多 3s；超时从 0 播）
+        var chorusMs = xfadeBChorusMs
+        val deadline = System.currentTimeMillis() + 3000
+        while (chorusMs < 0 && System.currentTimeMillis() < deadline) {
+            try { Thread.sleep(50) } catch (_: InterruptedException) {}
+            chorusMs = xfadeBChorusMs
+        }
+        if (chorusMs > 0 && bpmChorusMode) {  // 【V8.17】纯随机不 seek 副歌，B 从头播
+            xfadeLastBStartMs = chorusMs.toLong()  // 【V8.16】记录 B 起点
+            val seeked = p.seekIncoming(chorusMs.toInt())
+            if (seeked) Log.i(TAG, "Crossfade: B starts at chorus ${chorusMs}ms")
+        } else {
+            xfadeLastBStartMs = -1L  // 【V8.16】无副歌起点
+        }
+        // 【V8.23 BPM 自适应时长】A/B 两轨 BPM 差 ≤2 → 短混音（2s，DJ 式拍上交接）；差 >2 → 用户设定时长
+        val cfDur = adaptiveXfadeDur(preSong)
+        val ok = p.startCrossfade(cfDur, if (chorusMs > 0 && bpmChorusMode) chorusMs.toInt() else 0)
+        if (ok) {
+            Log.i(TAG, "Crossfade: triggered ${cfDur}ms → ${preSong.title} (dur=$dur)")
+            handler.post { crossfadeUiInfo = crossfadeUiInfo.copy(state = XfadeUiState.ACTIVE) }
+            scheduleCrossfadeCompletionPoll(p, preSong, preIndex)
+        } else {
+            Log.w(TAG, "Crossfade: startCrossfade failed")
+            handler.post { crossfadeUiInfo = CrossfadeUiInfo() }
+            p.stopIncoming()
+        }
+    }
+
     private fun scheduleCrossfadeCompletionPoll(p: OboeDirectPlayer, nextSong: Song, nextIndex: Int) {
         // 轮询直到 active 轨翻转（crossfade 完成），然后切元数据 + 继续下一轮监控
         val startActiveB = p.isActiveB()
@@ -308,6 +560,44 @@ class MusicService : MediaSessionService() {
                     }
                     crossfadeBusy = false
                     crossfadeNextIndex = -1
+                    // 【V8.10】B 上位成为新 A 轨：重新预扫其尾部静音段 + 副歌结束，供下一轮 crossfade 触发使用
+                    xfadeAPrescanDone = false
+                    xfadeAQuietStartMs = -1L
+                    xfadeAChorusEndMs = -1L
+                    // 【V8.16】B 上位重扫副歌结束只扫实际起点之后（防止把 B 当新歌从头扫，定位到后段副歌 → 播几十秒又切）
+                    val bStartForScan = if (xfadeLastBStartMs > 0) xfadeLastBStartMs else 0L
+                    val newAPath = nextSong.filePath.ifEmpty { nextSong.path }
+                    val newAActual = if (newAPath.startsWith("content://")) {
+                        resolveContentUriToPath(newAPath)
+                    } else {
+                        newAPath
+                    }
+                    if (newAActual != null) {
+                        Thread {
+                            try {
+                                // 【V8.15 A 轨副歌出】重新预扫新 A 的最后副歌结束位置（V8.16：从 B 实际起点之后扫）
+                                // 【V8.17】仅 BPM 匹配模式；纯随机跳过副歌预扫
+                                if (bpmChorusMode) {
+                                    val aChorusEnd = p.preScanPath(newAActual, 100, mode = 3, seekFromMs = bStartForScan)
+                                    if (aChorusEnd > 0) {
+                                        xfadeAChorusEndMs = aChorusEnd.toLong()
+                                        Log.i(TAG, "Crossfade: prescan-A(next) chorusEnd=$aChorusEnd ms (from $bStartForScan)")
+                                    }
+                                }
+                                val quiet = p.preScanPath(newAActual, 100, mode = 0, seekFromMs = 0L)
+                                xfadeAQuietStartMs = quiet.toLong()
+                                xfadeAPrescanDone = true
+                                if (quiet > 0) Log.i(TAG, "Crossfade: prescan-A(next) quietStart=$quiet ms")
+                                else Log.i(TAG, "Crossfade: prescan-A(next) no quiet segment (fallback RMS)")
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Crossfade: prescan-A(next) failed ${e.message}")
+                                xfadeAQuietStartMs = -1L
+                                xfadeAPrescanDone = true
+                            }
+                        }.apply { isDaemon = true }.start()
+                    } else {
+                        xfadeAPrescanDone = true
+                    }
                     // 继续监控下一轮
                     handler.postDelayed(crossfadeMonitor, 200)
                     return
@@ -328,6 +618,9 @@ class MusicService : MediaSessionService() {
     }
 
     // USB DAC Exclusive mode controller
+    // =====================================================================
+    // 【USB DAC 独占控制器区】controller 生命周期 / dacHealthRunnable 看门狗 / usbDacCallback 热插拔 / wake lock / claim
+    // =====================================================================
     private var usbDacController: UsbDacPlaybackController? = null
     private var dacPlayGeneration: Int = 0  // [V4.0.1] invalidate stale onCompletion
     private var dacWakeLock: PowerManager.WakeLock? = null  // [V4.0.2] prevent CPU deep-sleep in Doze mode
@@ -343,6 +636,12 @@ class MusicService : MediaSessionService() {
     private val usbDacCallback = object : AudioDeviceCallback() {
         override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
             if (System.currentTimeMillis() < oboeUsbGuardMs) return  // startup race guard
+            // 【2026-09-07】蓝牙 A2DP 连接/编码切换 → 刷新预补偿
+            val anyBt = addedDevices.any {
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+            }
+            if (anyBt) refreshBtPreEmphasis()
             if (oboeSuppressUsbRestart) return  // Oboe already running, don&apos;t restart
             val hasUsbDac = addedDevices.any { d ->
                 d.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
@@ -369,6 +668,15 @@ class MusicService : MediaSessionService() {
                     }, 400)
                 }
             }, 800)
+        }
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+            // 【2026-09-07】蓝牙 A2DP 断开/切换 → 刷新预补偿
+            val anyBt = removedDevices.any {
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+            }
+            if (anyBt) refreshBtPreEmphasis()
         }
     }
 
@@ -951,6 +1259,9 @@ class MusicService : MediaSessionService() {
     // [v7.113] ���㶪ʧǰ�Ƿ��ڲ���
     private var wasPlayingBeforeFocusLoss = false
 
+    // =====================================================================
+    // 【Service 生命周期区】onCreate/onStartCommand/onGetSession/通知 PendingIntent
+    // =====================================================================
     override fun onCreate() {
         super.onCreate()
         Log.d(TAG, "onCreate - Service starting")
@@ -1275,6 +1586,9 @@ class MusicService : MediaSessionService() {
         playlistSource = source
     }
 
+    // =====================================================================
+    // 【播放路由区】playSong 三分路(DAC独占/Oboe直连/ExoPlayer兜底) / playSongById / 队列管理
+    // =====================================================================
     fun playSong(index: Int) {
         // [v7.113] ��ʼ����ʱ������Ƶ����
         requestAudioFocusIfNeeded(this)
@@ -1358,12 +1672,17 @@ class MusicService : MediaSessionService() {
             }
 
             // Path 1: known-good DAC → USB Host Exclusive Bit-Perfect
+            // 【方向1】claim 是 Manager 全局状态，以 isClaimed() 为准；controller 每首歌新建
+            // （单曲会话状态机，见 UsbDacPlaybackController.DacState），dacRunning 仅诊断参考。
+            // 旧代码用局部 var dacStreaming 手工推断「play 是否需要 startStreaming」，
+            // 8.21 曾漏置导致 keep-claim 噪音/卡死。现在所有分支都保证走到 play() 时
+            // native 流未启，streamAlreadyRunning 恒 false，推断逻辑整体删除。
             val dacClaimed = UsbDacManager.isClaimed()
             val dacRunning = UsbDacManager.isStreaming()
-            var dacStreaming = dacRunning
-            DebugLog.add(TAG, "playSong[$index]: ${dacProfile.name} Bit-Perfect, claimed=$dacClaimed running=$dacRunning")
+            val dacSession = usbDacController?.sessionState?.name
+            DebugLog.add(TAG, "playSong[$index]: ${dacProfile.name} Bit-Perfect, claimed=$dacClaimed running=$dacRunning session=$dacSession")
 
-            // First play: claim DAC if not yet claimed
+            // First play (or after full teardown): claim DAC
             if (!dacClaimed) {
                 val song = songs[index]
                 val srcRate = UsbDacManager.getSourceSampleRate(song)
@@ -1384,15 +1703,8 @@ class MusicService : MediaSessionService() {
                     return
                 }
                 DebugLog.add(TAG, "playSong[$index]: DAC claimed, waiting for controller prebuffer")
-            } else if (!dacRunning) {
-                // [fix] claim held but stream stopped (EOS auto-next): restart stream
-                // WITHOUT re-claim. pauseStream() already stopped streamLoop after EOS drain;
-                // re-claim would hit EBUSY (old connection still open). Let
-                // play(streamAlreadyRunning=false) reset ring + startStreaming().
-                DebugLog.add(TAG, "playSong[$index]: claim held, stream stopped (EOS) — restart stream, no reclaim")
-                dacStreaming = false
-            } else {
-                // Subsequent plays: check if sample rate changed vs current DAC stream
+            } else if (dacRunning) {
+                // claim 保留且流在跑（手动切歌）：查采样率是否变化
                 val song = songs[index]
                 val oldRate = UsbDacManager.activeSampleRate
                 val newRate = UsbDacManager.getSourceSampleRate(song)
@@ -1411,12 +1723,10 @@ class MusicService : MediaSessionService() {
                     releaseUsbDacController()
                     UsbDacManager.stopAndRelease()
                     UsbDacManager.findDacs()
-                    val device = UsbDacManager.getDacDevice()
-                    val bits = DacProfile.wireBitsFor(device?.vendorId ?: 0, device?.productId ?: 0)
-                    if (device != null && UsbDacManager.claimAndStart(device, newRate, 2, bits)) {
+                    val device2 = UsbDacManager.getDacDevice()
+                    val bits = DacProfile.wireBitsFor(device2?.vendorId ?: 0, device2?.productId ?: 0)
+                    if (device2 != null && UsbDacManager.claimAndStart(device2, newRate, 2, bits)) {
                         DebugLog.add(TAG, "playSong[$index]: cross-rate reclaim OK")
-                        // [fix] fresh claim = stream NOT running yet; must let play() call startStreaming
-                        dacStreaming = false
                     } else {
                         DebugLog.add(TAG, "playSong[$index]: cross-rate reclaim FAIL, fallback Oboe system-route (Salt Player style)")
                         getSharedPreferences("settings", MODE_PRIVATE).edit().putString("audio_output", "AAudio (Direct)").apply()
@@ -1426,11 +1736,18 @@ class MusicService : MediaSessionService() {
                         return
                     }
                 } else {
-                    // [v6.0.12] keep-claim same-rate: stop flacMonitor only, don't pause/reset native stream
+                    // 【V8.21 fix】手动切歌 same-rate keep-claim：stopMonitor() 内部已 pauseStream
+                    // + resetRingBuffer + releaseResources（controller → EOS_HOLD 语义）。
+                    // 随后新建 controller open()+play(streamAlreadyRunning=false) 走完整
+                    // startStreaming（native keep-stream 幂等重启）。
                     usbDacController?.stopMonitor()
                     usbDacController = null
-                    DebugLog.v(TAG, "playSong[$index]: DAC already streaming, monitor killed for instant switch")
+                    DebugLog.v(TAG, "playSong[$index]: DAC keep-claim, monitor killed, play() will restart stream")
                 }
+            } else {
+                // claim 保留但流已停（EOS 自动续播 / 暂停恢复 / 上轮 keep-claim 后）：
+                // 直接 restart stream，不 re-claim（re-claim 会 EBUSY）。
+                DebugLog.add(TAG, "playSong[$index]: claim held, stream stopped — restart stream, no reclaim")
             }
 
             val currentSong = songs[index]
@@ -1468,7 +1785,9 @@ class MusicService : MediaSessionService() {
                     handler.postDelayed(dacHealthRunnable, 5000)
             val dacProfile = DacProfile.find(UsbDacManager.getDacDevice()?.vendorId ?: 0, UsbDacManager.getDacDevice()?.productId ?: 0)
             controller.playbackWireBits = dacProfile.wireBits
-                    controller.play(streamAlreadyRunning = dacStreaming)
+                    // 【方向1】所有分支已保证 native 流未启（claim 后/keep-claim stopMonitor 后/EOS 后均如此），
+                    // streamAlreadyRunning 恒 false：play() 必走完整 startStreaming（幂等安全）
+                    controller.play(streamAlreadyRunning = false)
                     // Apply system media volume to native DAC (USB bypasses Android mixer)
                     val am = getSystemService(AUDIO_SERVICE) as? AudioManager
                     if (am != null) {
@@ -1488,6 +1807,11 @@ class MusicService : MediaSessionService() {
                             )
                             dspEqEnabled = true
                         }
+                    }
+                    // 【V8.19】DTS 环绕独立开关恢复（native 声场状态在重新打开 DAC 后会丢）
+                    if (MsebCalculator.isDtsEnabled(this@MusicService)) {
+                        val (ss, img) = MsebCalculator.dtsStageParams(this@MusicService)
+                        UsbDacManager.setMsStage(ss, img)
                     }
                     currentSong.let { song -> MusicService.currentSong = song; currentIndex = index }
                     // ��V3.2.8��DAC ��֧�� return ���ߺ��� V8.1 playlist ͬ����
@@ -1535,6 +1859,9 @@ class MusicService : MediaSessionService() {
     // V7.123: moved stop/open/play off UI thread so UI never freezes
     // ====================================================================
 
+    // =====================================================================
+    // 【Oboe 直连路径区】playSongOboeDirect(单曲会话生命周期) / FallbackExo / DSP 恢复
+    // =====================================================================
     private fun playSongOboeDirect(index: Int, songs: List<Song>) {
         val song = songs[index]
         currentIndex = index
@@ -1559,6 +1886,7 @@ class MusicService : MediaSessionService() {
                 // Create new player
                 val newPlayer = OboeDirectPlayer(this@MusicService)
                 oboeDirectPlayer = newPlayer
+                refreshBtPreEmphasis()  // 【2026-09-07】播放器就绪后应用蓝牙预补偿设置
 
                 Log.i(TAG, "Oboe: Exclusive mode (bg thread)")
                 oboeFlowTrace = "2F0E initializing (libLoaded=${OboeDirectPlayer.nativeLibLoaded})"
@@ -1623,6 +1951,37 @@ class MusicService : MediaSessionService() {
                     return@Thread
                 }
 
+                // 【V8.9 优化①·双层】A 轨预扫：当前歌尾部低能量段起点（决定 crossfade 触发时机）
+                // 后台线程不阻塞播放；失败回退实时 RMS 检测
+                xfadeAPrescanDone = false
+                xfadeAQuietStartMs = -1L
+                xfadeAChorusEndMs = -1L
+                val aScanPath = actualPath
+                Thread {
+                    try {
+                        // 【V8.15 A 轨副歌出】预扫最后一个副歌结束位置（mode=3），副歌唱完提前触发
+                        // 【V8.17】仅 BPM 匹配模式；纯随机跳过（回归定时+能量低谷）
+                        if (bpmChorusMode) {
+                            val aChorusEnd = newPlayer.preScanPath(aScanPath, 100, mode = 3, seekFromMs = 0L)
+                            if (aChorusEnd > 0) {
+                                xfadeAChorusEndMs = aChorusEnd.toLong()
+                                Log.i(TAG, "Crossfade: prescan-A chorusEnd=${aChorusEnd} ms")
+                            } else {
+                                Log.i(TAG, "Crossfade: prescan-A no chorusEnd (fallback)")
+                            }
+                        }
+                        val quiet = newPlayer.preScanPath(aScanPath, 100, mode = 0, seekFromMs = 0L)
+                        xfadeAQuietStartMs = quiet.toLong()
+                        xfadeAPrescanDone = true
+                        if (quiet > 0) Log.i(TAG, "Crossfade: prescan-A quietStart=$quiet ms")
+                        else Log.i(TAG, "Crossfade: prescan-A no quiet segment (fallback RMS)")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Crossfade: prescan-A failed ${e.message}")
+                        xfadeAQuietStartMs = -1L
+                        xfadeAPrescanDone = true
+                    }
+                }.apply { isDaemon = true }.start()
+
                 oboeFlowTrace = "4F3B5 playing..."
                 var played = newPlayer.play()
                 Log.i(TAG, "oboeDirectPlayer.play() = $played")
@@ -1668,6 +2027,11 @@ class MusicService : MediaSessionService() {
                             )
                             dspEqEnabled = true
                         }
+                    }
+                    // 【V8.19】DTS 环绕独立开关恢复（新建 OboeDirectPlayer 后声场系数需重设）
+                    if (MsebCalculator.isDtsEnabled(this@MusicService)) {
+                        val (ss, img) = MsebCalculator.dtsStageParams(this@MusicService)
+                        oboeDirectPlayer?.setMsStage(ss, img)
                     }
 
                     // [V8.1] Always sync ExoPlayer playlist so ForwardingPlayer.getCurrentMediaItem()
@@ -1717,6 +2081,9 @@ class MusicService : MediaSessionService() {
 
 
     /** ??v6.25??Apply DSP Biquad EQ in Oboe callback if "Steven Special" preset is active */
+    // =====================================================================
+    // 【DSP 效果接口区】MSEB/AutoEQ/5段EQ/M-S声场/瞬态/压缩/响度/Crossfeed/蓝牙预补偿 全部 setter 群
+    // =====================================================================
     private fun applyDspEqIfNeeded() {
         val eqPresetId = EqualizerManager.getCurrentPresetId(this)
         if (eqPresetId == "steven_special" && oboeDirectPlayer != null) {
@@ -1744,6 +2111,27 @@ class MusicService : MediaSessionService() {
 
     /** DAC 独占模式是否真正激活（已 claim） */
     fun isDacActive(): Boolean = isUsbExclusiveMode() && UsbDacManager.isClaimed()
+
+    // 【2026-09-07】A2DP 编码前预补偿（蓝牙 SBC/AAC 高频瞬态补偿）
+    // DAC 独占时跳过：USB 有线无蓝牙编码；Oboe/蓝牙路径下发到 native。
+    // enabled = 设置页总开关；codecDb 由 BtCodecTracker 检测当前蓝牙编码决定
+    // （SBC 2.0dB / AAC 0.8dB / LHDC·LDAC·有线 0 = 旁路）。
+    fun applyBtPreEmphasis(enabled: Boolean) {
+        if (isDacActive()) {
+            oboeDirectPlayer?.setBtPreEmphasis(false, 0f)
+            return
+        }
+        val db = BtCodecTracker.refresh(this)
+        oboeDirectPlayer?.setBtPreEmphasis(enabled, if (enabled) db else 0f)
+        Log.i(TAG, "BtPreEmphasis ${if (enabled) "ON" else "OFF"} codec=${BtCodecTracker.currentCodecName} db=$db")
+    }
+
+    // 路由变化/播放器重建后重发当前设置（保持开关状态与 codec 检测同步）
+    fun refreshBtPreEmphasis() {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        val enabled = prefs.getBoolean("bt_pre_emphasis", true)
+        applyBtPreEmphasis(enabled)
+    }
 
     /** 应用 MSEB 10 段 EQ — 根据当前播放模式路由到 Oboe 或 USB DAC 链路（共用同一套 Biquad） */
     fun applyMsebEq(gainsDb: FloatArray, freqsHz: FloatArray?, qValues: FloatArray?) {
@@ -2094,7 +2482,94 @@ class MusicService : MediaSessionService() {
     }
 
 
+    /** 【v8.15】按当前模式选下一首 index：shuffle+bpm 匹配 / shuffle 纯随机 / 顺序。
+     *  BPM 匹配只在随机播放开启且 settings shuffle_mode=bpm 时生效。 */
+    private fun pickNextIndex(songs: List<Song>, realIdx: Int): Int {
+        com.sdw.music.player.BpmKeyCache.init(this)  // 【V8.15】crossfade 也走 BPM 缓存（幂等，prefs==null 才初始化）
+        if (songs.isEmpty()) return -1
+        if (songs.size <= 1) return realIdx
+        if (!isShuffleMode) {
+            val ni = (realIdx + 1) % songs.size
+            Log.i(TAG, "Crossfade: pickNext seq=$ni (shuffle off)")
+            return ni
+        }
+        val pool = (0 until songs.size).filter { it != realIdx }
+        val bpmMatch = getSharedPreferences("settings", MODE_PRIVATE)
+            .getString("shuffle_mode", "random") == "bpm"
+        if (!bpmMatch) {
+            val ni = pool.random()
+            Log.i(TAG, "Crossfade: pickNext random=$ni (shuffle on, bpm off)")
+            return ni
+        }
+        val cachePath = currentSong?.let { it.filePath.ifEmpty { it.path } } ?: ""
+        val cacheHit = if (cachePath.isNotBlank()) com.sdw.music.player.BpmKeyCache.get(cachePath) else null
+        val curBpm = cacheHit?.first ?: 0
+        if (curBpm !in 40..220) {
+            val ni = pool.random()
+            Log.i(TAG, "Crossfade: pickNext random=$ni (curBpm=$curBpm unknown, cachePath='$cachePath' hit=${cacheHit != null}, cacheSize=${com.sdw.music.player.BpmKeyCache.size()})")
+            return ni
+        }
+        // 【V8.16】逐级放宽匹配窗口：±5 → ±10 → ±15 → ±20，最后才全池随机
+        // 避免"快歌后慢歌"——匹配池空时仍尽量选节奏相近的歌
+        val bpmOf: (Int) -> Int = { idx ->
+            val sp = songs[idx].filePath.ifEmpty { songs[idx].path }
+            if (sp.isNotBlank()) com.sdw.music.player.BpmKeyCache.get(sp)?.first ?: songs[idx].bpm
+            else songs[idx].bpm
+        }
+        // 【V8.25 防漂移】"第三首变慢歌"根因：容差内 random() 会随机到容差边缘的歌
+        // （134±5 池里随机到 129 → 129 再匹配又放宽 → 三级后漂到慢歌）。
+        // 【V8.26 防锁死】minByOrNull 永远返回差最小的第一首(index 最小) → 本轮排除它后
+        // 又选第二小 → 恰好两首同 BPM 的歌来回切（用户报"只能两首歌切来切去"）。
+        // 修复：容差内先找最小差 minDiff，再在 [minDiff, minDiff+2] 窄带内随机——
+        // 节奏锚定不漂移，同时不锁死单曲。
+        for (tolerance in intArrayOf(5, 10, 15, 20)) {
+            val matched = pool.map { it to bpmOf(it) }
+                .filter { (_, bpm) -> bpm in 40..220 && bpm in (curBpm - tolerance)..(curBpm + tolerance) }
+            if (matched.isNotEmpty()) {
+                val minDiff = matched.minOf { (_, bpm) -> kotlin.math.abs(bpm - curBpm) }
+                val band = matched.filter { (_, bpm) -> kotlin.math.abs(bpm - curBpm) <= minDiff + 2 }
+                val (ni, nb) = band.random()
+                Log.i(TAG, "Crossfade: pickNext bpm=$ni (curBpm=$curBpm tol=$tolerance picked=$nb band=$minDiff..${minDiff + 2} bandSize=${band.size}/${matched.size})")
+                return ni
+            }
+        }
+        val ni = pool.random()
+        Log.i(TAG, "Crossfade: pickNext random=$ni (no bpm within +-20, curBpm=$curBpm)")
+        return ni
+    }
+
+    // 【V8.23】BPM 自适应 crossfade 时长：A/B 两轨 BPM 差 ≤2 → 2s 短混音（拍上交接）
+    // 差 >2 → 返回用户设定时长（默认 5s，能量交叉长过渡）
+    private fun adaptiveXfadeDur(preSong: Song?): Int {
+        val cfg = getSharedPreferences("settings", MODE_PRIVATE)
+        val userDur = cfg.getInt("crossfade_duration_ms", 5000)
+        if (!isShuffleMode) return userDur
+        if (cfg.getString("shuffle_mode", "random") != "bpm") return userDur  // 纯随机不搞 BPM 短混
+        com.sdw.music.player.BpmKeyCache.init(this)
+        val aPath = currentSong?.let { it.filePath.ifEmpty { it.path } } ?: ""
+        val bPath = preSong?.let { it.filePath.ifEmpty { it.path } } ?: ""
+        val aBpm = if (aPath.isNotBlank()) com.sdw.music.player.BpmKeyCache.get(aPath)?.first ?: 0 else 0
+        val bBpm = if (bPath.isNotBlank()) com.sdw.music.player.BpmKeyCache.get(bPath)?.first ?: 0 else 0
+        if (aBpm in 40..220 && bBpm in 40..220) {
+            val diff = kotlin.math.abs(aBpm - bBpm)
+            // 【V8.24 过渡时长多档】BPM 越接近混音越短（DJ 式拍上交接）；差大保持长过渡
+            val shortDur = when (diff) {
+                0 -> 2000   // 完全同速：最短混音，拍上无缝
+                1 -> 3000   // 微差：稍长但仍紧凑
+                2 -> 4000   // 小差：中短混音
+                else -> -1  // 差>2：走长过渡
+            }
+            if (shortDur > 0) {
+                Log.i(TAG, "Crossfade: adaptive mix ${userDur}ms->${shortDur}ms (A=$aBpm B=$bBpm diff=$diff)")
+                return shortDur
+            }
+            Log.i(TAG, "Crossfade: adaptive keep ${userDur}ms (A=$aBpm B=$bBpm diff=$diff)")
+        }
+        return userDur
+    }
+
     fun playNext() {
+        com.sdw.music.player.BpmKeyCache.init(this)
         val songs = servicePlaylist.ifEmpty { SongRepository.getSongs() }
         DebugLog.add(TAG, "playNext: servicePlaylist=${servicePlaylist.size} songs=${songs.size} curIdx=$currentIndex shuffle=$isShuffleMode")
         if (songs.isEmpty()) return
@@ -2111,11 +2586,7 @@ class MusicService : MediaSessionService() {
             return
         }
         android.util.Log.d(TAG, "playNext: realIdx=$realIdx isShuffleMode=$isShuffleMode")
-        val nextIndex = if (isShuffleMode) {
-            if (songs.size <= 1) 0 else (0 until songs.size).filter { it != realIdx }.random()
-        } else {
-            (realIdx + 1) % songs.size
-        }
+        val nextIndex = pickNextIndex(songs, realIdx)
         android.util.Log.d(TAG, "playNext: nextIndex=$nextIndex (random=${isShuffleMode && songs.size > 1})")
         playSong(nextIndex)
     }
@@ -2316,21 +2787,7 @@ class MusicService : MediaSessionService() {
         // in notifyPlayStateChanged �?reflects caller intent immediately
         val isPlaying = this.isPlaying()
 
-        // 
-        // getBroadcast  BroadcastReceiver,�� ?? 
-        // getService  Intent  MusicService.onStartCommand()
-        val prevIntent = PendingIntent.getService(
-            this, 0, Intent(this, MusicService::class.java).apply { action = "com.sdw.music.player.PREV" }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val playPauseIntent = PendingIntent.getService(
-            this, 2, Intent(this, MusicService::class.java).apply { action = if (isPlaying) "com.sdw.music.player.PAUSE" else "com.sdw.music.player.PLAY" }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-        val nextIntent = PendingIntent.getService(
-            this, 3, Intent(this, MusicService::class.java).apply { action = "com.sdw.music.player.NEXT" }, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-        )
-
-        // Cover??
-                // [V8.x] Cached album art �� no disk I/O on main thread (prev jank in DAC mode)
+        // [V8.x] Cached album art - no disk I/O on main thread (prev jank in DAC mode)
         val artBitmap = if (song.albumArtUri.isNotEmpty()) {
             try { coverCache.get(song.albumArtUri) } catch (_: Exception) { null }
         } else null

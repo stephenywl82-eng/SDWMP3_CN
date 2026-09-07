@@ -360,6 +360,16 @@ bool UsbAudioDriver::start(int sampleRate, int channels, int bitsPerSample) {
         }
         if (altOk) {
             currentAlt_ = targetAlt;
+            // 【Qudelix-5K 0A12:4007】UAC1 设备必须在 alt=1 激活（ISO 端点可用）后才能 SET_CUR 采样率：
+            // 之前先 SET_CUR 再 setInterfaceAlt，Qudelix 返回 EPIPE(errno=32)，时钟停在 0，
+            // 96k 数据按 48k 播放（或无声），Kotlin 反复 start 重试耗尽 URB → submitUrbRaw ENOMEM。
+            // UAC2 设备（BTR5/TTGK）仍需先 SET_CUR 再 alt，此处仅对 UAC1 后置。
+            if (!isUac2_ && sampleRate_ != clockRate_) {
+                int scRet2 = trySetSampleRate(sampleRate_);
+                if (scRet2 >= 0) { clockRate_ = sampleRate_; scRet = scRet2; }
+                else LOGE("start: UAC1 post-alt SET_CUR(%d) failed again: %s (errno=%d)",
+                          sampleRate_, strerror(errno), errno);
+            }
             // 浠庨€変腑鐨勫€欓€夋洿鏂板疄闄呭弬锟?
             for (auto& c : altCandidates_) {
                 if (c.alt == targetAlt) {

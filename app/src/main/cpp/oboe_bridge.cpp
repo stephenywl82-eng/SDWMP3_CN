@@ -19,6 +19,9 @@
 #include <unistd.h>
 #include "biquad_filter.h"
 #include "loudness_comp.h"
+#include "alac/ALACDecoder.h"
+#include "alac/ALACBitUtilities.h"
+#include <cstdio>
 #include <sys/stat.h>
 #define LOG_TAG "OboeBridge"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -411,6 +414,440 @@ JNIEXPORT jlong JNICALL Java_com_sdw_music_player_OboeAudioSink_nativeGetPresent
     return ((g_sinkStartFrames + framesElapsed) * 1000000LL) / sr;
 }
 
+
+// ============================================================================
+// AlacDirect — 【2026-09-02】ALAC 无损直解引擎（Oboe A/B 双槽共用）
+// Android MediaCodec 无 audio/alac 解码器 → 普通模式播 ALAC m4a 卡死。
+// 复用 alac/ 目录 Apple 官方解码器 + 手写 MP4 box 解析（与 USB DAC 路径同源，
+// 但独立实例化，A/B 槽各持一个，互不干扰）。
+// 用法：openFd/openPath 成功后由解码循环驱动 decodeNext() 写调用方 ring buffer。
+// ============================================================================
+class AlacDirect {
+public:
+    struct Sample { uint64_t offset; uint32_t size; uint32_t duration; };
+
+    ALACDecoder* dec = nullptr;
+    FILE* file = nullptr;
+    std::vector<Sample> samples;
+    std::vector<uint8_t> cookie;
+    std::atomic<int> sampleRate{0}, channels{0}, bits{0}, frameLen{4096};
+    std::atomic<int64_t> totalFrames{0}, durationMs{0};
+    int64_t sampleIdx = 0;      // 下一个待解 sample
+    int64_t framePos = 0;       // 已喂 PCM 帧数
+    bool eos = false;
+    bool opened = false;
+
+    // ── 字节序工具（MP4 big-endian）────────────────────────
+    static inline uint16_t be16(const uint8_t* p) { return (uint16_t)((p[0]<<8)|p[1]); }
+    static inline uint32_t be24(const uint8_t* p) { return ((uint32_t)p[0]<<16)|((uint32_t)p[1]<<8)|p[2]; }
+    static inline uint32_t be32(const uint8_t* p) { return ((uint32_t)p[0]<<24)|((uint32_t)p[1]<<16)|((uint32_t)p[2]<<8)|p[3]; }
+    static inline uint64_t be64(const uint8_t* p) { return ((uint64_t)be32(p)<<32)|be32(p+4); }
+    static uint32_t fourcc(const char* s) {
+        return ((uint32_t)(uint8_t)s[0]<<24)|((uint32_t)(uint8_t)s[1]<<16)|((uint32_t)(uint8_t)s[2]<<8)|((uint32_t)(uint8_t)s[3]);
+    }
+
+    struct Box { uint64_t offset; uint64_t size; uint32_t type; };
+
+    std::vector<Box> listBoxes(uint64_t start, uint64_t end) {
+        std::vector<Box> boxes;
+        uint64_t pos = start;
+        while (pos + 8 <= end) {
+            uint8_t hdr[16];
+            if (fseek(file, (long)pos, SEEK_SET) != 0) break;
+            if (fread(hdr, 1, 16, file) < 8) break;
+            uint64_t size = be32(hdr);
+            uint32_t type = be32(hdr + 4);
+            uint64_t hdrSize = 8;
+            if (size == 1) { size = be64(hdr + 8); hdrSize = 16; }
+            else if (size == 0) { size = end - pos; }
+            if (size < hdrSize) break;
+            boxes.push_back({pos, size, type});
+            pos += size;
+        }
+        return boxes;
+    }
+
+    Box findBox(uint32_t type, uint64_t start, uint64_t end) {
+        for (auto& b : listBoxes(start, end)) if (b.type == type) return b;
+        return {0,0,0};
+    }
+
+    // stts → per-sample duration
+    bool parseStts(uint64_t off, uint64_t size, std::vector<uint32_t>& out) {
+        uint64_t payload = off + 8, end = off + size;
+        if (payload + 8 > end) return false;
+        uint8_t hdr[8];
+        fseek(file, (long)payload, SEEK_SET);
+        if (fread(hdr, 1, 8, file) != 8) return false;
+        uint32_t count = be32(hdr + 4);
+        uint64_t pos = payload + 8;
+        for (uint32_t i = 0; i < count; i++) {
+            uint8_t e[8];
+            if (pos + 8 > end) break;
+            fseek(file, (long)pos, SEEK_SET);
+            if (fread(e, 1, 8, file) != 8) break;
+            uint32_t n = be32(e), d = be32(e+4);
+            for (uint32_t j = 0; j < n; j++) out.push_back(d);
+            pos += 8;
+        }
+        return !out.empty();
+    }
+
+    // stsz → per-sample size
+    bool parseStsz(uint64_t off, uint64_t size, uint32_t sampleCount, std::vector<uint32_t>& out) {
+        uint64_t payload = off + 8, end = off + size;
+        if (payload + 12 > end) return false;
+        uint8_t hdr[12];
+        fseek(file, (long)payload, SEEK_SET);
+        if (fread(hdr, 1, 12, file) != 12) return false;
+        uint32_t sampleSize = be32(hdr + 4), count = be32(hdr + 8);
+        out.clear();
+        if (sampleSize != 0) { out.assign(sampleCount > 0 ? sampleCount : count, sampleSize); return true; }
+        uint64_t pos = payload + 12;
+        for (uint32_t i = 0; i < count && i < sampleCount; i++) {
+            uint8_t e[4];
+            if (pos + 4 > end) break;
+            fseek(file, (long)pos, SEEK_SET);
+            if (fread(e, 1, 4, file) != 4) break;
+            out.push_back(be32(e));
+            pos += 4;
+        }
+        return !out.empty();
+    }
+
+    // stco/co64 → chunk offsets
+    bool parseChunkOffsets(uint32_t type, uint64_t off, uint64_t size, std::vector<uint64_t>& out) {
+        uint64_t payload = off + 8, end = off + size;
+        if (payload + 8 > end) return false;
+        uint8_t hdr[8];
+        fseek(file, (long)payload, SEEK_SET);
+        if (fread(hdr, 1, 8, file) != 8) return false;
+        uint32_t count = be32(hdr + 4);
+        uint64_t pos = payload + 8;
+        for (uint32_t i = 0; i < count; i++) {
+            if (type == fourcc("co64")) {
+                uint8_t e[8];
+                if (pos + 8 > end) break;
+                fseek(file, (long)pos, SEEK_SET);
+                if (fread(e, 1, 8, file) != 8) break;
+                out.push_back(be64(e)); pos += 8;
+            } else {
+                uint8_t e[4];
+                if (pos + 4 > end) break;
+                fseek(file, (long)pos, SEEK_SET);
+                if (fread(e, 1, 4, file) != 4) break;
+                out.push_back(be32(e)); pos += 4;
+            }
+        }
+        return !out.empty();
+    }
+
+    // stsc → samples-per-chunk
+    bool parseStsc(uint64_t off, uint64_t size, uint32_t chunkCount, std::vector<uint32_t>& out) {
+        uint64_t payload = off + 8, end = off + size;
+        if (payload + 8 > end) return false;
+        uint8_t hdr[8];
+        fseek(file, (long)payload, SEEK_SET);
+        if (fread(hdr, 1, 8, file) != 8) return false;
+        uint32_t count = be32(hdr + 4);
+        struct E { uint32_t first, spc, desc; };
+        std::vector<E> entries;
+        uint64_t pos = payload + 8;
+        for (uint32_t i = 0; i < count; i++) {
+            uint8_t e[12];
+            if (pos + 12 > end) break;
+            fseek(file, (long)pos, SEEK_SET);
+            if (fread(e, 1, 12, file) != 12) break;
+            entries.push_back({be32(e), be32(e+4), be32(e+8)});
+            pos += 12;
+        }
+        if (entries.empty()) return false;
+        out.assign(chunkCount, 0);
+        for (size_t i = 0; i < entries.size(); i++) {
+            uint32_t from = entries[i].first;
+            uint32_t to = (i + 1 < entries.size()) ? (entries[i+1].first - 1) : chunkCount;
+            if (from < 1) from = 1;
+            for (uint32_t c = from; c <= to && c <= chunkCount; c++) out[c-1] = entries[i].spc;
+        }
+        return true;
+    }
+
+    // stsd → ALAC cookie
+    bool parseStsdCookie(uint64_t off, uint64_t size, std::vector<uint8_t>& outCookie) {
+        uint64_t payload = off + 8, end = off + size;
+        if (payload + 8 > end) return false;
+        uint8_t hdr[8];
+        fseek(file, (long)payload, SEEK_SET);
+        if (fread(hdr, 1, 8, file) != 8) return false;
+        uint64_t entryOffset = payload + 8;
+        if (entryOffset + 8 > end) return false;
+        uint8_t ehdr[8];
+        fseek(file, (long)entryOffset, SEEK_SET);
+        if (fread(ehdr, 1, 8, file) != 8) return false;
+        uint64_t entrySize = be32(ehdr);
+        uint32_t entryType = be32(ehdr + 4);
+        if (entryType != fourcc("alac")) return false;   // AAC mp4a → 非 ALAC，拒绝
+        uint64_t entryStart = entryOffset + 8;
+        uint64_t entryEnd = entryOffset + entrySize;
+        if (entryEnd > end) entryEnd = end;
+        const uint64_t audioHdr = 28;
+        uint64_t subStart = entryStart + audioHdr;
+        for (auto& sub : listBoxes(subStart, entryEnd)) {
+            if (sub.type == fourcc("alac")) {
+                uint64_t p = sub.offset + 8, pEnd = sub.offset + sub.size;
+                uint64_t readFrom = (pEnd - p >= 4 + 24) ? (p + 4) : p;
+                if (pEnd - p < 24) return false;
+                outCookie.resize(24);
+                fseek(file, (long)readFrom, SEEK_SET);
+                if (fread(outCookie.data(), 1, 24, file) != 24) return false;
+                return true;
+            } else if (sub.type == fourcc("wave")) {
+                for (auto& w : listBoxes(sub.offset + 8, sub.offset + sub.size)) {
+                    if (w.type == fourcc("alac")) {
+                        uint64_t p = w.offset + 8, pEnd = w.offset + w.size;
+                        uint64_t readFrom = (pEnd - p >= 4 + 24) ? (p + 4) : p;
+                        if (pEnd - p < 24) return false;
+                        outCookie.resize(24);
+                        fseek(file, (long)readFrom, SEEK_SET);
+                        if (fread(outCookie.data(), 1, 24, file) != 24) return false;
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    // ── 构建完整 sample table ─────────────────────────────
+    bool buildTable() {
+        if (!file) return false;
+        fseek(file, 0, SEEK_END);
+        long fileSize = ftell(file);
+        fseek(file, 0, SEEK_SET);
+        if (fileSize <= 0) return false;
+
+        Box moov = findBox(fourcc("moov"), 0, (uint64_t)fileSize);
+        if (moov.type == 0) { LOGE("AlacDirect: moov not found"); return false; }
+
+        Box audioTrak{0,0,0};
+        for (auto& trak : listBoxes(moov.offset + 8, moov.offset + moov.size)) {
+            if (trak.type != fourcc("trak")) continue;
+            Box mdia = findBox(fourcc("mdia"), trak.offset + 8, trak.offset + trak.size);
+            if (mdia.type == 0) continue;
+            Box hdlr = findBox(fourcc("hdlr"), mdia.offset + 8, mdia.offset + mdia.size);
+            if (hdlr.type == 0) continue;
+            uint8_t hb[12];
+            fseek(file, (long)(hdlr.offset + 8), SEEK_SET);
+            if (fread(hb, 1, 12, file) != 12) continue;
+            if (be32(hb + 8) == fourcc("soun")) { audioTrak = trak; break; }
+        }
+        if (audioTrak.type == 0) { LOGE("AlacDirect: no soun trak"); return false; }
+
+        Box mdia = findBox(fourcc("mdia"), audioTrak.offset + 8, audioTrak.offset + audioTrak.size);
+        if (mdia.type == 0) return false;
+        Box minf = findBox(fourcc("minf"), mdia.offset + 8, mdia.offset + mdia.size);
+        if (minf.type == 0) return false;
+        Box stbl = findBox(fourcc("stbl"), minf.offset + 8, minf.offset + minf.size);
+        if (stbl.type == 0) return false;
+
+        Box stsd{0,0,0}, stts{0,0,0}, stsc{0,0,0}, stsz{0,0,0}, stco{0,0,0}, co64{0,0,0};
+        for (auto& b : listBoxes(stbl.offset + 8, stbl.offset + stbl.size)) {
+            if (b.type == fourcc("stsd")) stsd = b;
+            else if (b.type == fourcc("stts")) stts = b;
+            else if (b.type == fourcc("stsc")) stsc = b;
+            else if (b.type == fourcc("stsz")) stsz = b;
+            else if (b.type == fourcc("stco")) stco = b;
+            else if (b.type == fourcc("co64")) co64 = b;
+        }
+        if (stsd.type == 0 || stts.type == 0 || stsz.type == 0) {
+            LOGE("AlacDirect: missing stsd/stts/stsz"); return false;
+        }
+
+        if (!parseStsdCookie(stsd.offset, stsd.size, cookie)) {
+            LOGE("AlacDirect: cookie extraction failed (not ALAC?)"); return false;
+        }
+
+        dec = new ALACDecoder();
+        if (dec->Init(cookie.data(), (uint32_t)cookie.size()) != 0) {
+            LOGE("AlacDirect: ALACDecoder::Init failed");
+            delete dec; dec = nullptr;
+            return false;
+        }
+        sampleRate = dec->mConfig.sampleRate;
+        channels   = dec->mConfig.numChannels;
+        bits       = dec->mConfig.bitDepth;
+        frameLen   = dec->mConfig.frameLength > 0 ? dec->mConfig.frameLength : 4096;
+
+        std::vector<uint32_t> durations;
+        if (!parseStts(stts.offset, stts.size, durations)) { LOGE("AlacDirect: stts failed"); return false; }
+        uint32_t sampleCount = (uint32_t)durations.size();
+
+        std::vector<uint32_t> sizes;
+        if (!parseStsz(stsz.offset, stsz.size, sampleCount, sizes)) { LOGE("AlacDirect: stsz failed"); return false; }
+        if (sizes.size() < sampleCount) sampleCount = (uint32_t)sizes.size();
+
+        std::vector<uint64_t> chunkOffsets;
+        Box coBox = (co64.type != 0) ? co64 : stco;
+        if (coBox.type == 0 || !parseChunkOffsets(coBox.type, coBox.offset, coBox.size, chunkOffsets)) {
+            LOGE("AlacDirect: no stco/co64"); return false;
+        }
+        uint32_t chunkCount = (uint32_t)chunkOffsets.size();
+
+        std::vector<uint32_t> spc;
+        if (stsc.type != 0) { if (!parseStsc(stsc.offset, stsc.size, chunkCount, spc)) { LOGE("AlacDirect: stsc failed"); return false; } }
+        else spc.assign(chunkCount, 1);
+
+        samples.clear();
+        uint32_t sIdx = 0;
+        for (uint32_t c = 0; c < chunkCount && sIdx < sampleCount; c++) {
+            uint64_t dataOff = chunkOffsets[c];
+            uint32_t n = spc[c];
+            for (uint32_t s = 0; s < n && sIdx < sampleCount; s++) {
+                Sample smp; smp.offset = dataOff; smp.size = sizes[sIdx]; smp.duration = durations[sIdx];
+                samples.push_back(smp);
+                dataOff += sizes[sIdx];
+                sIdx++;
+            }
+        }
+        if (samples.empty()) { LOGE("AlacDirect: zero samples"); return false; }
+
+        int64_t total = 0;
+        for (auto& s : samples) total += s.duration;
+        totalFrames = total;
+        durationMs = (total * 1000LL) / (sampleRate.load() > 0 ? sampleRate.load() : 1);
+
+        LOGI("AlacDirect: OK sr=%d ch=%d bits=%d samples=%zu dur=%lldms",
+             sampleRate.load(), channels.load(), bits.load(), samples.size(), (long long)durationMs.load());
+        opened = true;
+        return true;
+    }
+
+    // ── open by fd (dup 成 FILE*) ─────────────────────────
+    bool openFd(int fd, int64_t offset, int64_t length) {
+        close();
+        int dupFd = dup(fd);
+        if (dupFd < 0) { LOGE("AlacDirect: dup fd failed"); return false; }
+        if (offset > 0) {
+            if (lseek(dupFd, (off_t)offset, SEEK_SET) < 0) { LOGE("AlacDirect: lseek failed"); ::close(dupFd); return false; }
+        }
+        file = fdopen(dupFd, "rb");
+        if (!file) { LOGE("AlacDirect: fdopen failed"); ::close(dupFd); return false; }
+        if (!buildTable()) { close(); return false; }
+        return true;
+    }
+
+    // ── open by path ───────────────────────────────────────
+    bool openPath(const char* path) {
+        close();
+        file = fopen(path, "rb");
+        if (!file) { LOGE("AlacDirect: fopen failed"); return false; }
+        if (!buildTable()) { close(); return false; }
+        return true;
+    }
+
+    void close() {
+        if (dec) { delete dec; dec = nullptr; }
+        if (file) { fclose(file); file = nullptr; }
+        samples.clear(); cookie.clear();
+        sampleIdx = 0; framePos = 0;
+        eos = false; opened = false;
+        sampleRate = 0; channels = 0; bits = 0; frameLen = 4096;
+        totalFrames = 0; durationMs = 0;
+    }
+
+    // ── 同步解码一帧：返回帧数，0 = 无数据/错误，-1 = EOS ──
+    // out 需容纳 frameLen*channels float
+    int decodeNext(float* out) {
+        if (!dec || !file || !opened) return 0;
+        if (eos) return -1;
+        if (sampleIdx >= (int64_t)samples.size()) {
+            eos = true;
+            return -1;
+        }
+        const int ch = channels.load();
+        const int sr = sampleRate.load();
+        const int fl = frameLen.load();
+        if (ch < 1 || ch > 8 || sr < 1 || fl < 1) { eos = true; return -1; }
+
+        const Sample& smp = samples[sampleIdx];
+        if (smp.size == 0 || smp.size > 1024 * 1024) { sampleIdx++; return 0; }  // 坏包跳过
+
+        // packet 缓冲（零初始化防越界读）
+        std::vector<uint8_t> packet(smp.size + 16, 0);
+        fseek(file, (long)smp.offset, SEEK_SET);
+        size_t got = fread(packet.data(), 1, smp.size, file);
+        if (got != smp.size) { sampleIdx++; return 0; }
+
+        std::vector<uint8_t> intPcm((size_t)fl * ch * 4, 0);
+        BitBuffer bitBuf;
+        BitBufferInit(&bitBuf, packet.data(), smp.size);
+        uint32_t outFrames = 0;
+        int32_t status = dec->Decode(&bitBuf, intPcm.data(), (uint32_t)fl, (uint32_t)ch, &outFrames);
+        if (status != 0 || outFrames == 0) { sampleIdx++; return 0; }
+
+        // int → float
+        const int bitsPS = bits.load();
+        int total = (int)outFrames * ch;
+        if (bitsPS == 16) {
+            for (int i = 0; i < total; i++) {
+                int16_t v; memcpy(&v, intPcm.data() + i*2, 2);
+                out[i] = (float)v / 32768.0f;
+            }
+        } else if (bitsPS == 24 || bitsPS == 20) {
+            const uint8_t* b = intPcm.data();
+            for (int i = 0; i < total; i++) {
+                int32_t v = (int32_t)(b[0] | (b[1] << 8) | (b[2] << 16));
+                if (v & 0x800000) v |= (int32_t)0xFF000000;
+                out[i] = (float)v / 8388608.0f;
+                b += 3;
+            }
+        } else {
+            for (int i = 0; i < total; i++) {
+                int32_t v; memcpy(&v, intPcm.data() + i*4, 4);
+                out[i] = (float)v / 2147483648.0f;
+            }
+        }
+        framePos += (int64_t)outFrames;
+        sampleIdx++;
+        return (int)outFrames;
+    }
+
+    // ── seek（按 ms，下一帧从目标位置起）───────────────────
+    void seekMs(int64_t ms) {
+        int sr = sampleRate.load();
+        if (sr <= 0) return;
+        int64_t targetFrame = (ms * sr) / 1000;
+        if (targetFrame < 0) targetFrame = 0;
+        if (samples.empty()) return;
+        int64_t total = 0;
+        for (auto& s : samples) total += s.duration;
+        if (targetFrame >= total) targetFrame = total - 1;
+        int64_t acc = 0;
+        int64_t idx = 0;
+        for (int64_t i = 0; i < (int64_t)samples.size(); i++) {
+            if (acc + (int64_t)samples[i].duration > targetFrame) { idx = i; break; }
+            acc += samples[i].duration;
+            idx = i;
+        }
+        sampleIdx = idx;
+        framePos = acc;
+        eos = false;
+    }
+
+    int64_t positionMs() {
+        int sr = sampleRate.load();
+        if (sr <= 0) return 0;
+        return (framePos * 1000LL) / sr;
+    }
+};
+
+// A/B 槽 ALAC 实例（仅在检测到 audio/alac 时使用；其余文件走 AMediaCodec）
+static std::unique_ptr<AlacDirect> g_alacA;   // A 槽（active）
+static std::unique_ptr<AlacDirect> g_alacB;   // B 槽（incoming）
+static std::atomic<bool> g_alacModeA{false};  // A 槽当前是否 ALAC 直解
+static std::atomic<bool> g_alacModeB{false};  // B 槽当前是否 ALAC 直解
+
+
 // ============================================================
 // OboeDirectPlayer — NDK MediaCodec 解码 + Oboe 输出
 // ============================================================
@@ -429,8 +866,15 @@ static std::atomic<bool> g_crossfadeActive{false}; // 【Crossfade】正在交�
 static std::atomic<float> g_crossfadePos{0.0f};    // 【Crossfade】进度 0..1
 static std::atomic<float> g_crossfadeStep{0.0f};   // 【Crossfade】每帧增量
 static std::atomic<int> g_crossfadeDurationMs{0};  // 【Crossfade】时长（完成后重置播放位置用）
+// 【V8.15】B 轨起点(ms)：crossfade 完成时位置 = bStartMs + 已淡入时长（进度条正确显示）
+static std::atomic<int64_t> g_xfadeBStartMs{0};
 static float g_xfadeBufA[16384];   // 【Crossfade】A 轨临时缓冲（实时线程安全 static）
 static float g_xfadeBufB[16384];   // 【Crossfade】B 轨临时缓冲
+static float g_xfadeHpfPrevB[8] = {0};  // 【Crossfade 低频防浑浊】B 轨 1 阶 HPF 每声道前一采样状态
+static float g_xfadeLpfPrevA[8] = {0};  // 【V8.23 A 轨对称低切】A 轨 1 阶 LPF 每声道前一采样状态
+// 【V8.24 B 音量预匹配】B 副歌段参考 RMS（preScanChorusMs 写入，crossfade 启动时读）与 B 轨预增益
+static std::atomic<float> g_xfadeChorusRms{0.0f};
+static std::atomic<float> g_xfadeBPreGain{1.0f};
 static oboe::ManagedStream g_outputStream;
 static std::atomic<bool> g_isPlaying{false};
 static std::atomic<int> g_sampleRate{44100};
@@ -550,7 +994,6 @@ static std::atomic<int> g_nativeOpenErrorCode{0};       // 【V7.18】nativeOpen
 static std::atomic<int64_t> g_underrunCount{0};        // 【V7.39】RingBuffer underrun 次数（回调读不够数据）
 static std::mutex g_eqMutex;
 
-
 // ============================================================================
 // Look-Ahead Limiter — 5ms peak prediction
 // Prevents intersample peaks from exceeding threshold
@@ -613,6 +1056,95 @@ public:
     }
 };
 static LookAheadLimiter g_limiter;
+
+// ============================================================================
+// DtsSurround — 【V8.19】DTS 虚拟环绕渲染（方案 A 延迟反馈 + 方案 B 低音分频）
+// 在 M/S 中侧分解基础上增强：
+//   A) 延迟反馈网络：side 延迟 10ms + 低通 2.5kHz（后墙反射）反相回灌 L/R，
+//      营造环绕包围感（量随 width 增强而增加，width=1 时无环绕）；
+//   B) 低音分频：side 先过 180Hz 高通，低频只保留在 mid（单声道低音），
+//      避免虚拟环绕把低频也扩宽导致低音发虚/漂移。
+// 纯 Oboe 路径（DAC bit-perfect 直通不受影响）。
+// ============================================================================
+class DtsSurround {
+public:
+    static constexpr int MAX_DELAY = 4096;             // 48k ~85ms 余量
+    static constexpr float SIDE_DELAY_S = 0.010f;      // 10ms 侧向环绕延迟
+    static constexpr float SIDE_LP_HZ = 2500.0f;       // 环绕高频吸收（后墙）
+    static constexpr float SIDE_HP_HZ = 180.0f;        // 低音分频点（方案 B）
+    static constexpr float HAAS_DELAY_S = 0.0008f;     // 0.8ms 中置 HAAS 强化
+
+    float histS[MAX_DELAY] = {0};
+    float histM[MAX_DELAY] = {0};
+    int writePos = 0;
+
+    int delayS = 480;      // 10ms @48k
+    int delayM = 38;       // 0.8ms @48k
+    float lpCoeff = 0.0f;  // side 低通（环绕吸收）
+    float lpState = 0.0f;
+    float hpCoeff = 0.0f;  // side 高通（分频）
+    float hpState = 0.0f;
+    float haasLp = 0.0f;   // HAAS 低通态（M 延迟后微低通防相位梳状）
+
+    void setSampleRate(float sr) {
+        delayS = (int)(SIDE_DELAY_S * sr + 0.5f);
+        if (delayS < 1) delayS = 1;
+        if (delayS >= MAX_DELAY) delayS = MAX_DELAY - 1;
+        delayM = (int)(HAAS_DELAY_S * sr + 0.5f);
+        if (delayM < 1) delayM = 1;
+        if (delayM >= MAX_DELAY) delayM = MAX_DELAY - 1;
+        lpCoeff = 1.0f - expf(-2.0f * (float)M_PI * SIDE_LP_HZ / sr);
+        hpCoeff = 1.0f - expf(-2.0f * (float)M_PI * SIDE_HP_HZ / sr);
+    }
+
+    void reset() {
+        memset(histS, 0, sizeof(histS));
+        memset(histM, 0, sizeof(histM));
+        writePos = 0;
+        lpState = 0.0f;
+        hpState = 0.0f;
+        haasLp = 0.0f;
+    }
+
+    // 处理一对样本。mid/side 为输入分解，w = S 增益(≥1 增宽)，c = M 增益。
+    // 输出 outL/outR 为渲染结果（含方案 A+B）。
+    void process(float mid, float side, float w, float c, float &outL, float &outR) {
+        // ---- 方案 B：低音分频 — side 高通 180Hz，低频只留 mid（单声道低音）----
+        float hpIn = side;
+        hpState += hpCoeff * (hpIn - hpState);
+        float sideHp = hpIn - hpState;   // 一阶 HPF（180Hz 以上侧向）
+
+        // ---- 方案 A：延迟反馈网络 ----
+        histS[writePos] = sideHp;
+        histM[writePos] = mid;
+        int rpS = writePos - delayS;
+        if (rpS < 0) rpS += MAX_DELAY;
+        int rpM = writePos - delayM;
+        if (rpM < 0) rpM += MAX_DELAY;
+
+        // 环绕：side 延迟 + 低通（后墙反射吸收高频），反相回灌
+        lpState += lpCoeff * (histS[rpS] - lpState);
+        // 环绕强度随增宽量调制：w=1 → 0，w=1.8 → ~0.4
+        float amb = (w - 1.0f) * 0.5f;
+        if (amb < 0.0f) amb = 0.0f;
+        if (amb > 0.5f) amb = 0.5f;
+        float rear = amb * lpState;
+
+        // HAAS 中置强化：mid 延迟 0.8ms（微低通防梳状）作为中置额外聚焦
+        haasLp += 0.2f * (histM[rpM] - haasLp);   // ~2kHz 平滑
+        float focus = (c - 1.0f) * 0.5f;          // c=1 → 0，c=1.6 → 0.3
+        if (focus < 0.0f) focus = 0.0f;
+        if (focus > 0.5f) focus = 0.5f;
+
+        // ---- 合成 ----
+        float sW = sideHp * w;
+        outL = mid * c + sW + rear + haasLp * focus;
+        outR = mid * c - sW - rear + haasLp * focus;
+
+        writePos = (writePos + 1) % MAX_DELAY;
+    }
+};
+static DtsSurround g_dts;
 
 // ============================================================================
 // Crossfeed — 消除头中效应（耳机虚拟声场第一步）
@@ -868,6 +1400,66 @@ static float g_dcX1L = 0, g_dcY1L = 0;
 static float g_dcX1R = 0, g_dcY1R = 0;
 
 // ============================================================================
+// 【2026-09-07】A2DP 编码前预补偿（Pre-emphasis for Bluetooth lossy codecs）
+// 目标：SBC/AAC 有损编码对高频瞬态边缘的挤压。仅在蓝牙低码率编码时启用，
+// 有线/DAC/LHDC 高码率路径旁路（codecDb=0）。
+// 算法：5kHz 高通（一阶）提取瞬态成分 → 包络跟随器（attack≈2ms/release≈50ms）
+//       → 瞬态处叠加 hp*env*boost。boost 由 codec 决定（SBC 2dB/AAC 0.8dB）。
+// ============================================================================
+static std::atomic<bool> g_btPreEnabled{false};      // 总开关（设置页）
+static std::atomic<float> g_btPreCodecDb{0.0f};      // 当前 codec 增益 dB（0=旁路）
+// 每声道瞬态包络状态（callback 线程专用，无需 atomic）
+static float g_btPreEnvL = 0.0f, g_btPreEnvR = 0.0f;
+static float g_btPreHpX1L = 0.0f, g_btPreHpX1R = 0.0f;
+static float g_btPreHpY1L = 0.0f, g_btPreHpY1R = 0.0f;
+static float g_btPreSampleRate = 48000.0f;  // 默认；open 时更新
+
+
+static float g_btPreHpK = 0.0f;         // 缓存 HPF 系数
+static float g_btPreAtk = 0.0f;         // 缓存 attack 系数
+static float g_btPreRel = 0.0f;         // 缓存 release 系数
+static void btPreUpdateCoeffs(float sr) {
+    g_btPreSampleRate = sr;
+    const float fc = 5000.0f;
+    const float w = 2.0f * (float)M_PI * fc / sr;
+    g_btPreHpK = w / (1.0f + w);
+    g_btPreAtk = 1.0f - expf(-1.0f / (0.002f * sr));
+    g_btPreRel = 1.0f - expf(-1.0f / (0.050f * sr));
+}
+
+// 每帧处理：返回 true 时 out 已被补偿
+static inline bool btPreEmphasisFrame(float &l, float &r, bool stereo) {
+    const float db = g_btPreCodecDb.load();
+    if (!g_btPreEnabled.load() || db <= 0.0f) return false;
+    float srNow = (float)g_sampleRate.load();
+    if (srNow != g_btPreSampleRate) btPreUpdateCoeffs(srNow);
+    // 5kHz 一阶高通系数 + 包络时间常数（缓存，采样率变化时由 open 更新）
+    const float k = g_btPreHpK;
+    const float atk = g_btPreAtk;
+    const float rel = g_btPreRel;
+    const float boost = powf(10.0f, db / 20.0f) - 1.0f;     // dB -> 线性增量
+
+    // L
+    float hpL = k * (l - g_btPreHpX1L) + (1.0f - k) * g_btPreHpY1L;
+    g_btPreHpX1L = l; g_btPreHpY1L = hpL;
+    float envL = fabsf(hpL) > g_btPreEnvL ? g_btPreEnvL + atk * (fabsf(hpL) - g_btPreEnvL)
+                                          : g_btPreEnvL + rel * (fabsf(hpL) - g_btPreEnvL);
+    g_btPreEnvL = envL;
+    l += hpL * envL * boost;
+
+    if (stereo) {
+        float hpR = k * (r - g_btPreHpX1R) + (1.0f - k) * g_btPreHpY1R;
+        g_btPreHpX1R = r; g_btPreHpY1R = hpR;
+        float envR = fabsf(hpR) > g_btPreEnvR ? g_btPreEnvR + atk * (fabsf(hpR) - g_btPreEnvR)
+                                              : g_btPreEnvR + rel * (fabsf(hpR) - g_btPreEnvR);
+        g_btPreEnvR = envR;
+        r += hpR * envR * boost;
+    }
+    return true;
+}
+
+
+// ============================================================================
 // TPDF Dither — Triangular Probability Density Function dither
 // Adds 2 LSB of triangular noise before quantization
 // ============================================================================
@@ -922,12 +1514,44 @@ public:
             float step = g_crossfadeStep.load();
             const float HP = 1.5707963f;  // PI/2
             for (int f = 0; f < numFrames; f++) {
-                float gTo = sinf(pos * HP);
-                float gFrom = cosf(pos * HP);
+                // 【方案2 等响度】smoothstep S 曲线替代等功率 cos/sin：中间段两轨都更响，补偿等功率 dip
+                // 端点处 gTo/gFrom 仍是 0/1 完全淡出淡入，语义不变
+                // 【V8.15】ease-out 互补曲线：B 轨快速进入（pos=0.3 时已有 51% 音量），A 轨快速淡出
+                // 总响度恒 1（等功率互补）：gFrom=(1-pos)^2, gTo=1-(1-pos)^2
+                float om = 1.0f - pos;
+                float gTo = 1.0f - om * om;   // B 轨：ease-out，前段快速上升
+                float gFrom = om * om;        // A 轨：互补快速淡出
+                // 【方案3 低频防浑浊】B 轨淡入时低频与 A 轨叠加易浑浊：
+                // 随 pos 从 0 到 0.6 线性衰减的高通（θ=pos/0.6），滤除 B 轨低频；
+                // θ>=1（pos>=0.6）后直通，不改变最终听感（A 轨此时已基本淡出）
+                float theta = pos < 0.6f ? pos / 0.6f : 1.0f;   // 0..1
+                float hpfMix = 1.0f - theta;                     // 1 -> 0 线性衰减
+                float hpfK = 0.35f * hpfMix;                     // 1 阶 HPF 系数（~85Hz@44.1k）
                 for (int c = 0; c < channels; c++) {
                     int idx = f * channels + c;
                     float from = idx < toReadFrom ? g_xfadeBufA[idx] : 0.0f;
                     float to = idx < toReadTo ? g_xfadeBufB[idx] : 0.0f;
+                    // 【V8.24 B 音量预匹配】B 轨预增益（仅 crossfade 激活期间生效；complete 后 B 上位成新 A，
+                    //  必须恢复 1.0，否则整首歌持续低音量 —— 2026-09-01 音量忽大忽小根因）
+                    if (g_crossfadeActive.load()) to *= g_xfadeBPreGain.load(std::memory_order_relaxed);
+                    // B 轨低频防浑浊：1 阶 high-pass（y[n] = k*(x[n]-x[n-1]) + (1-k)*y[n-1]）
+                    if (hpfK > 0.0f && c < 8) {
+                        float y = hpfK * (to - g_xfadeHpfPrevB[c]) + (1.0f - hpfK) * g_xfadeHpfPrevB[c];
+                        // 低频滤除+原信号混合：hp = y（纯 HPF 输出），随 hpfMix 线性 blend 回原信号
+                        float hp = y;
+                        to = hp * hpfMix + to * (1.0f - hpfMix);
+                        g_xfadeHpfPrevB[c] = y;
+                    }
+                    // 【V8.23 A 轨对称低切】A 轨退场时低频渐进衰减（1 阶 low-pass），与 B 进场 HPF 对称
+                    // pos 0.4→1.0 期间 lpfMix 0→1：A 低频渐出，让出低频空间给 B；端点语义不变
+                    float lpfTheta = pos < 0.4f ? 0.0f : (pos - 0.4f) / 0.6f;  // 0..1
+                    float lpfMix = lpfTheta < 1.0f ? lpfTheta : 1.0f;         // 0 -> 1
+                    if (lpfMix > 0.0f && c < 8) {
+                        float lpfK = 0.35f * lpfMix;
+                        float yl = from * (1.0f - lpfK) + g_xfadeLpfPrevA[c] * lpfK;  // 1 阶 low-pass
+                        from = yl * lpfMix + from * (1.0f - lpfMix);                 // 低切 blend 回原信号
+                        g_xfadeLpfPrevA[c] = yl;
+                    }
                     output[idx] = from * gFrom + to * gTo;
                 }
                 pos += step;
@@ -940,8 +1564,10 @@ public:
                 g_crossfadeActive.store(false);
                 g_activeIsB.store(!fromB);
                 // 【Crossfade】新 active 轨已播 crossfade 时长，重置播放位置（否则延续旧轨 position）
-                g_playbackPositionUs.store((int64_t)g_crossfadeDurationMs.load() * 1000LL);
-                g_decoderPositionUs.store((int64_t)g_crossfadeDurationMs.load() * 1000LL);
+                // 【V8.15】B 从副歌(bStartMs)进：位置 = bStartMs + 已淡入时长（而非从 0/15s 算）
+                g_playbackPositionUs.store((g_xfadeBStartMs.load() + (int64_t)g_crossfadeDurationMs.load()) * 1000LL);
+                g_decoderPositionUs.store((g_xfadeBStartMs.load() + (int64_t)g_crossfadeDurationMs.load()) * 1000LL);
+                g_xfadeBPreGain.store(1.0f, std::memory_order_relaxed);  // 【V8.24】B 上位后恢复全音量
                 if (fromB) {
                     g_decoderStopRequestedB.store(true);
                     g_decoderCvB.notify_all();
@@ -980,7 +1606,6 @@ public:
             int readSamples = std::min(toRead, 4096);  // cap at ~50ms to avoid spikes from huge buffers
             for (int i = 0; i < readSamples; i++) sumSq += output[i] * output[i];
             g_rmsLevel.store(std::sqrt(sumSq / readSamples), std::memory_order_relaxed);
-
 
             // 【V7.85→8-band】8-band spectrum via cascaded LP-diff (CDJ/DJM style)
             // band[0-7] = LP-diff cascade; all bands sum to full signal
@@ -1199,9 +1824,11 @@ public:
                     if (!stereo) sR = sL;
                 }
 
-                // 【V8.3】M/S 声场处理 — 跨声道矩阵（仅 stereo）。
+                // 【V8.3】【V8.19】M/S 声场处理 — DTS 虚拟环绕渲染（仅 stereo）。
                 // M=(L+R)/2 结像中心，S=(L-R)/2 声场宽度。
-                // 线性矩阵：L'=M*center + S*width, R'=M*center - S*width
+                // V8.19 升级：方案 A 延迟反馈（side 10ms 环绕回灌 + mid HAAS 0.8ms 中置强化）
+                // + 方案 B 低音分频（side 180Hz 高通，低频单声道防虚）。
+                // 兼容：width=center=1 时矩阵恒等（amb/focus=0），完全旁路原声。
                 // 平滑系数（zipper-noise fix），作用在 EQ/masterGain 之后、limiter 之前。
                 if (g_msEnabled.load() && stereo) {
                     float w = g_curMsWidth;
@@ -1214,8 +1841,10 @@ public:
                     g_curMsCenter = c;
                     float mid = (sL + sR) * 0.5f;
                     float side = (sL - sR) * 0.5f;
-                    sL = mid * c + side * w;
-                    sR = mid * c - side * w;
+                    float outL, outR;
+                    g_dts.process(mid, side, w, c, outL, outR);
+                    sL = outL;
+                    sR = outR;
                 }
 
                 // 【V8.3】Crossfeed — 消除头中效应（仅 Oboe，stereo）。
@@ -1276,6 +1905,9 @@ public:
                 const float CLIP_THRESHOLD = 0.90f;
                 if (std::fabsf(outL) > CLIP_THRESHOLD) g_clipSampleCount.fetch_add(1, std::memory_order_relaxed);
                 if (stereo && std::fabsf(outR) > CLIP_THRESHOLD) g_clipSampleCount.fetch_add(1, std::memory_order_relaxed);
+
+                // 【2026-09-07】A2DP 编码前预补偿（蓝牙低码率编码专用，codecDb=0 时旁路）
+                btPreEmphasisFrame(outL, outR, stereo);
 
                 // Soft clip + TPDF Dither
                 outL = softClip(outL);
@@ -1483,7 +2115,10 @@ static bool reopenOutputStream(int newRate) {
     std::lock_guard<std::mutex> lock(g_streamMutex);
     int ch = g_channelCount.load();
     int devId = g_outputDeviceId.load();
-    if (g_outputStream) { g_outputStream->close(); g_outputStream.reset(); }
+    // 【2026-09-02 fix】swap 语义：先开新 stream，成功才关旧的。
+    // 原实现先 close 旧 stream —— 失败时 g_outputStream=null → Oboe 回调停 → HE-AAC SBR m4a 无声。
+    // 失败保留旧 stream + 1686-1705 重采样逻辑（aRate != streamRate）自动兜底。
+    oboe::ManagedStream newStream;  // unique_ptr, 先开新 stream 成功才关旧
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output);
     builder.setPerformanceMode(oboe::PerformanceMode::LowLatency);
@@ -1495,16 +2130,18 @@ static bool reopenOutputStream(int newRate) {
     builder.setAudioApi(oboe::AudioApi::AAudio);
     builder.setSampleRate(newRate);
     builder.setSharingMode(oboe::SharingMode::Shared);
-    oboe::Result result = builder.openManagedStream(g_outputStream);
+    oboe::Result result = builder.openManagedStream(newStream);
     if (result != oboe::Result::OK) {
         builder.setAudioApi(oboe::AudioApi::Unspecified);
-        result = builder.openManagedStream(g_outputStream);
+        result = builder.openManagedStream(newStream);
     }
     if (result != oboe::Result::OK) {
-        LOGE("reopenOutputStream failed: %s", oboe::convertToText(result));
-        g_outputStream.reset();
+        LOGE("reopenOutputStream failed: %s (keeping old stream, will resample)", oboe::convertToText(result));
         return false;
     }
+    // 新 stream 开成功，替换旧的
+    if (g_outputStream) { g_outputStream->close(); g_outputStream.reset(); }
+    g_outputStream = std::move(newStream);
     g_outputStream->requestStart();
     int actualRate = g_outputStream->getSampleRate();
     int actualCh = g_outputStream->getChannelCount();
@@ -1523,9 +2160,152 @@ static bool reopenOutputStream(int newRate) {
         g_compressor.setSampleRate(actualRate);
         g_loudness.setSampleRate((float)actualRate);
         g_crossfeed.setSampleRate((float)actualRate);
+        g_dts.setSampleRate((float)actualRate);
     }
     LOGI("reopenOutputStream: reopened at %d Hz / %d ch", actualRate, actualCh);
     return true;
+}
+
+// 【2026-09-02 ALAC】A 槽 ALAC 直解循环：同步 decodeNext → 重采样 → 写 g_ringBuffer
+static void alacDecodeLoopA() {
+    LOGI("ALAC decode loop A started");
+    AlacDirect* al = g_alacA.get();
+    if (!al) { LOGE("ALAC A: no engine"); g_decoderEos.store(true); g_decoderRunning.store(false); g_decoderThreadRunning.store(false); return; }
+    const int ch = al->channels.load();
+    const int fl = al->frameLen.load();
+    const int srcRate = al->sampleRate.load();
+    std::vector<float> frameBuf((size_t)fl * (ch > 0 ? ch : 2));
+    // 重采样输出缓冲（复用共享的 g_resampleOutA）
+    if (g_resampleOutA.size() < (size_t)fl * 8 + 1024) g_resampleOutA.resize((size_t)fl * 8 + 1024);
+
+    while (!g_decoderStopRequested.load()) {
+        if (g_decoderPaused.load()) {
+            std::unique_lock<std::mutex> lock(g_decoderMutex);
+            g_decoderCv.wait_for(lock, std::chrono::milliseconds(50), []() {
+                return !g_decoderPaused.load() || g_decoderStopRequested.load();
+            });
+            continue;
+        }
+        int got = al->decodeNext(frameBuf.data());
+        if (got < 0) {  // EOS
+            g_decoderEos.store(true);
+            LOGI("ALAC A: EOS, draining ring");
+            while (!g_decoderStopRequested.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                int avail = g_ringBuffer ? g_ringBuffer->available() : 0;
+                if (avail <= 0) break;
+                if (g_decoderPaused.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            break;
+        }
+        if (got <= 0) {  // 坏包跳过或背压
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+        int numSamples = got * ch;
+        g_decoderPositionUs.store((al->framePos - got) * 1000000LL / (srcRate > 0 ? srcRate : 44100));
+
+        // 重采样（与 ndkDecodeLoop 输出段一致）
+        const float* writeSrc = frameBuf.data();
+        int writeSamples = numSamples;
+        {
+            int streamRate = g_sampleRate.load();
+            int aRate = srcRate;
+            if (aRate > 0 && streamRate > 0 && aRate != streamRate && ch >= 1 && ch <= 8) {
+                int outFrames = resampleLinearToStream(frameBuf.data(), numSamples, ch, aRate, streamRate,
+                                                       g_resampleOutA, g_resamplePhaseA, g_resamplePrevA, g_resampleHasPrevA);
+                if (outFrames > 0) {
+                    writeSrc = g_resampleOutA.data();
+                    writeSamples = outFrames * ch;
+                    if (!g_resampleLoggedA) { LOGI("ALAC A: resampling %dHz -> %dHz", aRate, streamRate); g_resampleLoggedA = true; }
+                }
+            }
+        }
+        if (g_ringBuffer) {
+            int written = 0, remain = writeSamples;
+            const float* srcp = writeSrc;
+            int retryCount = 0;
+            while (remain > 0 && retryCount < 100) {
+                int n = g_ringBuffer->write(srcp + written, remain);
+                written += n; remain -= n;
+                if (remain > 0) { usleep(2000); retryCount++; }
+            }
+        }
+        g_decoderFramesOutput.fetch_add(writeSamples / (ch > 0 ? ch : 1));
+        if (g_ringBuffer && g_ringBuffer->available() > kRingBufferCapacity * 3 / 4) {
+            usleep(5000);
+        }
+    }
+    g_decoderRunning.store(false);
+    g_decoderThreadRunning.store(false);
+    LOGI("ALAC decode loop A ended");
+}
+
+// 【2026-09-02 ALAC】B 槽 ALAC 直解循环（incoming）
+static void alacDecodeLoopB() {
+    LOGI("ALAC decode loop B started");
+    AlacDirect* al = g_alacB.get();
+    if (!al) { LOGE("ALAC B: no engine"); g_decoderEosB.store(true); g_decoderRunningB.store(false); return; }
+    const int ch = al->channels.load();
+    const int fl = al->frameLen.load();
+    const int srcRate = al->sampleRate.load();
+    std::vector<float> frameBuf((size_t)fl * (ch > 0 ? ch : 2));
+    if (g_resampleOutB.size() < (size_t)fl * 8 + 1024) g_resampleOutB.resize((size_t)fl * 8 + 1024);
+
+    while (!g_decoderStopRequestedB.load()) {
+        if (g_decoderPausedB.load()) {
+            std::unique_lock<std::mutex> lock(g_decoderMutexB);
+            g_decoderCvB.wait_for(lock, std::chrono::milliseconds(50), []() {
+                return !g_decoderPausedB.load() || g_decoderStopRequestedB.load();
+            });
+            continue;
+        }
+        int got = al->decodeNext(frameBuf.data());
+        if (got < 0) {
+            g_decoderEosB.store(true);
+            LOGI("ALAC B: EOS, draining ring");
+            while (!g_decoderStopRequestedB.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
+                int avail = g_ringBufferB ? g_ringBufferB->available() : 0;
+                if (avail <= 0) break;
+                if (g_decoderPausedB.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            break;
+        }
+        if (got <= 0) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); continue; }
+        int numSamples = got * ch;
+        g_decoderPositionB.store((al->framePos - got) * 1000000LL / (srcRate > 0 ? srcRate : 44100));
+        const float* writeSrc = frameBuf.data();
+        int writeSamples = numSamples;
+        {
+            int streamRate = g_sampleRate.load();
+            int bRate = srcRate;
+            if (bRate > 0 && streamRate > 0 && bRate != streamRate && ch >= 1 && ch <= 8) {
+                int outFrames = resampleLinearToStream(frameBuf.data(), numSamples, ch, bRate, streamRate,
+                                                       g_resampleOutB, g_resamplePhaseB, g_resamplePrevB, g_resampleHasPrevB);
+                if (outFrames > 0) {
+                    writeSrc = g_resampleOutB.data();
+                    writeSamples = outFrames * ch;
+                    if (!g_resampleLoggedB) { LOGI("ALAC B: resampling %dHz -> %dHz", bRate, streamRate); g_resampleLoggedB = true; }
+                }
+            }
+        }
+        if (g_ringBufferB) {
+            int written = 0, remain = writeSamples;
+            const float* srcp = writeSrc;
+            int retryCount = 0;
+            while (remain > 0 && retryCount < 100) {
+                int n = g_ringBufferB->write(srcp + written, remain);
+                written += n; remain -= n;
+                if (remain > 0) { usleep(2000); retryCount++; }
+            }
+        }
+        if (g_ringBufferB && g_ringBufferB->available() > kRingBufferCapacity * 3 / 4) {
+            usleep(5000);
+        }
+    }
+    g_decoderRunningB.store(false);
+    LOGI("ALAC decode loop B ended");
 }
 
 static void ndkDecodeLoop() {
@@ -2312,6 +3092,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
         g_compressor.setSampleRate(sr);
         g_loudness.setSampleRate((float)sr);
         g_crossfeed.setSampleRate((float)sr);
+        g_dts.setSampleRate((float)sr);
     }
     g_sampleRate.store(g_outputStream->getSampleRate());
     g_channelCount.store(g_outputStream->getChannelCount());
@@ -2412,6 +3193,13 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
             if (sr > 0) sampleRate = sr;
             if (ch > 0) channelCount = ch;
             LOGI("FD Audio track %zu: mime=%s, rate=%d, ch=%d", i, mime, sampleRate, channelCount);
+            // 【2026-09-02 ALAC】audio/alac：MediaCodec 无 ALAC 解码器 → ALAC 直解引擎
+            if (mime && strcmp(mime, "audio/alac") == 0) {
+                g_alacModeA.store(true);
+                AMediaFormat_delete(format);
+                LOGI("FD: ALAC detected, using AlacDirect engine");
+                break;
+            }
             AMediaExtractor_selectTrack(g_decoderExtractor, g_decoderTrackIndex);
 
             g_nativeOpenStep.store(4);
@@ -2477,7 +3265,25 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
         AMediaFormat_delete(format);
     }
     g_nativeOpenStep.store(7);
-    if (g_decoderTrackIndex < 0) {
+    if (g_alacModeA.load()) {
+        // ALAC 直解：extractor 已不需要（AlacDirect 自己解析 MP4 box）
+        AMediaExtractor_delete(g_decoderExtractor);
+        g_decoderExtractor = nullptr;
+        g_alacA = std::make_unique<AlacDirect>();
+        if (!g_alacA->openFd(fd, offset, length)) {
+            LOGE("FD: AlacDirect openFd failed");
+            g_alacA.reset();
+            g_alacModeA.store(false);
+            g_nativeOpenErrorCode.store(-3);
+            return false;
+        }
+        sampleRate = g_alacA->sampleRate.load();
+        channelCount = g_alacA->channels.load();
+        int64_t durUs = g_alacA->durationMs.load() * 1000LL;
+        if (durUs > 0) g_cachedDurationUs.store(durUs);
+        LOGI("FD: AlacDirect ready sr=%d ch=%d dur=%lldms",
+             sampleRate, channelCount, (long long)g_alacA->durationMs.load());
+    } else if (g_decoderTrackIndex < 0) {
         LOGE("FD: No audio track found");
         AMediaExtractor_delete(g_decoderExtractor);
         g_decoderExtractor = nullptr;
@@ -2630,6 +3436,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
         g_compressor.setSampleRate(sr);
         g_loudness.setSampleRate((float)sr);
         g_crossfeed.setSampleRate((float)sr);
+        g_dts.setSampleRate((float)sr);
     }
     g_sampleRate.store(g_outputStream->getSampleRate());
     g_channelCount.store(g_outputStream->getChannelCount());
@@ -2646,7 +3453,7 @@ JNIEXPORT jboolean JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativePlay(JNIEnv *env, jobject thiz) {
     std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
     std::lock_guard<std::mutex> lock(g_streamMutex);
-    if (!g_outputStream || !g_decoderCodec || !g_decoderExtractor) {
+    if (!g_outputStream || (!g_alacModeA.load() && (!g_decoderCodec || !g_decoderExtractor))) {
         LOGE("nativePlay: not opened");
         return false;
     }
@@ -2666,8 +3473,13 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativePlay(JNIEnv *env, jobject thiz)
     g_decoderRunning.store(true);
     g_decoderThreadRunning.store(true);  // 【V7.16】
     if (g_decoderThread.joinable()) g_decoderThread.join();
-    g_decoderThread = std::thread(ndkDecodeLoop);
-    LOGI("OboeDirectPlayer: playback started");
+    if (g_alacModeA.load()) {
+        g_decoderThread = std::thread(alacDecodeLoopA);
+        LOGI("OboeDirectPlayer: playback started (ALAC direct)");
+    } else {
+        g_decoderThread = std::thread(ndkDecodeLoop);
+        LOGI("OboeDirectPlayer: playback started");
+    }
     return true;
 }
 
@@ -2713,22 +3525,38 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSeekTo(JNIEnv *env, jobject thi
         g_decoderPausedB.store(true);
         if (g_ringBufferB) g_ringBufferB->clear();
         resetResamplerB();  // 【Crossfade 重采样】seek 后清重采样相位/prev
-        if (g_decoderCodecB) AMediaCodec_flush(g_decoderCodecB);
-        if (g_decoderExtractorB) AMediaExtractor_seekTo(g_decoderExtractorB, positionUs, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
-        g_decoderPositionB.store(positionUs);
-        g_decoderEosB.store(false);
-        g_decoderPausedB.store(false);
-        g_decoderCvB.notify_all();
+        if (g_alacModeB.load()) {
+            if (g_alacB) g_alacB->seekMs(positionUs / 1000);
+            g_decoderPositionB.store(positionUs);
+            g_decoderEosB.store(false);
+            g_decoderPausedB.store(false);
+            g_decoderCvB.notify_all();
+        } else {
+            if (g_decoderCodecB) AMediaCodec_flush(g_decoderCodecB);
+            if (g_decoderExtractorB) AMediaExtractor_seekTo(g_decoderExtractorB, positionUs, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
+            g_decoderPositionB.store(positionUs);
+            g_decoderEosB.store(false);
+            g_decoderPausedB.store(false);
+            g_decoderCvB.notify_all();
+        }
     } else {
         g_decoderPaused.store(true);
         if (g_ringBuffer) g_ringBuffer->clear();
         resetResamplerA();  // 【Crossfade 重采样】seek 后清 A 轨重采样相位/prev（与 B 分支对称，防相位错乱变调）
-        if (g_decoderCodec) AMediaCodec_flush(g_decoderCodec);
-        if (g_decoderExtractor) AMediaExtractor_seekTo(g_decoderExtractor, positionUs, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
-        g_decoderPositionUs.store(positionUs);
-        g_decoderEos.store(false);
-        g_decoderPaused.store(false);
-        g_decoderCv.notify_all();
+        if (g_alacModeA.load()) {
+            if (g_alacA) g_alacA->seekMs(positionUs / 1000);
+            g_decoderPositionUs.store(positionUs);
+            g_decoderEos.store(false);
+            g_decoderPaused.store(false);
+            g_decoderCv.notify_all();
+        } else {
+            if (g_decoderCodec) AMediaCodec_flush(g_decoderCodec);
+            if (g_decoderExtractor) AMediaExtractor_seekTo(g_decoderExtractor, positionUs, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
+            g_decoderPositionUs.store(positionUs);
+            g_decoderEos.store(false);
+            g_decoderPaused.store(false);
+            g_decoderCv.notify_all();
+        }
     }
 }
 
@@ -2777,6 +3605,11 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeStop(JNIEnv *env, jobject thiz)
         g_decoderExtractor = nullptr;
     }
     if (g_ringBuffer) g_ringBuffer->clear();
+    // 【ALAC】停止时释放直解引擎
+    g_alacModeA.store(false);
+    g_alacModeB.store(false);
+    if (g_alacA) { g_alacA->close(); g_alacA.reset(); }
+    if (g_alacB) { g_alacB->close(); g_alacB.reset(); }
     g_decoderRunning.store(false);
     g_decoderThreadRunning.store(false);
     g_decoderEos.store(false);
@@ -2824,6 +3657,13 @@ static bool openIncomingToA_internal(int fd, int64_t offset, int64_t length) {
         AMediaFormat_getString(format, AMEDIAFORMAT_KEY_MIME, &mime);
         if (mime && strncmp(mime, "audio/", 6) == 0) {
             g_decoderTrackIndex = (int)i;
+            // 【ALAC】MediaCodec 无 ALAC 解码器 → 直解引擎
+            if (mime && strcmp(mime, "audio/alac") == 0) {
+                g_alacModeA.store(true);
+                AMediaFormat_delete(format);
+                LOGI("Incoming(A): ALAC detected, using AlacDirect");
+                break;
+            }
             AMediaExtractor_selectTrack(g_decoderExtractor, g_decoderTrackIndex);
             g_decoderCodec = AMediaCodec_createDecoderByType(mime);
             if (!g_decoderCodec) { AMediaFormat_delete(format); LOGE("Incoming(A): createDecoder failed"); return false; }
@@ -2843,10 +3683,29 @@ static bool openIncomingToA_internal(int fd, int64_t offset, int64_t length) {
                 if (dur>0) AMediaFormat_setInt64(cfg, AMEDIAFORMAT_KEY_DURATION, dur);
             }
             copyCsdBuffers(cfg, format);
+            // 【2026-09-02 fix】A 轨与 B 轨对称：pcm-encoding=2 被部分 AAC 解码器拒绝时
+            // 去掉 pcm-encoding 重试（此前 A 轨缺失兜底 → crossfade 预加载 AAC m4a 失败）
             AMediaFormat_setInt32(cfg, "pcm-encoding", 2);
             media_status_t s = AMediaCodec_configure(g_decoderCodec, cfg, nullptr, nullptr, 0);
+            if (s != AMEDIA_OK) {
+                LOGE("Incoming(A): configure(pcm16) failed %d, retry without pcm-encoding", s);
+                AMediaFormat* cfg2 = AMediaFormat_new();
+                const char* m2 = nullptr;
+                AMediaFormat_getString(format, AMEDIAFORMAT_KEY_MIME, &m2);
+                if (m2) AMediaFormat_setString(cfg2, AMEDIAFORMAT_KEY_MIME, m2);
+                int32_t sr2a = 0, ch2a = 0; int64_t dur2a = 0;
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr2a);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch2a);
+                AMediaFormat_getInt64(format, AMEDIAFORMAT_KEY_DURATION, &dur2a);
+                if (sr2a > 0) AMediaFormat_setInt32(cfg2, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr2a);
+                if (ch2a > 0) AMediaFormat_setInt32(cfg2, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch2a);
+                if (dur2a > 0) AMediaFormat_setInt64(cfg2, AMEDIAFORMAT_KEY_DURATION, dur2a);
+                copyCsdBuffers(cfg2, format);
+                s = AMediaCodec_configure(g_decoderCodec, cfg2, nullptr, nullptr, 0);
+                AMediaFormat_delete(cfg2);
+                if (s != AMEDIA_OK) { LOGE("Incoming(A): configure(retry) failed %d", s); AMediaFormat_delete(cfg); AMediaFormat_delete(format); return false; }
+            }
             AMediaFormat_delete(cfg);
-            if (s != AMEDIA_OK) { LOGE("Incoming(A): configure failed %d", s); AMediaFormat_delete(format); return false; }
             s = AMediaCodec_start(g_decoderCodec);
             if (s != AMEDIA_OK) { LOGE("Incoming(A): start failed %d", s); AMediaFormat_delete(format); return false; }
             AMediaFormat_delete(format);
@@ -2854,7 +3713,19 @@ static bool openIncomingToA_internal(int fd, int64_t offset, int64_t length) {
         }
         AMediaFormat_delete(format);
     }
-    if (g_decoderTrackIndex < 0) { LOGE("Incoming(A): no audio track"); return false; }
+    if (g_alacModeA.load()) {
+        AMediaExtractor_delete(g_decoderExtractor);
+        g_decoderExtractor = nullptr;
+        g_alacA = std::make_unique<AlacDirect>();
+        if (!g_alacA->openFd(fd, offset, length)) {
+            LOGE("Incoming(A): AlacDirect openFd failed");
+            g_alacA.reset(); g_alacModeA.store(false);
+            return false;
+        }
+        int64_t durUs = g_alacA->durationMs.load() * 1000LL;
+        if (durUs > 0) g_cachedDurationUs.store(durUs);
+        LOGI("Incoming(A): AlacDirect ready sr=%d ch=%d", g_alacA->sampleRate.load(), g_alacA->channels.load());
+    } else if (g_decoderTrackIndex < 0) { LOGE("Incoming(A): no audio track"); return false; }
     // 【Crossfade 重采样】新歌进 A 槽，重置采样率与重采样状态
     g_sampleRateA.store(0);
     resetResamplerA();
@@ -2887,6 +3758,13 @@ static bool openIncomingToB_internal(int fd, int64_t offset, int64_t length) {
         AMediaFormat_getString(format, AMEDIAFORMAT_KEY_MIME, &mime);
         if (mime && strncmp(mime, "audio/", 6) == 0) {
             g_decoderTrackIndexB = (int)i;
+            // 【ALAC】MediaCodec 无 ALAC 解码器 → 直解引擎
+            if (mime && strcmp(mime, "audio/alac") == 0) {
+                g_alacModeB.store(true);
+                AMediaFormat_delete(format);
+                LOGI("Incoming(B): ALAC detected, using AlacDirect");
+                break;
+            }
             AMediaExtractor_selectTrack(g_decoderExtractorB, g_decoderTrackIndexB);
             g_decoderCodecB = AMediaCodec_createDecoderByType(mime);
             if (!g_decoderCodecB) { AMediaFormat_delete(format); LOGE("Incoming(B): createDecoder failed"); return false; }
@@ -2905,10 +3783,30 @@ static bool openIncomingToB_internal(int fd, int64_t offset, int64_t length) {
                 if (dur>0) AMediaFormat_setInt64(cfg, AMEDIAFORMAT_KEY_DURATION, dur);
             }
             copyCsdBuffers(cfg, format);
+            // 【2026-09-02 fix】B 轨与 A 轨对称：pcm-encoding=2 被部分 AAC 解码器拒绝时
+            // 去掉 pcm-encoding 重试（A 轨 nativeOpenFd 已有 format2 兜底，B 轨此前缺失
+            // → crossfade 切到 AAC m4a 时 B 轨 configure 失败 → 切歌无声/失败）
             AMediaFormat_setInt32(cfg, "pcm-encoding", 2);
             media_status_t s = AMediaCodec_configure(g_decoderCodecB, cfg, nullptr, nullptr, 0);
+            if (s != AMEDIA_OK) {
+                LOGE("Incoming(B): configure(pcm16) failed %d, retry without pcm-encoding", s);
+                AMediaFormat* cfg2 = AMediaFormat_new();
+                const char* m2 = nullptr;
+                AMediaFormat_getString(format, AMEDIAFORMAT_KEY_MIME, &m2);
+                if (m2) AMediaFormat_setString(cfg2, AMEDIAFORMAT_KEY_MIME, m2);
+                int32_t sr2b = 0, ch2b = 0; int64_t dur2b = 0;
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr2b);
+                AMediaFormat_getInt32(format, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch2b);
+                AMediaFormat_getInt64(format, AMEDIAFORMAT_KEY_DURATION, &dur2b);
+                if (sr2b > 0) AMediaFormat_setInt32(cfg2, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr2b);
+                if (ch2b > 0) AMediaFormat_setInt32(cfg2, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch2b);
+                if (dur2b > 0) AMediaFormat_setInt64(cfg2, AMEDIAFORMAT_KEY_DURATION, dur2b);
+                copyCsdBuffers(cfg2, format);
+                s = AMediaCodec_configure(g_decoderCodecB, cfg2, nullptr, nullptr, 0);
+                AMediaFormat_delete(cfg2);
+                if (s != AMEDIA_OK) { LOGE("Incoming(B): configure(retry) failed %d", s); AMediaFormat_delete(cfg); AMediaFormat_delete(format); return false; }
+            }
             AMediaFormat_delete(cfg);
-            if (s != AMEDIA_OK) { LOGE("Incoming(B): configure failed %d", s); AMediaFormat_delete(format); return false; }
             s = AMediaCodec_start(g_decoderCodecB);
             if (s != AMEDIA_OK) { LOGE("Incoming(B): start failed %d", s); AMediaFormat_delete(format); return false; }
             AMediaFormat_delete(format);
@@ -2916,7 +3814,19 @@ static bool openIncomingToB_internal(int fd, int64_t offset, int64_t length) {
         }
         AMediaFormat_delete(format);
     }
-    if (g_decoderTrackIndexB < 0) { LOGE("Incoming(B): no audio track"); return false; }
+    if (g_alacModeB.load()) {
+        AMediaExtractor_delete(g_decoderExtractorB);
+        g_decoderExtractorB = nullptr;
+        g_alacB = std::make_unique<AlacDirect>();
+        if (!g_alacB->openFd(fd, offset, length)) {
+            LOGE("Incoming(B): AlacDirect openFd failed");
+            g_alacB.reset(); g_alacModeB.store(false);
+            return false;
+        }
+        int64_t durUs = g_alacB->durationMs.load() * 1000LL;
+        if (durUs > 0) g_cachedDurationB.store(durUs);
+        LOGI("Incoming(B): AlacDirect ready sr=%d ch=%d", g_alacB->sampleRate.load(), g_alacB->channels.load());
+    } else if (g_decoderTrackIndexB < 0) { LOGE("Incoming(B): no audio track"); return false; }
     // 【Crossfade 重采样】新歌进 B 槽，重置采样率与重采样状态
     g_sampleRateB.store(0);
     g_channelCountB.store(2);
@@ -2926,15 +3836,665 @@ static bool openIncomingToB_internal(int fd, int64_t offset, int64_t length) {
     return true;
 }
 
+// 【V8.9 Crossfade 优化①】预扫描：轻量解码 B 轨尾部，找最长低能量段作为精确交叉点
+// 独立 extractor/codec（不复用 B 槽解码器），扫完即弃；返回 B 轨尾部长低能量段起点(ms)，找不到返回 -1
+static int preScanTailQuietMs(int fd, int64_t length, int windowMs, int64_t seekFromMs) {
+    if (fd < 0) return -1;
+    AMediaExtractor* ex = AMediaExtractor_new();
+    if (!ex) return -1;
+    media_status_t r = AMediaExtractor_setDataSourceFd(ex, fd, 0, length);
+    if (r != AMEDIA_OK) { AMediaExtractor_delete(ex); return -1; }
+    int trackIdx = -1;
+    int32_t sr = 44100, ch = 2; int64_t dur = 0;
+    size_t n = AMediaExtractor_getTrackCount(ex);
+    for (size_t i = 0; i < n; i++) {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, (size_t)i);
+        if (!f) continue;
+        const char* mime = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime && strncmp(mime, "audio/", 6) == 0) {
+            trackIdx = (int)i;
+            AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr);
+            AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch);
+            AMediaFormat_getInt64(f, AMEDIAFORMAT_KEY_DURATION, &dur);
+            AMediaFormat_delete(f);
+            break;
+        }
+        AMediaFormat_delete(f);
+    }
+    if (trackIdx < 0) { AMediaExtractor_delete(ex); return -1; }
+    AMediaExtractor_selectTrack(ex, trackIdx);
+    AMediaCodec* codec = nullptr;
+    {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, trackIdx);
+        const char* mime = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime) codec = AMediaCodec_createDecoderByType(mime);
+        AMediaFormat_delete(f);
+    }
+    if (!codec) { AMediaExtractor_delete(ex); return -1; }
+    AMediaFormat* cfg = AMediaFormat_new();
+    if (sr > 0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr);
+    if (ch > 0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch);
+    AMediaFormat_setInt32(cfg, "pcm-encoding", 2);
+    if (AMediaCodec_configure(codec, cfg, nullptr, nullptr, 0) != AMEDIA_OK) {
+        AMediaFormat_delete(cfg); AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1;
+    }
+    AMediaFormat_delete(cfg);
+    if (AMediaCodec_start(codec) != AMEDIA_OK) {
+        AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1;
+    }
+
+    // 跳到扫描起点：A 轨从 seekFromMs（当前进度）开始，B 轨尾部从 totalMs-SCAN_MS
+    // 扫描窗口固定 SCAN_MS=12000，从起点到结尾（或起点+SCAN_MS）
+    const int64_t SCAN_MS = 12000;
+    int64_t totalMs = dur / 1000;
+    int64_t scanStartMs;
+    if (seekFromMs > 0) {
+        scanStartMs = seekFromMs;  // A 轨：当前进度起扫到结尾
+    } else {
+        scanStartMs = totalMs > SCAN_MS ? totalMs - SCAN_MS : 0;  // 原逻辑（B 尾部模式）
+    }
+    if (scanStartMs >= totalMs) scanStartMs = totalMs > 100 ? totalMs - 100 : 0;
+    AMediaExtractor_seekTo(ex, scanStartMs * 1000, AMEDIAEXTRACTOR_SEEK_PREVIOUS_SYNC);
+
+    const int wFrames = std::max(1, (sr * windowMs) / 1000);
+    const int maxBuckets = 4096;
+    float rmsEnv[maxBuckets];
+    int envCount = 0;
+    int64_t firstTs = -1, lastTs = -1;
+    bool inputEos = false;
+    // 解码尾部
+    for (int guard = 0; guard < 200000; guard++) {
+        if (!inputEos) {
+            ssize_t inIdx = AMediaCodec_dequeueInputBuffer(codec, 2000);
+            if (inIdx >= 0) {
+                size_t inSize = 0;
+                uint8_t* inBuf = AMediaCodec_getInputBuffer(codec, inIdx, &inSize);
+                if (inBuf && inSize > 0) {
+                    ssize_t sz = AMediaExtractor_readSampleData(ex, inBuf, inSize);
+                    if (sz < 0) {
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, 0, AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+                        inputEos = true;
+                    } else {
+                        int64_t t = AMediaExtractor_getSampleTime(ex);
+                        if (firstTs < 0) firstTs = t;
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, (size_t)sz, t, 0);
+                        AMediaExtractor_advance(ex);
+                    }
+                } else {
+                    AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, 0, 0);
+                }
+            }
+        }
+        AMediaCodecBufferInfo info;
+        ssize_t outIdx = AMediaCodec_dequeueOutputBuffer(codec, &info, 2000);
+        if (outIdx >= 0) {
+            if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+                AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
+                break;
+            }
+            size_t outSz = 0;
+            uint8_t* outBuf = AMediaCodec_getOutputBuffer(codec, (size_t)outIdx, &outSz);
+            if (outBuf && outSz > 0) {
+                int samples = info.size / (int)sizeof(int16_t);
+                float sum = 0.0f;
+                int cnt = 0;
+                for (int s = 0; s + 1 < samples; s += 2) {
+                    int16_t v = (int16_t)((outBuf[s] & 0xff) | (outBuf[s+1] << 8));
+                    float fv = v / 32768.0f;
+                    sum += fv * fv; cnt++;
+                }
+                if (cnt > 0) {
+                    float rms = std::sqrt(sum / cnt);
+                    if (envCount < maxBuckets) rmsEnv[envCount++] = rms;
+                }
+                lastTs = info.presentationTimeUs;
+            }
+            AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
+        } else if (outIdx == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+            if (inputEos) break;
+        }
+    }
+    AMediaCodec_stop(codec); AMediaCodec_delete(codec); AMediaExtractor_delete(ex);
+    if (envCount < 4) return -1;
+
+    // 找最长连续低能量段：RMS < 局部峰值的 35%
+    float peak = 0.0f;
+    for (int i = 0; i < envCount; i++) peak = std::max(peak, rmsEnv[i]);
+    if (peak < 1e-4f) return -1;
+    int bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+    for (int i = 0; i < envCount; i++) {
+        if (rmsEnv[i] < peak * 0.35f) {
+            if (curStart < 0) curStart = i;
+            curLen++;
+            if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+        } else { curStart = -1; curLen = 0; }
+    }
+    if (bestStart < 0 || bestLen < 2) return -1;
+    // 段起点映射到 B 轨时间戳(ms)
+    int64_t bucketMs = (int64_t)bestStart * windowMs;
+    int64_t quietStartMs = scanStartMs + bucketMs;
+    return (int)(quietStartMs > 0 ? quietStartMs : 0);
+}
+
+// 【V8.9 双层预扫描②】B 轨开头前奏低能量段：扫文件开头，返回前奏静音段长度(ms)
+// 语义：新歌 fade in 时若前奏安静，交叉窗口可从容对齐；返回 -1=无静音前奏
+static int preScanIntroQuietMs(int fd, int64_t length, int windowMs) {
+    if (fd < 0) return -1;
+    AMediaExtractor* ex = AMediaExtractor_new();
+    if (!ex) return -1;
+    media_status_t r = AMediaExtractor_setDataSourceFd(ex, fd, 0, length);
+    if (r != AMEDIA_OK) { AMediaExtractor_delete(ex); return -1; }
+    int trackIdx = -1;
+    int32_t sr = 44100, ch = 2;
+    size_t n = AMediaExtractor_getTrackCount(ex);
+    for (size_t i = 0; i < n; i++) {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, (size_t)i);
+        if (!f) continue;
+        const char* mime = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime && strncmp(mime, "audio/", 6) == 0) {
+            trackIdx = (int)i;
+            AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr);
+            AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch);
+            AMediaFormat_delete(f);
+            break;
+        }
+        AMediaFormat_delete(f);
+    }
+    if (trackIdx < 0) { AMediaExtractor_delete(ex); return -1; }
+    AMediaExtractor_selectTrack(ex, trackIdx);
+    AMediaCodec* codec = nullptr;
+    {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, trackIdx);
+        const char* mime = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime) codec = AMediaCodec_createDecoderByType(mime);
+        AMediaFormat_delete(f);
+    }
+    if (!codec) { AMediaExtractor_delete(ex); return -1; }
+    AMediaFormat* cfg = AMediaFormat_new();
+    if (sr > 0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr);
+    if (ch > 0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch);
+    AMediaFormat_setInt32(cfg, "pcm-encoding", 2);
+    if (AMediaCodec_configure(codec, cfg, nullptr, nullptr, 0) != AMEDIA_OK) {
+        AMediaFormat_delete(cfg); AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1;
+    }
+    AMediaFormat_delete(cfg);
+    if (AMediaCodec_start(codec) != AMEDIA_OK) {
+        AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1;
+    }
+    // 只扫开头 INTRO_MS=6000（前奏区），找最长连续低能量段
+    const int64_t INTRO_MS = 6000;
+    const int wFrames = std::max(1, (sr * windowMs) / 1000);
+    const int maxBuckets = 512;
+    float rmsEnv[maxBuckets];
+    int envCount = 0;
+    int64_t lastTs = -1;
+    bool inputEos = false;
+    for (int guard = 0; guard < 50000; guard++) {
+        if (!inputEos) {
+            ssize_t inIdx = AMediaCodec_dequeueInputBuffer(codec, 2000);
+            if (inIdx >= 0) {
+                size_t inSize = 0;
+                uint8_t* inBuf = AMediaCodec_getInputBuffer(codec, inIdx, &inSize);
+                if (inBuf && inSize > 0) {
+                    ssize_t sz = AMediaExtractor_readSampleData(ex, inBuf, inSize);
+                    if (sz < 0) {
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, 0, AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+                        inputEos = true;
+                    } else {
+                        int64_t t = AMediaExtractor_getSampleTime(ex);
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, (size_t)sz, t, 0);
+                        AMediaExtractor_advance(ex);
+                    }
+                } else {
+                    AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, 0, 0);
+                }
+            }
+        }
+        AMediaCodecBufferInfo info;
+        ssize_t outIdx = AMediaCodec_dequeueOutputBuffer(codec, &info, 2000);
+        if (outIdx >= 0) {
+            if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+                AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
+                break;
+            }
+            size_t outSz = 0;
+            uint8_t* outBuf = AMediaCodec_getOutputBuffer(codec, (size_t)outIdx, &outSz);
+            if (outBuf && outSz > 0) {
+                int samples = info.size / (int)sizeof(int16_t);
+                float sum = 0.0f;
+                int cnt = 0;
+                for (int s = 0; s + 1 < samples; s += 2) {
+                    int16_t v = (int16_t)((outBuf[s] & 0xff) | (outBuf[s+1] << 8));
+                    float fv = v / 32768.0f;
+                    sum += fv * fv; cnt++;
+                }
+                if (cnt > 0) {
+                    float rms = std::sqrt(sum / cnt);
+                    if (envCount < maxBuckets) rmsEnv[envCount++] = rms;
+                }
+                lastTs = info.presentationTimeUs;
+            }
+            AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
+        } else if (outIdx == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+            if (inputEos) break;
+        }
+        // 已扫够 INTRO_MS 就停
+        if (lastTs > 0 && (lastTs / 1000) >= INTRO_MS) break;
+    }
+    AMediaCodec_stop(codec); AMediaCodec_delete(codec); AMediaExtractor_delete(ex);
+    if (envCount < 2) return -1;
+    // 找开头连续低能量段（从前到后，第一个低于峰值的连续段）
+    float peak = 0.0f;
+    for (int i = 0; i < envCount; i++) peak = std::max(peak, rmsEnv[i]);
+    if (peak < 1e-4f) return -1;
+    int introMs = 0;
+    for (int i = 0; i < envCount; i++) {
+        if (rmsEnv[i] < peak * 0.35f) {
+            introMs += windowMs;
+        } else {
+            break;  // 一旦强音进入，前奏结束
+        }
+    }
+    return introMs >= windowMs * 2 ? introMs : -1;
+}
+
+// 【V8.15】预扫描③：B 轨副歌起点
+// 扫文件 15~120s 区间（跳过前奏），找能量最高的 10s 窗口，返回其起点(ms)
+// 语义：crossfade 时 B 从副歌直接进（跳过前奏），一进来就是高潮；找不到返回 -1
+static int preScanChorusMs(int fd, int64_t length, int windowMs) {
+    if (fd < 0) return -1;
+    AMediaExtractor* ex = AMediaExtractor_new();
+    if (!ex) return -1;
+    media_status_t r = AMediaExtractor_setDataSourceFd(ex, fd, 0, length);
+    
+    if (r != AMEDIA_OK) { AMediaExtractor_delete(ex); return -1; }
+    int trackIdx = -1;
+    int32_t sr = 44100, ch = 2; int64_t dur = 0;
+    size_t n = AMediaExtractor_getTrackCount(ex);
+    for (size_t i = 0; i < n; i++) {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, (size_t)i);
+        if (!f) continue;
+        const char* mime = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime && strncmp(mime, "audio/", 6) == 0) {
+            trackIdx = (int)i;
+            AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr);
+            AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch);
+            AMediaFormat_getInt64(f, AMEDIAFORMAT_KEY_DURATION, &dur);
+            AMediaFormat_delete(f);
+            break;
+        }
+        AMediaFormat_delete(f);
+    }
+    if (trackIdx < 0) {  AMediaExtractor_delete(ex); return -1; }
+    
+    AMediaExtractor_selectTrack(ex, trackIdx);
+    AMediaCodec* codec = nullptr;
+    {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, trackIdx);
+        const char* mime = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime) codec = AMediaCodec_createDecoderByType(mime);
+        AMediaFormat_delete(f);
+    }
+    if (!codec) {  AMediaExtractor_delete(ex); return -1; }
+    AMediaFormat* cfg = AMediaFormat_new();
+    {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, trackIdx);
+        const char* m = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &m);
+        if (m) AMediaFormat_setString(cfg, AMEDIAFORMAT_KEY_MIME, m);
+        int32_t sr2 = 0, ch2 = 0;
+        AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr2);
+        AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch2);
+        if (sr2 > 0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr2);
+        if (ch2 > 0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch2);
+        copyCsdBuffers(cfg, f);
+        AMediaFormat_delete(f);
+    }
+    AMediaFormat_setInt32(cfg, "pcm-encoding", 2);
+    media_status_t cfgR = AMediaCodec_configure(codec, cfg, nullptr, nullptr, 0);
+    
+    if (cfgR != AMEDIA_OK) {
+        AMediaFormat_delete(cfg); AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1;
+    }
+    AMediaFormat_delete(cfg);
+    if (AMediaCodec_start(codec) != AMEDIA_OK) {
+        
+        AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1;
+    }
+
+    // 扫 15s ~ 120s（跳过前奏区；歌短则扫到结尾）
+    int64_t totalMs = dur / 1000;
+    int64_t scanFromMs = 15000;
+    int64_t scanToMs = totalMs > 120000 ? 120000 : totalMs;
+    
+    if (scanToMs <= scanFromMs + 5000) {  AMediaCodec_stop(codec); AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1; }
+    media_status_t seekR = AMediaExtractor_seekTo(ex, scanFromMs * 1000, AMEDIAEXTRACTOR_SEEK_PREVIOUS_SYNC);
+
+    const int wFrames = std::max(1, (sr * windowMs) / 1000);
+    const int maxBuckets = 4096;
+    float rmsEnv[maxBuckets];
+    int envCount = 0;
+    bool inputEos = false;
+    for (int guard = 0; guard < 200000; guard++) {
+        if (!inputEos) {
+            ssize_t inIdx = AMediaCodec_dequeueInputBuffer(codec, 2000);
+            if (inIdx >= 0) {
+                size_t inSize = 0;
+                uint8_t* inBuf = AMediaCodec_getInputBuffer(codec, inIdx, &inSize);
+                if (inBuf && inSize > 0) {
+                    ssize_t sz = AMediaExtractor_readSampleData(ex, inBuf, inSize);
+                    if (sz < 0) {
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, 0, AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+                        inputEos = true;
+                    } else {
+                        int64_t t = AMediaExtractor_getSampleTime(ex);
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, (size_t)sz, t, 0);
+                        AMediaExtractor_advance(ex);
+                    }
+                } else {
+                    AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, 0, 0);
+                }
+            }
+        }
+        AMediaCodecBufferInfo info;
+        ssize_t outIdx = AMediaCodec_dequeueOutputBuffer(codec, &info, 2000);
+        if (outIdx >= 0) {
+            if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+                AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
+                break;
+            }
+            size_t outSz = 0;
+            uint8_t* outBuf = AMediaCodec_getOutputBuffer(codec, (size_t)outIdx, &outSz);
+            if (outBuf && outSz > 0) {
+                int samples = info.size / (int)sizeof(int16_t);
+                float sum = 0.0f; int cnt = 0;
+                for (int s = 0; s + 1 < samples; s += 2) {
+                    int16_t v = (int16_t)((outBuf[s] & 0xff) | (outBuf[s+1] << 8));
+                    float fv = v / 32768.0f;
+                    sum += fv * fv; cnt++;
+                }
+                if (cnt > 0) {
+                    float rms = std::sqrt(sum / cnt);
+                    if (envCount < maxBuckets) rmsEnv[envCount++] = rms;
+                }
+            }
+            AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
+        } else if (outIdx == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+            if (inputEos) break;
+        }
+    }
+    AMediaCodec_stop(codec); AMediaCodec_delete(codec); AMediaExtractor_delete(ex);
+    
+    if (envCount < 10) return -1;
+
+    // 【V8.16 修正】找「第一个显著高能量段」（第一副歌），限制在 15s ~ 45% 歌长处
+    // v8.15 用 60% 仍会落在后半（B 从 60% 进，播几十秒就切）；45% 保证 B 从前中段进
+    const int kChorusWindows = std::max(1, 10000 / windowMs);  // 10s / 窗口
+    // 只在前 45% 范围内找（跳过结尾渐弱）
+    // 【V8.17】limitBucket 必须减 scanFromMs 偏移（envCount 从 15s 起计数），否则 45% 实际变成 45%+15s
+    // 且对 >2.6 分钟的歌 limitBucket 会被 envCount 顶掉 → 全范围扫描 → B 轨进后半
+    // 【V8.22】选位范围：min(45% 歌长, 90s) 绝对上限；短歌也不放全范围（避免进后半）
+    int64_t chorusLimitMs = totalMs * 45 / 100;
+    if (chorusLimitMs > 90000) chorusLimitMs = 90000;
+    if (chorusLimitMs < scanFromMs + 10000) chorusLimitMs = scanFromMs + 10000;  // 至少留 10s 扫描窗
+    int limitBucket = (int)((chorusLimitMs - scanFromMs) / windowMs);
+    if (limitBucket > envCount) limitBucket = envCount;
+    if (limitBucket - kChorusWindows <= 0) limitBucket = std::min(envCount, 30);  // 极端短歌限 30 窗（~3s）
+    // 【V8.22】局部能量跃升检测：找第一个「能量突升点」（副歌进入特征）
+    // 之前用全局均值阈值（mean*1.3）对渐进式/全程响亮的歌无效 → 回退能量最高段（偏后）
+    // 现在：窗口能量比前一个窗口高 25% 且后续 2 窗口不回落 → 视为副歌起点
+    // 窗口先做 3 窗口滑动平均，抑制单窗口毛刺
+    std::vector<float> winAvg;
+    winAvg.reserve(envCount);
+    for (int i = 0; i < envCount; i++) {
+        float sum = 0.0f; int cnt = 0;
+        for (int j = std::max(0, i - 1); j <= std::min(envCount - 1, i + 1); j++) { sum += rmsEnv[j]; cnt++; }
+        winAvg.push_back(sum / cnt);
+    }
+    int bestStart = -1;
+    // 找第一个能量跃升：avg[i] > avg[i-1] * 1.25 且后续 2 窗口维持高位
+    for (int i = 1; i + kChorusWindows <= limitBucket; i++) {
+        if (winAvg[i] > winAvg[i - 1] * 1.25f) {
+            bool sustained = true;
+            for (int j = 1; j <= 2 && i + j < (int)winAvg.size(); j++) {
+                if (winAvg[i + j] < winAvg[i - 1] * 1.05f) { sustained = false; break; }
+            }
+            if (sustained) { bestStart = i; break; }
+        }
+    }
+    // 没找到跃升 → 退回前 45% 内能量最高段（仍靠前）
+    if (bestStart < 0) {
+        float fallback = 0.0f;
+        for (int i = 0; i + kChorusWindows <= limitBucket; i++) {
+            float sum = 0.0f;
+            for (int j = 0; j < kChorusWindows; j++) sum += rmsEnv[i + j];
+            float avg = sum / kChorusWindows;
+            if (avg > fallback) { fallback = avg; bestStart = i; }
+        }
+    }
+    if (bestStart < 0) { LOGI("preScanChorus: no best window"); return -1; }
+    int64_t chorusMs = scanFromMs + (int64_t)bestStart * windowMs;
+    // 【V8.23 B 拍点对齐】chorusMs 附近 ±1 拍（按 ~120BPM ≈ 500ms，即 ±5 窗口@100ms）找 RMS 局部峰（kick）
+    // 让 B 从副歌的强拍（通常是 kick 进入）起播，节拍衔接更自然
+    {
+        int beatWin = std::max(2, 60000 / 120 / windowMs);  // ~500ms / 窗口粒度，至少 2 窗口
+        int center = bestStart;
+        int lo = std::max(0, center - beatWin);
+        int hi = std::min(envCount - 1, center + beatWin);
+        int peakIdx = center;
+        float peakVal = rmsEnv[center];
+        for (int k = lo; k <= hi; k++) {
+            if (rmsEnv[k] > peakVal) { peakVal = rmsEnv[k]; peakIdx = k; }
+        }
+        if (peakIdx != center) {
+            chorusMs = scanFromMs + (int64_t)peakIdx * windowMs;
+            LOGI("preScanChorus: beatAlign %d->%d chorusMs=%lld (peak=%.4f)", center, peakIdx, (long long)chorusMs, peakVal);
+        }
+    }
+    // 【V8.24 B 音量预匹配】统计副歌段（bestStart 起 10 窗口）平均 RMS，供 crossfade 启动时 B 增益匹配
+    {
+        float sum = 0.0f; int cnt = 0;
+        for (int j = 0; j < kChorusWindows && bestStart + j < envCount; j++) {
+            sum += rmsEnv[bestStart + j]; cnt++;
+        }
+        float chorusRms = cnt > 0 ? sum / cnt : 0.0f;
+        g_xfadeChorusRms.store(chorusRms, std::memory_order_relaxed);
+        LOGI("preScanChorus: chorusRms=%.4f", chorusRms);
+    }
+    LOGI("preScanChorus: riseStart=%d chorusMs=%lld", bestStart, (long long)chorusMs);
+    return (int)(chorusMs > 0 ? chorusMs : 0);
+}
+
+// 【V8.15 A 轨副歌出】扫 A 轨从 seekFromMs 到结尾，找最后一个高能量段（副歌）的结束位置
+// 语义：crossfade 在「副歌唱完」后触发（留尾奏过渡），返回副歌结束位置(ms)；找不到返回 -1
+static int preScanLastChorusEndMs(int fd, int64_t length, int windowMs, int64_t seekFromMs) {
+    if (fd < 0) return -1;
+    AMediaExtractor* ex = AMediaExtractor_new();
+    if (!ex) return -1;
+    media_status_t r = AMediaExtractor_setDataSourceFd(ex, fd, 0, length);
+    
+    if (r != AMEDIA_OK) { AMediaExtractor_delete(ex); return -1; }
+    int trackIdx = -1;
+    int32_t sr = 44100, ch = 2; int64_t dur = 0;
+    size_t n = AMediaExtractor_getTrackCount(ex);
+    for (size_t i = 0; i < n; i++) {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, (size_t)i);
+        if (!f) continue;
+        const char* mime = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime && strncmp(mime, "audio/", 6) == 0) {
+            trackIdx = (int)i;
+            AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr);
+            AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch);
+            AMediaFormat_getInt64(f, AMEDIAFORMAT_KEY_DURATION, &dur);
+            AMediaFormat_delete(f);
+            break;
+        }
+        AMediaFormat_delete(f);
+    }
+    if (trackIdx < 0) {  AMediaExtractor_delete(ex); return -1; }
+    AMediaExtractor_selectTrack(ex, trackIdx);
+    AMediaCodec* codec = nullptr;
+    {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, trackIdx);
+        const char* mime = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &mime);
+        if (mime) codec = AMediaCodec_createDecoderByType(mime);
+        AMediaFormat_delete(f);
+    }
+    if (!codec) {  AMediaExtractor_delete(ex); return -1; }
+    AMediaFormat* cfg = AMediaFormat_new();
+    {
+        AMediaFormat* f = AMediaExtractor_getTrackFormat(ex, trackIdx);
+        const char* m = nullptr;
+        AMediaFormat_getString(f, AMEDIAFORMAT_KEY_MIME, &m);
+        if (m) AMediaFormat_setString(cfg, AMEDIAFORMAT_KEY_MIME, m);
+        int32_t sr2 = 0, ch2 = 0;
+        AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr2);
+        AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &ch2);
+        if (sr2 > 0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_SAMPLE_RATE, sr2);
+        if (ch2 > 0) AMediaFormat_setInt32(cfg, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch2);
+        copyCsdBuffers(cfg, f);
+        AMediaFormat_delete(f);
+    }
+    AMediaFormat_setInt32(cfg, "pcm-encoding", 2);
+    media_status_t cfgR = AMediaCodec_configure(codec, cfg, nullptr, nullptr, 0);
+    
+    if (cfgR != AMEDIA_OK) {
+        AMediaFormat_delete(cfg); AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1;
+    }
+    AMediaFormat_delete(cfg);
+    if (AMediaCodec_start(codec) != AMEDIA_OK) {
+        
+        AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1;
+    }
+
+    // 从 seekFromMs 扫到结尾
+    int64_t totalMs = dur / 1000;
+    int64_t scanFromMs = seekFromMs > 0 ? seekFromMs : 0;
+    if (totalMs - scanFromMs < 20000) {  AMediaCodec_stop(codec); AMediaCodec_delete(codec); AMediaExtractor_delete(ex); return -1; }
+    media_status_t seekR = AMediaExtractor_seekTo(ex, scanFromMs * 1000, AMEDIAEXTRACTOR_SEEK_PREVIOUS_SYNC);
+
+    const int wFrames = std::max(1, (sr * windowMs) / 1000);
+    const int maxBuckets = 4096;
+    float rmsEnv[maxBuckets];
+    int envCount = 0;
+    bool inputEos = false;
+    for (int guard = 0; guard < 200000; guard++) {
+        if (!inputEos) {
+            ssize_t inIdx = AMediaCodec_dequeueInputBuffer(codec, 2000);
+            if (inIdx >= 0) {
+                size_t inSize = 0;
+                uint8_t* inBuf = AMediaCodec_getInputBuffer(codec, inIdx, &inSize);
+                if (inBuf && inSize > 0) {
+                    ssize_t sz = AMediaExtractor_readSampleData(ex, inBuf, inSize);
+                    if (sz < 0) {
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, 0, AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+                        inputEos = true;
+                    } else {
+                        int64_t ts = AMediaExtractor_getSampleTime(ex);
+                        AMediaCodec_queueInputBuffer(codec, inIdx, 0, (size_t)sz, ts, 0);
+                        AMediaExtractor_advance(ex);
+                    }
+                } else {
+                    AMediaCodec_queueInputBuffer(codec, inIdx, 0, 0, 0, 0);
+                }
+            }
+        }
+        AMediaCodecBufferInfo info;
+        ssize_t outIdx = AMediaCodec_dequeueOutputBuffer(codec, &info, 2000);
+        if (outIdx >= 0) {
+            if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
+                AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
+                break;
+            }
+            size_t outSz = 0;
+            uint8_t* outBuf = AMediaCodec_getOutputBuffer(codec, (size_t)outIdx, &outSz);
+            if (outBuf && outSz > 0) {
+                int samples = info.size / (int)sizeof(int16_t);
+                float sum = 0.0f; int cnt = 0;
+                for (int s = 0; s + 1 < samples; s += 2) {
+                    int16_t v = (int16_t)((outBuf[s] & 0xff) | (outBuf[s+1] << 8));
+                    float fv = v / 32768.0f;
+                    sum += fv * fv; cnt++;
+                }
+                if (cnt > 0) {
+                    float rms = std::sqrt(sum / cnt);
+                    if (envCount < maxBuckets) rmsEnv[envCount++] = rms;
+                }
+            }
+            AMediaCodec_releaseOutputBuffer(codec, outIdx, false);
+        } else if (outIdx == AMEDIACODEC_INFO_TRY_AGAIN_LATER) {
+            if (inputEos) break;
+        }
+    }
+    AMediaCodec_stop(codec); AMediaCodec_delete(codec); AMediaExtractor_delete(ex);
+    
+    if (envCount < 10) return -1;
+
+    // 全局均值 + 峰值：副歌 = 高能量段（> 均值 1.4 倍）
+    float sumAll = 0.0f; float peak = 0.0f;
+    for (int i = 0; i < envCount; i++) { sumAll += rmsEnv[i]; if (rmsEnv[i] > peak) peak = rmsEnv[i]; }
+    float mean = sumAll / envCount;
+    float thresh = (mean + peak) * 0.5f;
+    if (thresh < 0.05f) thresh = 0.05f;
+
+    // 【V8.17 修正】找最后一个连续高能量段（≥3 窗口 = 300ms）的结束位置，
+    // 但限制在歌长前 70% 内 —— 原逻辑找全曲最后一个（85-92%），A 轨基本到结尾才切；
+    // 现在取最后一个 ≤70% 的高能段结束（通常是倒数第二个副歌，50-65% 处），副歌唱完即切
+    int limitEndBucket = (int)((totalMs * 70 / 100 - scanFromMs) / windowMs);
+    if (limitEndBucket > envCount) limitEndBucket = envCount;
+    if (limitEndBucket < 0) limitEndBucket = 0;
+    int lastEnd = -1;
+    int runStart = -1;
+    for (int i = 0; i <= envCount; i++) {
+        bool hot = (i < envCount) && (rmsEnv[i] > thresh);
+        if (hot && runStart < 0) runStart = i;
+        if (!hot && runStart >= 0) {
+            if (i - runStart >= 3 && i <= limitEndBucket) lastEnd = i;  // 记录 ≤70% 高能段的结束
+            runStart = -1;
+        }
+    }
+    if (runStart >= 0 && envCount - runStart >= 3 && envCount <= limitEndBucket) lastEnd = envCount;  // 扫到结尾仍热
+    if (lastEnd < 0) {  return -1; }
+    int64_t chorusEndMs = scanFromMs + (int64_t)lastEnd * windowMs;
+    LOGI("preScanAChorus: chorusEndMs=%lld (limit70pct bucket=%d)", (long long)chorusEndMs, limitEndBucket);
+    return (int)(chorusEndMs > 0 ? chorusEndMs : 0);
+}
+
+extern "C"
+JNIEXPORT jint JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativePreScanPath(JNIEnv *env, jobject thiz,
+                                                             jint fd, jlong length, jint windowMs, jint mode, jlong seekFromMs) {
+    int ret = -1;
+    if (mode == 1) {
+        ret = preScanIntroQuietMs(fd, length, windowMs > 0 ? windowMs : 100);
+    } else if (mode == 2) {
+        ret = preScanChorusMs(fd, length, windowMs > 0 ? windowMs : 100);
+    } else if (mode == 3) {
+        ret = preScanLastChorusEndMs(fd, length, windowMs > 0 ? windowMs : 100, seekFromMs);
+    } else {
+        ret = preScanTailQuietMs(fd, length, windowMs > 0 ? windowMs : 100, seekFromMs);
+    }
+    return ret;
+}
+
+extern "C"
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, jobject thiz, jint durationMs) {
+Java_com_sdw_music_player_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, jobject thiz, jint durationMs, jint bStartMs) {
     // 判断空闲槽（incoming）：B active 时新歌进 A 槽，否则进 B 槽
     bool toA = g_activeIsB.load();
     if (toA) {
-        if (!g_decoderCodec || !g_decoderExtractor) { LOGE("StartCrossfade: incoming(A) not opened"); return false; }
+        if (!g_alacModeA.load() && (!g_decoderCodec || !g_decoderExtractor)) { LOGE("StartCrossfade: incoming(A) not opened"); return false; }
         // 【Crossfade 重采样】A 槽 incoming 采样率 != stream 率时，写 ring 时重采样（A 槽已有重采样器）
     } else {
-        if (!g_decoderCodecB || !g_decoderExtractorB) { LOGE("StartCrossfade: incoming(B) not opened"); return false; }
+        if (!g_alacModeB.load() && (!g_decoderCodecB || !g_decoderExtractorB)) { LOGE("StartCrossfade: incoming(B) not opened"); return false; }
     }
     // 【ANR 修复·重入守卫】crossfade 进行中拒绝重复触发
     if (g_crossfadeActive.load()) { LOGE("StartCrossfade: already active, ignored"); return false; }
@@ -2945,6 +4505,22 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, job
     g_crossfadeStep.store(1.0f / totalFrames);
     g_crossfadePos.store(0.0f);
     g_crossfadeDurationMs.store(durationMs);
+    g_xfadeBStartMs.store(bStartMs > 0 ? bStartMs : 0);  // 【V8.15】B 轨起点，complete 时用于位置计算
+    // 【V8.24 B 音量预匹配】B 副歌段 RMS vs A 轨当前 RMS → B 预增益（只压不抬，防 B 进场突兀）
+    // gain = clamp(rmsA / rmsB, 0.6, 1.0)；B 更响才压，A 更响不放大（避免抬噪）
+    {
+        float rmsA = g_rmsLevel.load(std::memory_order_relaxed);
+        float rmsB = g_xfadeChorusRms.load(std::memory_order_relaxed);
+        float gain = 1.0f;
+        if (rmsB > 0.001f && rmsA > 0.001f) {
+            float g = rmsA / rmsB;
+            gain = g < 0.6f ? 0.6f : (g > 1.0f ? 1.0f : g);
+        }
+        g_xfadeBPreGain.store(gain, std::memory_order_relaxed);
+        if (gain < 0.99f) LOGI("Crossfade: B pre-gain %.2f (rmsA=%.3f rmsB=%.3f)", gain, rmsA, rmsB);
+    }
+    memset(g_xfadeHpfPrevB, 0, sizeof(g_xfadeHpfPrevB));  // 【方案3】重置低频防浑浊 HPF 状态
+    memset(g_xfadeLpfPrevA, 0, sizeof(g_xfadeLpfPrevA));  // 【V8.23】重置 A 轨对称低切 LPF 状态
     if (toA) {
         g_decoderStopRequested.store(true);
         g_decoderCv.notify_all();
@@ -2953,7 +4529,8 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, job
         g_decoderPaused.store(false);
         g_decoderEos.store(false);
         g_decoderRunning.store(true);
-        g_decoderThread = std::thread(ndkDecodeLoop);
+        if (g_alacModeA.load()) g_decoderThread = std::thread(alacDecodeLoopA);
+        else g_decoderThread = std::thread(ndkDecodeLoop);
     } else {
         g_decoderStopRequestedB.store(true);
         g_decoderCvB.notify_all();
@@ -2962,9 +4539,25 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, job
         g_decoderPausedB.store(false);
         g_decoderEosB.store(false);
         g_decoderRunningB.store(true);
-        g_decoderThreadB = std::thread(ndkDecodeLoopB);
+        if (g_alacModeB.load()) g_decoderThreadB = std::thread(alacDecodeLoopB);
+        else g_decoderThreadB = std::thread(ndkDecodeLoopB);
     }
     LOGI("Crossfade started: %dms, step=%.6f (toA=%d)", durationMs, g_crossfadeStep.load(), toA ? 1 : 0);
+    return true;
+}
+
+// 【V8.15】B 轨从副歌起点播：crossfade 前 seek 空闲槽 extractor 到指定 ms
+// 仅当 incoming 已 open 且 crossfade 未激活时有效
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSeekIncomingMs(JNIEnv *env, jobject thiz, jint ms) {
+    std::lock_guard<std::mutex> lifecycleLock(g_decoderLifecycleMutex);
+    if (g_crossfadeActive.load()) return false;
+    bool toA = g_activeIsB.load();
+    AMediaExtractor* ex = toA ? g_decoderExtractor : g_decoderExtractorB;
+    if (!ex) return false;
+    media_status_t s = AMediaExtractor_seekTo(ex, (int64_t)ms * 1000, AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
+    if (s != AMEDIA_OK) { LOGE("SeekIncoming: seekTo %dms failed %d", ms, s); return false; }
+    LOGI("SeekIncoming: incoming seek to %dms (toA=%d)", ms, toA ? 1 : 0);
     return true;
 }
 
@@ -2978,6 +4571,9 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeStopIncoming(JNIEnv *env, jobje
     if (g_decoderCodecB) { AMediaCodec_stop(g_decoderCodecB); AMediaCodec_delete(g_decoderCodecB); g_decoderCodecB = nullptr; }
     if (g_decoderExtractorB) { AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; }
     if (g_ringBufferB) g_ringBufferB->clear();
+    // 【ALAC】释放 B 槽直解引擎
+    g_alacModeB.store(false);
+    if (g_alacB) { g_alacB->close(); g_alacB.reset(); }
     LOGI("Incoming stopped");
 }
 
@@ -2999,6 +4595,9 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeReleaseInactive(JNIEnv *env, jo
         if (g_decoderCodec) { AMediaCodec_stop(g_decoderCodec); AMediaCodec_delete(g_decoderCodec); g_decoderCodec = nullptr; std::this_thread::sleep_for(std::chrono::milliseconds(300)); }
         if (g_decoderExtractor) { AMediaExtractor_delete(g_decoderExtractor); g_decoderExtractor = nullptr; }
         if (g_ringBuffer) g_ringBuffer->clear();
+        // 【ALAC】释放 A 槽直解引擎
+        g_alacModeA.store(false);
+        if (g_alacA) { g_alacA->close(); g_alacA.reset(); }
         g_decoderRunning.store(false);
         g_decoderThreadRunning.store(false);
         g_decoderEos.store(false);
@@ -3011,6 +4610,9 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeReleaseInactive(JNIEnv *env, jo
         if (g_decoderCodecB) { AMediaCodec_stop(g_decoderCodecB); AMediaCodec_delete(g_decoderCodecB); g_decoderCodecB = nullptr; }
         if (g_decoderExtractorB) { AMediaExtractor_delete(g_decoderExtractorB); g_decoderExtractorB = nullptr; }
         if (g_ringBufferB) g_ringBufferB->clear();
+        // 【ALAC】释放 B 槽直解引擎
+        g_alacModeB.store(false);
+        if (g_alacB) { g_alacB->close(); g_alacB.reset(); }
         LOGI("Inactive track B released");
     }
 }
@@ -3438,6 +5040,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMsStage(JNIEnv *env, jobject
     g_msCenter.store(center);
     bool active = (fabsf(soundstage) > 0.01f || fabsf(imaging) > 0.01f);
     g_msEnabled.store(active);
+    if (!active) { g_dts.reset(); g_curMsWidth = 1.0f; g_curMsCenter = 1.0f; }
     LOGI("M/S stage: width=%.3f center=%.3f enabled=%s", width, center, active ? "YES" : "NO");
 }
 
@@ -3446,6 +5049,9 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeResetMsStage(JNIEnv *env, jobje
     g_msWidth.store(1.0f);
     g_msCenter.store(1.0f);
     g_msEnabled.store(false);
+    g_dts.reset();
+    g_curMsWidth = 1.0f;
+    g_curMsCenter = 1.0f;
     LOGI("M/S stage reset (unity)");
 }
 
@@ -3670,6 +5276,19 @@ JNIEXPORT void JNICALL
 Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDitherEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
     g_ditherEnabled.store(enabled != 0);
     LOGI("TPDF Dither %s", enabled ? "ON" : "OFF");
+}
+
+// --- 【2026-09-07】A2DP 编码前预补偿 ---
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetBtPreEmphasis(JNIEnv *env, jobject thiz, jboolean enabled, jfloat codecDb) {
+    g_btPreEnabled.store(enabled != 0);
+    g_btPreCodecDb.store(codecDb);
+    LOGI("A2DP PreEmphasis %s codecDb=%.1fdB", enabled ? "ON" : "OFF", codecDb);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeIsBtPreEmphasisEnabled(JNIEnv *env, jobject thiz) {
+    return g_btPreEnabled.load();
 }
 
 JNIEXPORT jboolean JNICALL

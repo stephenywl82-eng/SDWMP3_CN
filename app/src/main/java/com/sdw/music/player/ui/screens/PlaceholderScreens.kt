@@ -39,6 +39,7 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import com.sdw.music.player.PlaylistManager
 import androidx.compose.ui.res.stringResource
 import com.sdw.music.player.R
+import com.sdw.music.player.ui.components.AddToPlaylistSheet
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -48,6 +49,7 @@ fun FolderListScreen(
     onOpenFolder: (String) -> Unit
 ) {
     var foldersVersion by remember { mutableStateOf(0L) }
+    var longPressSong by remember { mutableStateOf<com.sdw.music.player.Song?>(null) }
     // Observe foldersVersion so folder list + counts refresh after scan/delete
     LaunchedEffect(Unit) {
         com.sdw.music.player.SongRepository.foldersVersion.collect { v ->
@@ -172,9 +174,17 @@ fun FolderListScreen(
                         }
                     }
                 }
-                item { Spacer(Modifier.height(16.dp)) }
+                                item { Spacer(Modifier.height(16.dp)) }
             }
         }
+    }
+
+    // 【V8.7】长按添加歌单
+    longPressSong?.let { song ->
+        com.sdw.music.player.ui.components.AddToPlaylistSheet(
+            song = song,
+            onDismiss = { longPressSong = null }
+        )
     }
 }
 
@@ -453,6 +463,7 @@ fun FolderDetailScreen(
     }
 
     val folderName = folderPath.substringAfterLast('/')
+    var longPressSong by remember { mutableStateOf<com.sdw.music.player.Song?>(null) }
 
     Scaffold(
         topBar = {
@@ -561,7 +572,7 @@ fun FolderDetailScreen(
                                 val clickedIdx = directSongs.indexOfFirst { it.id == song.id }
                                 onPlaySongs(directSongs, if (clickedIdx >= 0) clickedIdx else 0)
                             },
-                            onLongClick = { }
+                            onLongClick = { longPressSong = song }
                         )
                     }
                 }
@@ -570,6 +581,14 @@ fun FolderDetailScreen(
             }
         }
     }
+    // 【V8.7】长按添加歌单
+    longPressSong?.let { song ->
+        AddToPlaylistSheet(
+            song = song,
+            onDismiss = { longPressSong = null }
+        )
+    }
+
 }
 
 

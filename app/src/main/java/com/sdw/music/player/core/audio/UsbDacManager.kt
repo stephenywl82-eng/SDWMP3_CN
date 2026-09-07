@@ -33,7 +33,6 @@ object UsbDacManager {
     @Volatile private var contextRef: Context? = null
     @Volatile private var permissionReceiver: BroadcastReceiver? = null
     @Volatile private var hotplugReceiver: BroadcastReceiver? = null
-    @Volatile private var streaming = false
     @Volatile private var initAttempted = false
     @Volatile private var cachedUsbDevice: UsbDevice? = null
     private var lastFindDacsTime = 0L
@@ -226,7 +225,7 @@ object UsbDacManager {
         if (!isNativeLoaded) { DebugLog.add(TAG, "start: native not loaded"); return false }
         if (!nativeIsClaimed()) { DebugLog.add(TAG, "start: not claimed"); return false }
         val result = nativeUsbStart(sampleRate, channels, bitsPerSample)
-        streaming = result
+        // 【方向1 二期】native streaming_ 是权威状态, 不再维护 Kotlin 影子变量
         if (result) { activeSampleRate = sampleRate; activeBits = bitsPerSample }
         // 【V3.2.7】重 claim 后 native 驱动 volume_ 重置为 1.0,每次开流重新应用当前音量
         if (result) nativeSetVolume(currentVolume)
@@ -247,7 +246,7 @@ object UsbDacManager {
     }
 
     fun stopAndRelease() {
-        streaming = false; pendingClaim = null
+        pendingClaim = null
         activeSampleRate = 0; activeBits = 0
         if (isNativeLoaded) {
             // [fix] use-after-free：FLAC 硬解线程 decodeLoop 可能仍持裸指针 drv 在 pushPcm，
@@ -261,7 +260,7 @@ object UsbDacManager {
 
     /** Pause DAC stream thread without releasing USB claim or ring buffer */
     fun pauseStream() {
-        streaming = false
+        // 【方向1 二期】native streaming_ 权威; nativeStopThreadOnly 内部置 false
         if (isNativeLoaded) nativeStopThreadOnly()  // stop streamLoop, keep USB claim
         DebugLog.v(TAG, "pauseStream (threads stopped, USB claim kept)")
     }
@@ -443,7 +442,7 @@ object UsbDacManager {
         val info = alacInfo(); return if (info[3] > 0) info[3].toLong() else 0L
     }
 
-    fun isStreaming(): Boolean = streaming && isNativeLoaded && nativeIsClaimed()
+    fun isStreaming(): Boolean = isNativeLoaded && nativeIsClaimed() && nativeIsStreaming()
     // V3.3.3: claim held (stream may be paused after EOS keep-claim)
     fun isClaimed(): Boolean = isNativeLoaded && nativeIsClaimed()
     fun getUnderrunCount(): Int = if (isNativeLoaded) nativeGetUnderrunCount() else 0
@@ -756,6 +755,7 @@ object UsbDacManager {
     private external fun nativeStopThreadOnly()
     private external fun nativeRelease()
     private external fun nativeIsClaimed(): Boolean
+    private external fun nativeIsStreaming(): Boolean
     private external fun nativeGetUnderrunCount(): Int
     private external fun nativeGetDacName(): String?
     private external fun nativeGetCurrentSampleRate(): Int

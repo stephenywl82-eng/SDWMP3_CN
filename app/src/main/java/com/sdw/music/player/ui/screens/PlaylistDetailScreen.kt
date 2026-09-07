@@ -30,7 +30,14 @@ import coil.compose.rememberAsyncImagePainter
 import com.sdw.music.player.Playlist
 import com.sdw.music.player.PlaylistManager
 import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.AddToPlaylistSheet
 import com.sdw.music.player.Song
+import com.sdw.music.player.core.SongSorter
+import com.sdw.music.player.core.audio.BpmScanner
+import com.sdw.music.player.BpmKeyCache
+import com.sdw.music.player.ui.components.BpmBadge
+import kotlinx.coroutines.launch
+import androidx.compose.material.icons.filled.Sort
 import com.sdw.music.player.ui.theme.*
 import androidx.compose.ui.res.stringResource
 import com.sdw.music.player.R
@@ -46,6 +53,13 @@ fun PlaylistDetailScreen(
     var playlist by remember { mutableStateOf(PlaylistManager.getPlaylist(playlistId)) }
     var songs by remember { mutableStateOf(PlaylistManager.getPlaylistSongs(playlistId)) }
     var showDeleteConfirm by remember { mutableStateOf<Long?>(null) }
+    var longPressSong by remember { mutableStateOf<Song?>(null) }
+    var showSongMenu by remember { mutableStateOf(false) }
+    var bpmSort by remember { mutableStateOf(false) }
+    var isScanning by remember { mutableStateOf(false) }
+    var scanProgress by remember { mutableStateOf(0f) }
+    val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
 
     LaunchedEffect(playlistId) {
         playlist = PlaylistManager.getPlaylist(playlistId)
@@ -56,6 +70,10 @@ fun PlaylistDetailScreen(
     LaunchedEffect(Unit) {
         songs = PlaylistManager.getPlaylistSongs(playlistId)
         playlist = PlaylistManager.getPlaylist(playlistId)
+    }
+
+    val displayedSongs = remember(songs, bpmSort) {
+        if (bpmSort) SongSorter.bpmSmoothSort(songs) else songs
     }
 
     Scaffold(
@@ -81,6 +99,48 @@ fun PlaylistDetailScreen(
                     }
                 },
                 actions = {
+                    // 【v8.13】BPM 平滑排序开关
+                    IconButton(onClick = { bpmSort = !bpmSort }) {
+                        Icon(
+                            Icons.Default.Sort,
+                            stringResource(R.string.playlist_sort_bpm),
+                            tint = if (bpmSort) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                        )
+                    }
+                    // 【v8.13】BPM 扫描（补测无 tag 歌曲）
+                    if (isScanning) {
+                        Box(modifier = Modifier.size(24.dp).padding(4.dp)) {
+                            CircularProgressIndicator(
+                                strokeWidth = 2.dp,
+                                modifier = Modifier.fillMaxSize(),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                    } else {
+                        IconButton(onClick = {
+                            isScanning = true
+                            scope.launch {
+                                BpmKeyCache.init(context)
+                                // 【v8.13】扫全库（缓存全局生效，所有歌单共享）
+                                val allSongs = com.sdw.music.player.SongRepository.getSongs()
+                                val detected = BpmScanner.scanLibrary(context, allSongs) { done, total, _ ->
+                                    scanProgress = done.toFloat() / total.coerceAtLeast(1)
+                                }
+                                isScanning = false
+                                com.sdw.music.player.SongRepository.applyBpmCache(context)
+                                songs = PlaylistManager.getPlaylistSongs(playlistId)
+                                playlist = PlaylistManager.getPlaylist(playlistId)
+                                android.widget.Toast.makeText(
+                                    context,
+                                    if (detected > 0) "$detected BPM detected" else "No new BPM detected",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }) {
+                            Icon(Icons.Default.Add, stringResource(R.string.playlist_scan_bpm), tint = MaterialTheme.colorScheme.primary)
+                        }
+                    }
                     IconButton(onClick = onAddSongs) {
                         Icon(Icons.Default.Add, stringResource(R.string.title_add_songs), tint = MaterialTheme.colorScheme.primary)
                     }
@@ -122,7 +182,7 @@ fun PlaylistDetailScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onPlaySongs(songs) }
+                            .clickable { onPlaySongs(displayedSongs) }
                             .padding(horizontal = 16.dp, vertical = 12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
@@ -142,14 +202,17 @@ fun PlaylistDetailScreen(
                     Spacer(Modifier.height(4.dp))
                 }
 
-                itemsIndexed(songs, key = { _, s -> s.id }) { index, song ->
+                itemsIndexed(displayedSongs, key = { _, s -> s.id }) { index, song ->
                     Card(
                         modifier = Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 12.dp, vertical = 2.dp)
                             .combinedClickable(
-                                onClick = { onPlaySongs(songs.subList(index, songs.size)) },
-                                onLongClick = { showDeleteConfirm = song.id }
+                                onClick = { onPlaySongs(displayedSongs.subList(index, displayedSongs.size)) },
+                                onLongClick = {
+                                longPressSong = song
+                                showSongMenu = true
+                            }
                             ),
                         shape = RoundedCornerShape(8.dp),
                         colors = CardDefaults.cardColors(containerColor = Color.Transparent),
@@ -191,13 +254,20 @@ fun PlaylistDetailScreen(
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                Text(
-                                    song.artist.ifBlank { "Unknown Artist" },
-                                    color = MaterialTheme.colorScheme.outlineVariant,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        song.artist.ifBlank { "Unknown Artist" },
+                                        color = MaterialTheme.colorScheme.outlineVariant,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f, fill = false)
+                                    )
+                                    if (song.bpm > 0) {
+                                        Spacer(Modifier.width(6.dp))
+                                        BpmBadge(song.bpm)
+                                    }
+                                }
                             }
 
                             // Delete button
@@ -248,7 +318,65 @@ fun PlaylistDetailScreen(
                     Text(stringResource(R.string.action_cancel), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             },
-            containerColor = MaterialTheme.colorScheme.surface
+                        containerColor = MaterialTheme.colorScheme.surface
         )
+    }
+
+    // 【V8.7】长按：菜单（添加到其他歌单 / 从本歌单移除）
+    longPressSong?.let { song ->
+        if (showSongMenu) {
+            AlertDialog(
+                onDismissRequest = {
+                    showSongMenu = false
+                    longPressSong = null
+                },
+                title = { Text(song.title, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                text = {
+                    Column {
+                        TextButton(
+                            onClick = {
+                                showSongMenu = false
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.playlist_add_to), color = MaterialTheme.colorScheme.onSurface)
+                        }
+                        TextButton(
+                            onClick = {
+                                showSongMenu = false
+                                longPressSong = null
+                                PlaylistManager.removeSongFromPlaylist(playlistId, song.id)
+                                songs = PlaylistManager.getPlaylistSongs(playlistId)
+                                playlist = PlaylistManager.getPlaylist(playlistId)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Delete, null, tint = AccentRed, modifier = Modifier.size(20.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text(stringResource(R.string.action_remove), color = AccentRed)
+                        }
+                    }
+                },
+                confirmButton = {},
+                dismissButton = {
+                    TextButton(onClick = {
+                        showSongMenu = false
+                        longPressSong = null
+                    }) {
+                        Text(stringResource(R.string.action_cancel), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                },
+                containerColor = MaterialTheme.colorScheme.surface
+            )
+        }
+
+        if (!showSongMenu) {
+            AddToPlaylistSheet(
+                song = song,
+                onDismiss = { longPressSong = null }
+            )
+        }
     }
 }

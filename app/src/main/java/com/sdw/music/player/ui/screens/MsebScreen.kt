@@ -38,7 +38,7 @@ fun MsebScreen(
     val context = LocalContext.current
     var params by remember { mutableStateOf(MsebCalculator.load(context)) }
     var enabled by remember { mutableStateOf(MsebCalculator.isEnabled(context)) }
-    var savedName by remember { mutableStateOf("") }
+    var savedName by remember { mutableStateOf(MsebCalculator.getPresetName(context)) }
 
     // Preset list (built-in + user) — 可刷新，保存后更新
     var presets by remember { mutableStateOf(MsebPresets.getAll(context)) }
@@ -77,7 +77,7 @@ fun MsebScreen(
     }
 
     LaunchedEffect(Unit) {
-        if (enabled && !params.isFlat) applyMseb(params)
+        if (enabled && !params.isFlat) applyMseb(context, params)
     }
 
     // 【V8.3】进入页面时恢复压缩器状态
@@ -109,14 +109,15 @@ fun MsebScreen(
     fun update(newParams: MsebParams) {
         params = newParams
         MsebCalculator.save(context, newParams)
-        if (enabled) applyMseb(newParams)
+        MsebCalculator.setPresetName(context, "")  // 手动调滑块/重置 → 脱离预设
+        if (enabled) applyMseb(context, newParams)
     }
 
     fun toggleEnabled(on: Boolean) {
         enabled = on
         MsebCalculator.setEnabled(context, on)
         val svc = MusicService.instance
-        if (on) applyMseb(params)
+        if (on) applyMseb(context, params)
         else {
             svc?.setDspEqEnabled(false)  // Sync flag
             svc?.resetMsebEq()
@@ -143,6 +144,7 @@ fun MsebScreen(
     fun applyPreset(preset: MsebPreset) {
         update(preset.params)
         savedName = preset.name
+        MsebCalculator.setPresetName(context, preset.name)
     }
 
     Scaffold(
@@ -277,6 +279,29 @@ fun MsebScreen(
                 }
             }
 
+            // ── 【V8.21】DAC 独占注解：bit-perfect 直通时 DSP 由 native 处理，仍生效 ──
+            var dacActive by remember { mutableStateOf(false) }
+            LaunchedEffect(Unit) {
+                while (true) {
+                    dacActive = try {
+                        com.sdw.music.player.MusicService.instance?.isDacActive() == true
+                    } catch (_: Throwable) { false }
+                    kotlinx.coroutines.delay(1000)
+                }
+            }
+            if (dacActive) {
+                Text(
+                    text = "USB DAC 独占直通中 · MSEB/DTS 由原生处理（保持独占）",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.35f))
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                )
+            }
+
             // ── 10 Sliders ──
             val alpha = if (enabled) 1f else 0.45f
 
@@ -299,6 +324,15 @@ fun MsebScreen(
 
                 Divider(modifier = Modifier.padding(vertical = 4.dp))
 
+                // 【V8.19】DTS 环绕（M/S 声场 + 结像）
+                if (dacActive) {
+                    Text(
+                        text = "DTS 环绕 · DAC 独占直通中由原生处理",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.tertiary,
+                        modifier = Modifier.padding(start = 8.dp, bottom = 2.dp)
+                    )
+                }
                 MsebSlider(stringResource(R.string.mseb_slider_soundstage), "Narrow", "Wide", stringResource(R.string.mseb_slider_soundstage_desc), params.soundstage) { update(params.copy(soundstage = it)) }
                 MsebSlider(stringResource(R.string.mseb_slider_imaging), "Diffuse", "Focused", stringResource(R.string.mseb_slider_imaging_desc), params.imaging) { update(params.copy(imaging = it)) }
             }
@@ -577,6 +611,7 @@ fun MsebScreen(
                         val ok = MsebPresets.save(context, name, params)
                         if (ok) {
                             savedName = name
+                            MsebCalculator.setPresetName(context, name)
                             presets = MsebPresets.getAll(context)
                             showSaveDialog = false
                         } else {
@@ -790,15 +825,20 @@ private fun MsebSlider(
 
 // ── DSP ──
 
-private fun applyMseb(params: MsebParams) {
+private fun applyMseb(context: Context, params: MsebParams) {
     val svc = MusicService.instance ?: return
     svc.applyMsebEq(
         MsebCalculator.calculateGains(params),
         MsebCalculator.BAND_FREQS,
         MsebCalculator.BAND_QS
     )
-    // 【V8.3】M/S 声场（跨声道矩阵）独立应用
-    svc.applyMsStage(params.soundstage, params.imaging)
+    // 【V8.3】M/S 声场（跨声道矩阵）独立应用 — V8.19 受 DTS 快捷开关门控：
+    // 播放页 DTS 开关关闭时，这里不应用声场（避免开 MSEB 总开关强开环绕）
+    if (MsebCalculator.isDtsEnabled(context)) {
+        svc.applyMsStage(params.soundstage, params.imaging)
+    } else {
+        svc.resetMsStage()
+    }
     // 【V8.3】瞬态整形（时域，impulseResponse 维度映射，-1..+1）
     svc.applyTransient(params.impulseResponse / 10f)
 }

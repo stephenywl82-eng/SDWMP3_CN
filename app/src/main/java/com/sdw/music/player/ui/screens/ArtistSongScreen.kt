@@ -2,6 +2,8 @@ package com.sdw.music.player.ui.screens
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,8 +27,9 @@ import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.ui.theme.*
 import androidx.compose.ui.res.stringResource
 import com.sdw.music.player.R
+import com.sdw.music.player.ui.components.AddToPlaylistSheet
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun ArtistSongScreen(
     artistName: String,
@@ -38,6 +41,7 @@ fun ArtistSongScreen(
     onNavigateBack: () -> Unit
 ) {
     val coverUri = songs.firstOrNull()?.albumArtUri.orEmpty()
+    var longPressSong by remember { mutableStateOf<Song?>(null) }
 
     Scaffold(
         topBar = {
@@ -90,28 +94,39 @@ fun ArtistSongScreen(
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 items(songs, key = { it.id }) { song ->
-                    ArtistSongItem(
+                                        ArtistSongItem(
                         song = song,
                         isPlaying = song.id == currentSongId && isPlaying,
-                        onClick = { onSongClick(song) }
+                        onClick = { onSongClick(song) },
+                        onLongClick = { longPressSong = song }
                     )
-                }
+                                }
             }
+        }
+
+        // 【V8.7】长按添加歌单
+        longPressSong?.let { song ->
+            AddToPlaylistSheet(
+                song = song,
+                onDismiss = { longPressSong = null }
+            )
         }
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun ArtistSongItem(
     song: Song,
     isPlaying: Boolean,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    onLongClick: () -> Unit = {}
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp)
-            .clip(RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(8.dp))
             .background(if (isPlaying) MaterialTheme.colorScheme.primary.copy(alpha = 0.2f) else Color.Transparent)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 12.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {

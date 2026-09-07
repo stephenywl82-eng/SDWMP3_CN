@@ -8,6 +8,8 @@ import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -61,6 +63,9 @@ private val SDWLightColorScheme = lightColorScheme(
     error = Color(0xFFD32F2F),
     onError = Color(0xFFFFFFFF),
 )
+
+/** 壁纸激活且取色感知判定为"亮壁纸"（需用深色文字）。非壁纸或暗壁纸 = false。 */
+val LocalWallpaperEffectiveLight = staticCompositionLocalOf { false }
 
 @Composable
 fun SDWMusicTheme(
@@ -165,9 +170,13 @@ fun SDWMusicTheme(
         }
     }
 
-    MaterialTheme(
-        colorScheme = finalScheme,
-        typography = finalTypography,
-        content = content
-    )
+    CompositionLocalProvider(
+        LocalWallpaperEffectiveLight provides (hasWallpaper && effectiveLight)
+    ) {
+        MaterialTheme(
+            colorScheme = finalScheme,
+            typography = finalTypography,
+            content = content
+        )
+    }
 }

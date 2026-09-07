@@ -41,12 +41,13 @@ import com.sdw.music.player.core.audio.UsbDacManager
 import com.sdw.music.player.MusicService
 import com.sdw.music.player.ui.theme.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.sdw.music.player.BuildConfig
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() -> Unit)? = null, onNavigateToAudioQuality: (() -> Unit)? = null, onNavigateToCoverEmbed: (() -> Unit)? = null) {
+fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() -> Unit)? = null, onNavigateToAudioQuality: (() -> Unit)? = null, onNavigateToCoverEmbed: (() -> Unit)? = null, onBpmScanned: () -> Unit = {}) {
     val context = LocalContext.current
     var refreshTrigger by remember { mutableStateOf(0) }
 
@@ -225,7 +226,44 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         onCheckedChange = { enabled ->
                             ditherEnabled = enabled
                             ditherPref.edit().putBoolean("tpdf_dither", enabled).apply()
+                            // 【2026-09-08】双路下发：DAC 独占走 UsbDacManager(driver)，Oboe 外放/蓝牙走 OboeDirectPlayer
+                            // 历史只调 DAC 侧导致外放路径 dither 恒开无法关闭（底噪来源之一）
                             UsbDacManager.setDitherEnabled(enabled)
+                            MusicService.instance?.oboeDirectPlayer?.setDitherEnabled(enabled)
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = MaterialTheme.colorScheme.primary,
+                            uncheckedThumbColor = Color.White,
+                            uncheckedTrackColor = Color(0xFF3A3A3E)
+                        )
+                    )
+                }
+
+                // 【2026-09-07】A2DP 编码前预补偿（蓝牙 SBC/AAC 高频瞬态补偿）
+                val btPref = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+                var btPreEnabled by remember(refreshTrigger) {
+                    mutableStateOf(btPref.getBoolean("bt_pre_emphasis", true))
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.settings_bt_pre), color = MaterialTheme.colorScheme.onBackground, fontSize = 14.sp)
+                        Text(
+                            stringResource(R.string.settings_bt_pre_desc),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 11.sp
+                        )
+                    }
+                    Switch(
+                        checked = btPreEnabled,
+                        onCheckedChange = { enabled ->
+                            btPreEnabled = enabled
+                            btPref.edit().putBoolean("bt_pre_emphasis", enabled).apply()
+                            MusicService.instance?.applyBtPreEmphasis(enabled)
                         },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
@@ -237,6 +275,111 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 }
 
                 Spacer(Modifier.height(8.dp))
+            }
+            // 【v8.13】BPM 扫描全库
+            item {
+                val ctx = context
+                var scanning by remember(refreshTrigger) { mutableStateOf(false) }
+                var scanDone by remember(refreshTrigger) { mutableStateOf(0) }
+                var scanTotal by remember(refreshTrigger) { mutableStateOf(0) }
+                val scope2 = rememberCoroutineScope()
+                if (scanning) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(
+                            strokeWidth = 3.dp,
+                            modifier = Modifier.size(22.dp),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            if (scanTotal > 0) "BPM scan: $scanDone/$scanTotal" else "BPM scan...",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                } else {
+                    SettingsSwitchItem(
+                        icon = Icons.Default.Speed,
+                        title = stringResource(R.string.settings_scan_bpm),
+                        subtitle = stringResource(R.string.settings_scan_bpm_sub),
+                        checked = false,
+                        onCheckedChange = { _ ->
+                            scanning = true
+                            scanDone = 0
+                            scanTotal = 0
+                            // 【v8.20】改用 GlobalScope：退出设置界面后扫描继续在后台跑
+                            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                                val appCtx = ctx.applicationContext
+                                com.sdw.music.player.BpmKeyCache.init(appCtx)
+                                // 【v8.19】先刷新 MediaStore 歌曲列表，否则岸听等新目录文件永远不在扫描范围
+                                com.sdw.music.player.SongRepository.rescanFromMediaStore(appCtx)
+                                val all = com.sdw.music.player.SongRepository.getSongs()
+                                // 【v8.21】默认非强制：跳过已缓存歌曲，扫一半中断下次接着扫
+                                val detected = com.sdw.music.player.core.audio.BpmScanner.scanLibrary(appCtx, all, forceRescan = false) { done, total, _ ->
+                                    // 回调在 IO 线程，直接写 Compose 状态（mutableStateOf 线程安全，自动调度重组）
+                                    scanDone = done
+                                    scanTotal = total
+                                }
+                                com.sdw.music.player.SongRepository.applyBpmCache(appCtx)
+                                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                    onBpmScanned()
+                                    scanning = false
+                                    refreshTrigger++
+                                    android.widget.Toast.makeText(
+                                        appCtx,
+                                        if (detected > 0) appCtx.getString(R.string.bpm_scan_done, detected) else appCtx.getString(R.string.bpm_scan_none),
+                                        android.widget.Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                        }
+                    )
+                }
+                // 【v8.22】强制重扫全部：全量重测覆盖旧缓存（清半速错值/过期数据）
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 20.dp, vertical = 4.dp),
+                    verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = stringResource(R.string.settings_force_rescan_hint),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = {
+                        scanning = true
+                        scanDone = 0
+                        scanTotal = 0
+                        kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                            val appCtx = ctx.applicationContext
+                            com.sdw.music.player.BpmKeyCache.init(appCtx)
+                            com.sdw.music.player.SongRepository.rescanFromMediaStore(appCtx)
+                            val all = com.sdw.music.player.SongRepository.getSongs()
+                            val detected = com.sdw.music.player.core.audio.BpmScanner.scanLibrary(appCtx, all, forceRescan = true) { done, total, _ ->
+                                scanDone = done
+                                scanTotal = total
+                            }
+                            com.sdw.music.player.SongRepository.applyBpmCache(appCtx)
+                            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                                onBpmScanned()
+                                scanning = false
+                                refreshTrigger++
+                                android.widget.Toast.makeText(
+                                    appCtx,
+                                    "Full rescan done: $detected detected",
+                                    android.widget.Toast.LENGTH_SHORT
+                                ).show()
+                            }
+                        }
+                    }) {
+                        Text(stringResource(R.string.settings_force_rescan), color = MaterialTheme.colorScheme.primary)
+                    }
+                }
             }
             item {
                 val cfPref = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
@@ -292,6 +435,65 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                     Spacer(Modifier.height(8.dp))
                 }
+                // 智能对齐（预扫描静音段，交叉更自然）
+                var smartAlign by remember(refreshTrigger) {
+                    mutableStateOf(cfPref.getBoolean("crossfade_smart_align", true))
+                }
+                SettingsSwitchItem(
+                    icon = Icons.Default.AutoAwesome,
+                    title = stringResource(R.string.settings_crossfade_smart_align),
+                    subtitle = if (smartAlign) stringResource(R.string.settings_crossfade_smart_align_sub)
+                    else stringResource(R.string.settings_off),
+                    checked = smartAlign,
+                    onCheckedChange = { enabled ->
+                        smartAlign = enabled
+                        cfPref.edit().putBoolean("crossfade_smart_align", enabled).apply()
+                        refreshTrigger++
+                    }
+                )
+            }
+            // 【v8.13】随机播放模式：A 纯随机 / B BPM 匹配
+            item {
+                val sp = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+                var shuffleMode by remember(refreshTrigger) {
+                    // 兼容旧 boolean pref：true=bpm，false=random
+                    mutableStateOf(
+                        when (sp.getString("shuffle_mode", null)) {
+                            "bpm" -> "bpm"
+                            "random" -> "random"
+                            else -> "random"  // 【2026-09-04】默认纯随机（pure random），旧 pref 不再影响
+                        }
+                    )
+                }
+                Text(
+                    text = stringResource(R.string.settings_shuffle_mode),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf("random" to stringResource(R.string.settings_shuffle_mode_random),
+                           "bpm" to stringResource(R.string.settings_shuffle_mode_bpm)).forEach { (mode, label) ->
+                        FilterChip(
+                            selected = shuffleMode == mode,
+                            onClick = {
+                                shuffleMode = mode
+                                sp.edit().putString("shuffle_mode", mode).apply()
+                                refreshTrigger++
+                            },
+                            label = { Text(label, fontSize = 13.sp) }
+                        )
+                    }
+                }
+                Text(
+                    text = stringResource(R.string.settings_shuffle_mode_sub),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
+                )
             }
             item {
                 val vuPref = context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE)

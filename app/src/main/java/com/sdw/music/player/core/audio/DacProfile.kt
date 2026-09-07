@@ -74,6 +74,15 @@ data class DacProfile(
             featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
             featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f)
 
+        /** TTGK CX31993 (pid=33D8) — 用户新 DAC。descriptor 与 33C0 同构：
+         *  iface1 alt=1/2/3 OUT ep 0x01 mps=192/288/384, iface2 IN fb ep 0x81,
+         *  iface3 HID 音量。支持 16k~384k。Oboe system-route 下 Stream OFF 无声，
+         *  改走手写 USB Host Exclusive（descriptor 自适应）。 */
+        val TTGK_33D8 = DacProfile(0x3302, 0x33D8, "CX31993 (3302:33d8)",
+            useSystemRoute = false,
+            featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
+            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f)
+
         /** TTGK Note (pid=201D) — UAC2 adaptive (attributes=0x09), multi-alt.
          *  Salt verified: endpoint=0x04, alt=1 mps=196 (16bit), alt=2 mps=294 (24bit),
          *  alt=3 mps=392 (32bit). clockSource=6, SET_CUR to clock=6 succeeds (ret=4).
@@ -125,10 +134,18 @@ data class DacProfile(
         val CHU2_DSP = DacProfile(0x31B2, 0x0113, "Moondrop Chu II DSP",
             useSystemRoute = false, lacks44k1Clock = false, wireBits = 24)
 
+        /** CX31993 (0BDA:0023) — 山寨小尾巴（抄 Realtek VID），结构同 TTGK Note：
+         *  iface#1 单 AudioStreaming，alt=1 ep=0x04 mps=196 (16bit) / alt=2 mps=294 (24bit)
+         *  / alt=3 mps=392 (32bit)，HID iface#2。实测在 Oboe system-route 下 Stream OFF
+         *  （内核 ALSA 驱动兼容问题），改走手写 USB Host Exclusive——descriptor 驱动
+         *  自适应可识别该 alt 表（同 201D 同构，201D 已跑通）。 */
+        val CX31993_0BDA_0023 = DacProfile(0x0BDA, 0x0023, "CX31993 (0bda:0023)",
+            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false)
+
         // ── Lookup ─────────────────────────────────────────────
 
         private val byKey: Map<Pair<Int, Int>, DacProfile> = listOf(
-            TTGK_REFERENCE, TTGK_NOTE, VID2972_0047, HIFI_A001, REALTEK_4BA6, QUDELIX_5K, CHU2_DSP
+            TTGK_REFERENCE, TTGK_NOTE, TTGK_33D8, VID2972_0047, HIFI_A001, REALTEK_4BA6, QUDELIX_5K, CHU2_DSP, CX31993_0BDA_0023
         ).associateBy { it.vid to it.pid }
 
         /** Look up a known profile, or return a generic safe default (system-route). */

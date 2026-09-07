@@ -356,6 +356,30 @@ object SongRepository {
 
     fun getSongById(id: Long): Song? = songs.find { it.id == id }
 
+    /**
+     * 【v8.13】从 BpmKeyCache 补 BPM/Key 到内存 songs（批量扫描后调用）。
+     * 只补 bpm<=0 的歌，返回更新数。
+     */
+    fun applyBpmCache(context: Context): Int {
+        var updated = 0
+        songs = songs.map { s ->
+            if (s.bpm > 0) s
+            else {
+                val path = s.filePath.ifEmpty { s.path }
+                if (path.isBlank() || path.startsWith("content://")) s
+                else {
+                    val cached = BpmKeyCache.get(path)
+                    if (cached != null && cached.first > 0) {
+                        updated++
+                        s.copy(bpm = cached.first, key = if (s.key.isBlank()) cached.second else s.key)
+                    } else s
+                }
+            }
+        }
+        if (updated > 0) android.util.Log.d(TAG, "applyBpmCache: updated $updated songs")
+        return updated
+    }
+
     // ==================== BPM / Key 解析 ====================
 
     fun readBpmAndKey(filePath: String): Pair<Int, String> {
@@ -577,6 +601,9 @@ object SongRepository {
                         val album = c.getString(albumIdx) ?: "Unknown Album"
                         val duration = c.getLong(durationIdx)
                         val path = c.getString(dataIdx) ?: ""
+                        if (android.util.Log.isLoggable("SongRepository", android.util.Log.DEBUG) && path.any { it > '\u007f' }) {
+                            android.util.Log.d("SongRepository", "PATHHEX: " + path + " => " + path.toByteArray(Charsets.UTF_8).joinToString(" ") { b -> "%02x".format(b) })
+                        }
                         val mimeType = c.getString(mimeIdx) ?: ""
                         val dateAdded = if (dateAddedIdx >= 0) {
                             val v = c.getLong(dateAddedIdx)

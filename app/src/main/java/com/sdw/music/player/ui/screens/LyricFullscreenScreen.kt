@@ -9,11 +9,14 @@ import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.widget.Toast
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.blur
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Edit
@@ -30,9 +33,11 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextOverflow
+import coil.compose.AsyncImagePainter
+import coil.compose.rememberAsyncImagePainter
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.sdw.music.player.LrcParser
@@ -53,6 +58,7 @@ fun LyricFullscreenScreen(
     songId: Long,
     songTitle: String,
     songArtist: String,
+    albumArt: String?,
     accentColor: Long,
     positionMs: Long,
     onSeekTo: (Long) -> Unit,
@@ -62,6 +68,7 @@ fun LyricFullscreenScreen(
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val accent = Color(accentColor)
+    val coverUri = remember(albumArt) { albumArt?.takeIf { it.isNotBlank() } }
 
     var lyricLines by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
     var rawLrcContent by remember { mutableStateOf("") }
@@ -94,11 +101,18 @@ fun LyricFullscreenScreen(
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.setDecorFitsSystemWindows(false)
+            // 状态栏/导航栏透明：transient 显示时背景透上来，避免黑色条与卡片黑底重叠
+            window.statusBarColor = android.graphics.Color.TRANSPARENT
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
             window.insetsController?.let {
                 it.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
                 it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         } else {
+            window.statusBarColor = android.graphics.Color.TRANSPARENT
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
             @Suppress("DEPRECATION")
             window.decorView.systemUiVisibility = (
                 View.SYSTEM_UI_FLAG_FULLSCREEN
@@ -129,7 +143,15 @@ fun LyricFullscreenScreen(
         isLoading = true
         lyricLines = emptyList()
         rawLrcContent = ""
-        sourceLabel = ""
+        // 底部来源标签：先显示所选来源（网络源如 LRCLIB 超时/异常也不空白），命中后覆盖为实际来源
+        val sourceDisplay = when (effectiveSource) {
+            "auto" -> "Auto"
+            "local" -> "Local"
+            "embedded" -> "Embedded"
+            "lrclib" -> "LRCLIB"
+            else -> effectiveSource
+        }
+        sourceLabel = sourceDisplay
         try {
             val repo = LyricRepository.getInstance(context)
             val song = SongRepository.getSongs().find { it.id == songId }
@@ -161,6 +183,44 @@ fun LyricFullscreenScreen(
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surface)
     ) {
+        // === 背景层：封面模糊 + 渐变压暗，无封面时用 accent 渐变兜底 ===
+        if (coverUri != null) {
+            Image(
+                painter = rememberAsyncImagePainter(coverUri),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize().blur(42.dp),
+                contentScale = ContentScale.Crop,
+                alpha = 0.55f
+            )
+        } else {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                accent.copy(alpha = 0.30f),
+                                MaterialTheme.colorScheme.surface,
+                                MaterialTheme.colorScheme.surface
+                            )
+                        )
+                    )
+            )
+        }
+        // 压暗渐变：保证歌词可读性
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.verticalGradient(
+                        listOf(
+                            Color.Black.copy(alpha = 0.22f),
+                            Color.Transparent,
+                            Color.Black.copy(alpha = 0.60f)
+                        )
+                    )
+                )
+        )
         when {
             isLoading -> CircularProgressIndicator(
                 color = accent,
@@ -170,9 +230,19 @@ fun LyricFullscreenScreen(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.align(Alignment.Center)
             ) {
-                Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.size(64.dp))
+                Icon(Icons.Default.MusicNote, null, tint = Color.White.copy(alpha = 0.45f), modifier = Modifier.size(64.dp))
                 Spacer(Modifier.height(12.dp))
-                Text(stringResource(R.string.player_no_lyrics), color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    stringResource(R.string.player_no_lyrics),
+                    color = Color.White.copy(alpha = 0.85f),
+                    style = MaterialTheme.typography.bodyLarge.copy(
+                        shadow = androidx.compose.ui.graphics.Shadow(
+                            color = Color.Black.copy(alpha = 0.8f),
+                            offset = androidx.compose.ui.geometry.Offset(0f, 1f),
+                            blurRadius = 4f
+                        )
+                    )
+                )
             }
             else -> {
                 LyricViewCompose(
@@ -183,12 +253,15 @@ fun LyricFullscreenScreen(
                     showProgressBar = true,
                     fontSize = lyricFontSize,
                     visibleLines = lyricVisibleLines,
+                    fadeColor = Color.Black,
+                    showTopFade = false,
+                    showBottomFade = false,
                     modifier = Modifier
                         .fillMaxSize()
                         .statusBarsPadding()  // 顶部避开状态栏
                         .let { mod ->
                             if (isManualSource)
-                                mod.padding(bottom = 52.dp)  // 给底部标签留出空间
+                                mod.padding(bottom = 80.dp)  // 给底部标签留出空间（标签高约28dp+padding）
                             else mod
                         }
                 )
@@ -202,7 +275,7 @@ fun LyricFullscreenScreen(
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(horizontal = 8.dp, vertical = 8.dp),
+                .padding(horizontal = 4.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onNavigateBack) {
@@ -211,22 +284,74 @@ fun LyricFullscreenScreen(
 
             Spacer(Modifier.width(4.dp))
 
-            // 歌名（居中），歌手名作为次要显示
-            Text(
-                text = songTitle.ifEmpty { songArtist.ifEmpty { stringResource(R.string.title_fullscreen_lyrics) } },
-                color = MaterialTheme.colorScheme.onBackground,
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.Medium,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.weight(1f)
-            )
+            // 歌曲信息卡（封面 + 歌名 + 歌手），内嵌在操作栏中避免与返回键重叠
+            Row(
+                modifier = Modifier
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                    if (coverUri != null) {
+                        Image(
+                            painter = rememberAsyncImagePainter(coverUri),
+                            contentDescription = null,
+                            modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)),
+                            contentScale = ContentScale.Crop
+                        )
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .background(accent.copy(alpha = 0.35f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.MusicNote, null, tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(18.dp))
+                        }
+                    }
+                }
+                Spacer(Modifier.width(10.dp))
+                Column(modifier = Modifier.widthIn(max = 110.dp)) {
+                    Text(
+                        text = songTitle.ifEmpty { stringResource(R.string.title_fullscreen_lyrics) },
+                        color = Color.White,
+                        style = MaterialTheme.typography.titleSmall.copy(
+                            shadow = androidx.compose.ui.graphics.Shadow(
+                                color = Color.Black.copy(alpha = 0.8f),
+                                offset = androidx.compose.ui.geometry.Offset(0f, 1f),
+                                blurRadius = 4f
+                            )
+                        ),
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    if (songArtist.isNotBlank()) {
+                        Text(
+                            text = songArtist,
+                            color = Color.White.copy(alpha = 0.85f),
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                shadow = androidx.compose.ui.graphics.Shadow(
+                                    color = Color.Black.copy(alpha = 0.8f),
+                                    offset = androidx.compose.ui.geometry.Offset(0f, 1f),
+                                    blurRadius = 4f
+                                )
+                            ),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.weight(1f))
 
             // 手动/自动切换
             Text(
                 text = stringResource(R.string.lyrics_auto),
-                color = if (!isManualSource) accent else MaterialTheme.colorScheme.outlineVariant,
-                fontSize = 11.sp,
+                color = if (!isManualSource) accent else Color.White.copy(alpha = 0.55f),
+                fontSize = 10.sp,
                 fontWeight = if (!isManualSource) FontWeight.SemiBold else FontWeight.Normal
             )
             Switch(
@@ -238,16 +363,16 @@ fun LyricFullscreenScreen(
                     uncheckedThumbColor = Color.White.copy(alpha = 0.6f),
                     uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
                 ),
-                modifier = Modifier.height(22.dp).padding(horizontal = 2.dp)
+                modifier = Modifier.padding(horizontal = 2.dp)
             )
             Text(
                 text = stringResource(R.string.lyrics_manual),
-                color = if (isManualSource) accent else MaterialTheme.colorScheme.outlineVariant,
-                fontSize = 11.sp,
+                color = if (isManualSource) accent else Color.White.copy(alpha = 0.55f),
+                fontSize = 10.sp,
                 fontWeight = if (isManualSource) FontWeight.SemiBold else FontWeight.Normal
             )
 
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.width(4.dp))
 
             // 编辑按钮
             FilledTonalIconButton(
@@ -256,31 +381,39 @@ fun LyricFullscreenScreen(
                     showEditDialog = true
                 },
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
-                    containerColor = accent.copy(alpha = 0.18f),
-                    contentColor = accent
+                    containerColor = Color.White.copy(alpha = 0.22f),
+                    contentColor = Color.White
                 ),
-                modifier = Modifier.size(36.dp)
+                modifier = Modifier.size(30.dp)
             ) {
-                Icon(Icons.Default.Edit, stringResource(R.string.title_edit_lyrics), modifier = Modifier.size(18.dp))
+                Icon(Icons.Default.Edit, stringResource(R.string.title_edit_lyrics), modifier = Modifier.size(16.dp))
             }
         }
 
         // 手动模式下显示来源选择（底部叠加）
         if (isManualSource) {
-            Surface(
-                color = accent.copy(alpha = 0.15f),
-                shape = RoundedCornerShape(16.dp),
+            Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = 24.dp)
+                    .navigationBarsPadding()
+                    .padding(bottom = 16.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Color.Black.copy(alpha = 0.25f))
                     .clickable { showSourceSheet = true }
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
                 Text(
                     text = sourceLabel,
-                    color = accent.copy(alpha = 0.8f),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Medium,
-                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp)
+                    color = Color.White,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    style = MaterialTheme.typography.bodyMedium.copy(
+                        shadow = androidx.compose.ui.graphics.Shadow(
+                            color = Color.Black.copy(alpha = 0.8f),
+                            offset = androidx.compose.ui.geometry.Offset(0f, 1f),
+                            blurRadius = 3f
+                        )
+                    )
                 )
             }
         }
@@ -290,13 +423,23 @@ fun LyricFullscreenScreen(
     if (showSourceSheet) {
         ModalBottomSheet(
             onDismissRequest = { showSourceSheet = false },
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
-            tonalElevation = 0.dp
+            containerColor = Color(0xFF141414),
+            tonalElevation = 0.dp,
+            dragHandle = {
+                Box(
+                    modifier = Modifier
+                        .padding(top = 10.dp, bottom = 6.dp)
+                        .width(36.dp)
+                        .height(4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(accent.copy(alpha = 0.5f))
+                )
+            }
         ) {
             Spacer(Modifier.height(8.dp))
             Text(
                 text = stringResource(R.string.lyrics_select_source),
-                color = MaterialTheme.colorScheme.onBackground,
+                color = Color.White,
                 style = MaterialTheme.typography.titleMedium,
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
             )
@@ -316,7 +459,7 @@ fun LyricFullscreenScreen(
                     ) {
                         Text(
                             text = name,
-                            color = if (isSel) accent else MaterialTheme.colorScheme.onBackground,
+                            color = if (isSel) accent else Color.White.copy(alpha = 0.92f),
                             style = MaterialTheme.typography.bodyLarge,
                             fontWeight = if (isSel) FontWeight.SemiBold else FontWeight.Normal
                         )
@@ -326,7 +469,8 @@ fun LyricFullscreenScreen(
                     }
                 }
             }
-            Spacer(Modifier.height(24.dp))
+            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.navigationBarsPadding().height(16.dp))
         }
     }
 
@@ -448,19 +592,19 @@ fun LyricFullscreenScreen(
                     if (isSaving) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(16.dp),
-                            color = MaterialTheme.colorScheme.background,
+                            color = Color.White,
                             strokeWidth = 2.dp
                         )
                         Spacer(Modifier.width(8.dp))
                     }
-                    Text(stringResource(R.string.action_save), color = MaterialTheme.colorScheme.background)
+                    Text(stringResource(R.string.action_save), color = Color.White)
                 }
             },
             dismissButton = {
                 TextButton(
                     onClick = { showEditDialog = false },
                     enabled = !isSaving,
-                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurfaceVariant)
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))
                 ) {
                     Text(stringResource(R.string.action_cancel))
                 }

@@ -42,6 +42,12 @@ public:
     // Open a file for decoding. Returns true on success.
     bool open(const char* filePath);
 
+    // Open from an already-open file descriptor (scoped-storage safe).
+    bool openFd(int fd, int64_t offset, int64_t length);
+
+    // Shared track/codec setup after data source is ready
+    bool setupTracksAndCodec();
+
     // Get audio info (valid after open())
     Info getInfo() const { return info_; }
 

@@ -126,7 +126,15 @@ public:
     bool isDitherEnabled() const { return ditherEnabled_.load(std::memory_order_acquire); }
 
     // ── DAC 链路 MSEB / 图形 EQ（5 段 Biquad，与 Oboe 共用同一套算法）──
-    void setDspEnabled(bool en) { dspEqEnabled_.store(en, std::memory_order_release); }
+    void setDspEnabled(bool en) {
+        dspEqEnabled_.store(en, std::memory_order_release);
+        // 【V8.8】DSP 总开关关闭 → 耳机校准（AutoEQ）一并关闭，与 Oboe 路径行为一致
+        if (!en) {
+            autoEqEnabled_.store(false, std::memory_order_release);
+            autoEqPreGain_ = 1.0f;
+            curAutoEqPreGain_ = 1.0f;
+        }
+    }
     bool isDspEnabled() const { return dspEqEnabled_.load(std::memory_order_acquire); }
     void setDspEq5Band(const float* gainsDb, const float* freqsHz, int len);
     void resetDspEq5Band();

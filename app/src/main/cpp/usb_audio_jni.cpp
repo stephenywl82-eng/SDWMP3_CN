@@ -128,10 +128,30 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeStopThreadOnly(JNIEnv*,
 JNIEXPORT void JNICALL
 Java_com_sdw_music_player_core_audio_UsbDacManager_nativeRelease(JNIEnv*, jobject) {
     if (gUsbDriver) {
+        // 【方向1 二期】release 防御: 若流仍在跑或接口仍 claim, 先 stop() 再 delete。
+        // 正常路径调用方已按 RELEASING 动作顺序先 join + nativeFlacStop + nativeStop;
+        // 此断言兜底未来调用顺序回归, 避免 use-after-free (FLAC 线程仍持 drv 指针)。
+        if (gUsbDriver->isStreaming()) {
+            LOGE("nativeRelease: stream still running! stopping first (defensive)");
+            gUsbDriver->stop();
+        }
+        if (gUsbDriver->isClaimed()) {
+            LOGE("nativeRelease: interface still claimed! releasing first (defensive)");
+            gUsbDriver->releaseInterface();
+        }
         delete gUsbDriver;
         gUsbDriver = nullptr;
     }
     LOGI("nativeRelease");
+}
+
+// ── nativeIsStreaming ──────────────────────────────────────────────────────
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeIsStreaming(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    if (!driver) return JNI_FALSE;
+    return driver->isStreaming() ? JNI_TRUE : JNI_FALSE;
 }
 
 // ── nativeIsClaimed ──────────────────────────────────────────────────────

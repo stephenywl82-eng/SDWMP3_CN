@@ -4,7 +4,10 @@
 
 #define DR_FLAC_IMPLEMENTATION
 #define DR_FLAC_NO_WCHAR
-#define DR_FLAC_NO_CRC
+// #define DR_FLAC_NO_CRC  // [2026-09-07] 移除：NO_CRC 会禁用 binary search seek。
+// 损坏 SEEKTABLE 的 FLAC（Breathless - Shayne Ward.flac 实测 23 个 seekpoint 除首个外全为垃圾值）
+// seektable seek 失败后只剩 brute force（顺序解码到目标帧），深处 seek 必失败
+// → 解码线程假 EOS → controller 重启 → "跳回开头"。启用 CRC 后 binary search 可用，seek 可靠。
 #include "dr_flac.h"
 
 #include <jni.h>
@@ -390,10 +393,10 @@ static void decodeLoop() {
                 drv->resetRingBuffer();
                 LOGI("decodeLoop: seek to frame %lld", (long long)targetFrame);
             } else {
-                LOGW("decodeLoop: seek failed, falling back to beginning");
-                drflac_seek_to_pcm_frame(gFlac, 0);
-                gCurrentPcmFrame = 0;
-                drv->resetRingBuffer();
+                // 【2026-09-07】seek 失败不再跳回 0（旧行为 = 用户拖进度条"跳回开头"惊吓）。
+                // 保持原位继续播放；若 seek 目标是明确的越界值则视为 EOS（交给上层自然切歌）。
+                LOGW("decodeLoop: seek to frame %lld FAILED, staying at current position (frame %lld)",
+                     (long long)targetFrame, (long long)gCurrentPcmFrame.load());
             }
             gSeekTargetMs = 0;
             gSeekTargetPcmFrame = 0;

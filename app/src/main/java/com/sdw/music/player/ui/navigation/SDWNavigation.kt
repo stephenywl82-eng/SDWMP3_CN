@@ -406,7 +406,8 @@ fun SDWNavHost(
                     onNavigateBack = { navController.popBackStack() },
                     onNavigateToAudioDiagnostic = { navController.navigate(Screen.AudioDiagnostic.route) },
                     onNavigateToAudioQuality = { navController.navigate(Screen.AudioQuality.route) },
-                    onNavigateToCoverEmbed = { navController.navigate(Screen.CoverEmbed.route) }
+                    onNavigateToCoverEmbed = { navController.navigate(Screen.CoverEmbed.route) },
+                    onBpmScanned = { vm.refreshSongs() }
                 )
             }
             composable(Screen.CoverEmbed.route) {
@@ -435,6 +436,7 @@ fun SDWNavHost(
                     songId = state.currentSongId,
                     songTitle = state.currentSongTitle,
                     songArtist = state.currentSongArtist,
+                    albumArt = state.currentSongAlbumArt,
                     accentColor = state.accentColor,
                     positionMs = lyricsPositionMs,
                     onSeekTo = { pos -> vm.handleIntent(PlayerIntent.SeekTo(pos)) },

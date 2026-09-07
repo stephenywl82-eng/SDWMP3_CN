@@ -89,7 +89,7 @@ class LyricRepository private constructor(
                 loadLocalLyrics(song)?.let { return@withContext it }
                 return@withContext localLrcProvider.matchLocal(song.filePath, song.title, song.artist)
             }
-            "embedded" -> return@withContext loadEmbedded(song)
+            "embedded" -> return@withContext withTimeout(4000L) { loadEmbedded(song) }  // 防大文件 native 解析卡住无限转圈
             else -> {
                 val provider = providers.find { it.providerId == providerId }
                 provider?.match(song.title, song.artist, song.duration)

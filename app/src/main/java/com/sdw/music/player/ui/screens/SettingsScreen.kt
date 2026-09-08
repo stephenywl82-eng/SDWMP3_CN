@@ -282,7 +282,6 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 var scanning by remember(refreshTrigger) { mutableStateOf(false) }
                 var scanDone by remember(refreshTrigger) { mutableStateOf(0) }
                 var scanTotal by remember(refreshTrigger) { mutableStateOf(0) }
-                val scope2 = rememberCoroutineScope()
                 if (scanning) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),

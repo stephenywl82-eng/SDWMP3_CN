@@ -1814,9 +1814,6 @@ private var xfadeBChorusMs = -1L
                         UsbDacManager.setMsStage(ss, img)
                     }
                     currentSong.let { song -> MusicService.currentSong = song; currentIndex = index }
-                    // ��V3.2.8��DAC ��֧�� return ���ߺ��� V8.1 playlist ͬ����
-                    // MediaSession �ﻹ�Ǿ� MediaItem �� ϵͳý�忨Ƭ������ͬ�������ﲹ
-                    syncSessionMediaItem(index, songs)
                     notifyPlayStateChanged(true)
                     updateNotification()
                     notifySongChanged(songs[index])
@@ -2055,10 +2052,10 @@ private var xfadeBChorusMs = -1L
                         if (fftCallback != null && !visualizerManager.isReady()) { visualizerManager.setup() }
                     }, 500)
 
-                    val sampleRate = newPlayer.getSampleRate() ?: 0
-                    val nativeRate = newPlayer.getSampleRateNative() ?: 0
+                    val sampleRate = newPlayer.getSampleRate()
+                    val nativeRate = newPlayer.getSampleRateNative()
                     val bitPerfect = sampleRate == nativeRate
-                    val clipInfo = newPlayer.getClipDebugInfo() ?: ""
+                    val clipInfo = newPlayer.getClipDebugInfo()
                     Log.i(TAG, "OboeDirect playing: ${song.title}, rate=${sampleRate}Hz, native=${nativeRate}Hz, bitPerfect=$bitPerfect, exclusive=${newPlayer.isExclusiveMode()}, $clipInfo")
                 }
             }
@@ -2759,11 +2756,6 @@ private var xfadeBChorusMs = -1L
         }
     }
 
-    // ��V3.2.8��DAC ģʽ��ͬ�� MediaSession �� MediaItem��ϵͳý�忨Ƭ����/���������
-    // session ��� metadata������ NotificationCompat �� title����ͬ������ʾ�ɸ�
-    private fun syncSessionMediaItem(index: Int, songs: List<Song>) {
-        // [Phase C] Removed: SimpleBasePlayer.getState() owns MediaSession metadata
-    }
 
 
     private fun updateNotification() {
@@ -2836,7 +2828,7 @@ val displayArtist = if (song.artist.isNullOrBlank() || song.artist == "Unknown A
 
         // [V8.x] Use cached artBitmap (or null if not yet loaded �� async load fills cache next time)
         if (artBitmap != null) {
-            notificationBuilder.setLargeIcon(artBitmap as android.graphics.Bitmap)
+            notificationBuilder.setLargeIcon(artBitmap)
         }
 
         val notification = notificationBuilder.build()

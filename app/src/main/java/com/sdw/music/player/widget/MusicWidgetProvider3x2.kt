@@ -39,7 +39,7 @@ class MusicWidgetProvider3x2 : AppWidgetProvider() {
                 }
 
                 // Cover art — fast path: cached bitmap or logo (no I/O on main thread)
-                val rawBmp = MusicWidgetProvider.getArtBitmapFast(context, songData, rounded = false)
+                val rawBmp = MusicWidgetProvider.getArtBitmapFast(context, songData)
                 val coverBmp = MusicWidgetProvider.roundBitmap(
                     rawBmp, MusicWidgetProvider.dpToPx(context, 8f).toFloat())
                 views.setImageViewBitmap(R.id.widget_cover, coverBmp)

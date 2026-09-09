@@ -328,7 +328,7 @@ private var xfadeBChorusMs = -1L
                                             durationMs = dur,
                                             nextTitle = songs[nextIndex].title,
                                             nextArtist = songs[nextIndex].artist,
-                                            nextAlbumArt = songs[nextIndex].albumArtUri?.takeIf { it.isNotEmpty() },
+                                            nextAlbumArt = songs[nextIndex].albumArtUri.takeIf { it.isNotEmpty() },
                                             nextAccentColor = 0L
                                         )
                                         // 【2026-09-02 fix】openIncoming 移后台线程——原在主线程同步执行，
@@ -1207,8 +1207,8 @@ private var xfadeBChorusMs = -1L
                             hasAudioFocus = true
                             val svc = instance
                             if (svc?.isPlaying() != true && svc?.wasPlayingBeforeFocusLoss == true) {
-                                svc?.resume()
-                                svc?.wasPlayingBeforeFocusLoss = false
+                                svc.resume()
+                                svc.wasPlayingBeforeFocusLoss = false
                             }
                             android.util.Log.d("MusicService", "Audio focus regained")
                         }
@@ -3055,6 +3055,26 @@ val displayArtist = if (song.artist.isNullOrBlank() || song.artist == "Unknown A
                     Intent.ACTION_SCREEN_ON -> {
                         isScreenOn = true
                         Log.d(TAG, "Screen ON, resuming Visualizer")
+                        // 【2026-09-09】点亮强制重推 MediaSession 权威元数据：
+                        // 灭屏期间自动切歌后 SystemUI 不重拉 metadata，锁屏卡片会停在上首歌名
+                        // （声音已切新歌、通知栏已刷新，仅系统媒体卡片 stale）。
+                        // refresh() -> invalidateState() 推送最新 playlist+index，点亮瞬间标题纠正。
+                        try { musicPlayerState.refresh() } catch (_: Exception) {}
+                        try { updateNotification() } catch (_: Exception) {}
+                        // 【2026-09-09 第二层】延时二次推送：SCREEN_ON 广播时 SystemUI 锁屏媒体卡
+                        // 可能尚未完成订阅，立即推送会被丢弃；补推覆盖订阅竞态窗口。
+                        // 【第三层 2026-09-09】Doze 唤醒后 SystemUI 冷启动慢，300ms/800ms 双段补推，
+                        // 覆盖锁屏媒体卡恢复订阅的完整窗口（刷新是幂等投影，重复无副作用）。
+                        handler.postDelayed({
+                            try { musicPlayerState.refresh() } catch (_: Exception) {}
+                            try { updateNotification() } catch (_: Exception) {}
+                            Log.d(TAG, "Screen ON: delayed metadata re-push (300ms)")
+                        }, 300)
+                        handler.postDelayed({
+                            try { musicPlayerState.refresh() } catch (_: Exception) {}
+                            try { updateNotification() } catch (_: Exception) {}
+                            Log.d(TAG, "Screen ON: delayed metadata re-push (800ms)")
+                        }, 800)
                         // ����ʱ�ָ� Visualizer�������Ҫ��
                         if (fftCallback != null && !visualizerManager.isReady() && isAppForeground) {
                             handler.postDelayed({ visualizerManager.setup() }, 300)

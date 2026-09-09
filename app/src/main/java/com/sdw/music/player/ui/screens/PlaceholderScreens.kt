@@ -436,7 +436,7 @@ fun PlaylistListScreen(
 }
 
 // === Folder Detail Screen（目录树导航：子文件夹在上、歌曲在下） ===
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun FolderDetailScreen(
     folderPath: String,
@@ -464,6 +464,11 @@ fun FolderDetailScreen(
 
     val folderName = folderPath.substringAfterLast('/')
     var longPressSong by remember { mutableStateOf<com.sdw.music.player.Song?>(null) }
+    var longPressFolder by remember { mutableStateOf<String?>(null) }
+    // 长按的文件夹的递归歌曲集（弹批量加歌单用）；key 含 longPressFolder 保证切换长按对象时重算
+    val longPressFolderSongs = remember(folderPath, foldersVersion, longPressFolder) {
+        longPressFolder?.let { com.sdw.music.player.SongRepository.getSongsInFolder(it) } ?: emptyList()
+    }
 
     Scaffold(
         topBar = {
@@ -533,10 +538,10 @@ fun FolderDetailScreen(
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable(
-                                        indication = null,
-                                        interactionSource = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
-                                    ) { onOpenFolder(sub) }
+                                    .combinedClickable(
+                                        onClick = { onOpenFolder(sub) },
+                                        onLongClick = { longPressFolder = sub }
+                                    )
                                     .padding(horizontal = 12.dp, vertical = 10.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -586,6 +591,16 @@ fun FolderDetailScreen(
         AddToPlaylistSheet(
             song = song,
             onDismiss = { longPressSong = null }
+        )
+    }
+
+    // 【V8.35】长按子文件夹 -> 批量添加该文件夹（含子目录）全部歌曲到歌单
+    if (longPressFolder != null && longPressFolderSongs.isNotEmpty()) {
+        AddToPlaylistSheet(
+            song = longPressFolderSongs.first(),
+            onDismiss = { longPressFolder = null },
+            songs = longPressFolderSongs,
+            title = longPressFolder?.substringAfterLast('/')
         )
     }
 

@@ -90,7 +90,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
         private var cachedArtBmp: android.graphics.Bitmap? = null
 
         // Fast path: only returns cached bitmap or logo, never decodes (no I/O)
-        internal fun getArtBitmapFast(context: Context, songData: WidgetSongData?, rounded: Boolean): android.graphics.Bitmap {
+        internal fun getArtBitmapFast(context: Context, songData: WidgetSongData?): android.graphics.Bitmap {
             val uri = songData?.albumArtUri
             if (uri.isNullOrBlank()) return loadDefaultLogo(context)
             synchronized(artCacheLock) {
@@ -119,7 +119,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
             }
         }
 
-        internal fun getArtBitmap(context: Context, songData: WidgetSongData?, rounded: Boolean): android.graphics.Bitmap? {
+        internal fun getArtBitmap(context: Context, songData: WidgetSongData?): android.graphics.Bitmap? {
             val uri = songData?.albumArtUri
             if (uri.isNullOrBlank()) return loadDefaultLogo(context)
             if (uri == cachedArtUri) {
@@ -187,7 +187,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
                 }
 
                 // Cover art — fast path: cached bitmap or logo (no I/O on main thread)
-                val rawBmp = getArtBitmapFast(context, songData, rounded = false)
+                val rawBmp = getArtBitmapFast(context, songData)
                 views.setImageViewBitmap(
                     R.id.widget_cover,
                     roundBitmap(rawBmp, dpToPx(context, 8f).toFloat())

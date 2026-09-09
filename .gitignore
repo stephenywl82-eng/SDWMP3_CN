@@ -71,3 +71,6 @@ backup_*.cpp
 backup_*.h
 res_dead_backup*/
 jni_backup*/
+
+# so backups
+*.so.bak_*

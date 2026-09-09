@@ -60,6 +60,8 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.media3.common.Player
@@ -160,9 +162,30 @@ fun PlayerCoverArt(
     instantCoverSwitch: Boolean = false,
     modifier: Modifier = Modifier
 ) {
+    // 【V8.34 封面呼吸悬浮】播放中缓慢呼吸（半周期 4s → 全周期 8s），暂停/停止归位
+    val breathe = remember { Animatable(1f) }
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            breathe.snapTo(1f)
+            breathe.animateTo(
+                1.03f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 3500, easing = FastOutSlowInEasing),
+                    repeatMode = RepeatMode.Reverse
+                )
+            )
+        } else {
+            breathe.animateTo(1f, animationSpec = tween(durationMillis = 500, easing = FastOutSlowInEasing))
+        }
+    }
     Box(
         modifier = modifier
             .size(glowSizeDp)
+            .graphicsLayer {
+                // 呼吸缩放（悬浮感核心）
+                scaleX = breathe.value
+                scaleY = breathe.value
+            }
             .pointerInput(Unit) {
                 detectTapGestures(
                     onDoubleTap = { onDoubleTap() },
@@ -372,27 +395,144 @@ fun PlayerProgress(
         }
     }
 
+    // 【液态】流动高光相位（无限循环）
+    val flowPhase = remember { Animatable(0f) }
+    val liquidOn = durationMs > 0 && !isDragging
+    LaunchedEffect(liquidOn) {
+        if (liquidOn) {
+            flowPhase.snapTo(0f)
+            flowPhase.animateTo(
+                1f,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(durationMillis = 2600, easing = LinearEasing),
+                    repeatMode = RepeatMode.Restart
+                )
+            )
+        }
+    }
+
     Column(modifier = modifier.fillMaxWidth()) {
         if (durationMs > 0) {
-            Slider(
-                value = sliderValue,
-                onValueChange = {
-                    isDragging = true
-                    sliderValue = it
-                },
-                onValueChangeFinished = {
-                    onSeekTo(sliderValue)
-                    isDragging = false
-                },
-                colors = SliderDefaults.colors(
-                    thumbColor = accentColor,
-                    activeTrackColor = accentColor,
-                    inactiveTrackColor = MaterialTheme.colorScheme.surfaceVariant
-                ),
+            // 【V8.34 液态进度条】渐变填充 + 流动高光 + 发光播放头（替代标准 Slider）
+            val trackHeight = 5.dp
+            val thumbR = 7.dp
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(20.dp)
-            )
+                    .height(28.dp)
+                    .pointerInput(Unit) {
+                        detectTapGestures { offset ->
+                            val w = size.width.toFloat()
+                            if (w > 0f) onSeekTo((offset.x / w).coerceIn(0f, 1f))
+                        }
+                    }
+                    .pointerInput(Unit) {
+                        var dragStartFrac = 0f
+                        detectHorizontalDragGestures(
+                            onDragStart = { offset ->
+                                isDragging = true
+                                val w = size.width.toFloat()
+                                dragStartFrac = if (w > 0f) (offset.x / w).coerceIn(0f, 1f) else 0f
+                                sliderValue = dragStartFrac
+                            },
+                            onDragEnd = {
+                                onSeekTo(sliderValue)
+                                isDragging = false
+                            },
+                            onDragCancel = { isDragging = false },
+                            onHorizontalDrag = { change, dragAmount ->
+                                change.consume()
+                                val w = size.width.toFloat()
+                                if (w > 0f) {
+                                    sliderValue = (sliderValue + dragAmount / w).coerceIn(0f, 1f)
+                                }
+                            }
+                        )
+                    },
+                contentAlignment = Alignment.TopStart
+            ) {
+                val barTopDp = (28.dp - trackHeight) / 2
+                // 轨道底
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(trackHeight)
+                        .offset(y = barTopDp)
+                        .clip(RoundedCornerShape(trackHeight / 2))
+                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f))
+                )
+                val fillFrac = sliderValue.coerceIn(0f, 1f)
+                // 已播段（液态渐变）
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth(fillFrac)
+                        .height(trackHeight)
+                        .offset(y = barTopDp)
+                        .clip(RoundedCornerShape(trackHeight / 2))
+                        .background(
+                            Brush.horizontalGradient(
+                                0.0f to accentColor.copy(alpha = 0.55f),
+                                0.55f to accentColor,
+                                1.0f to lerp(accentColor, Color.White, 0.35f)
+                            )
+                        )
+                ) {
+                    // 流动高光斑（仅非拖动时）
+                    if (!isDragging) {
+                        val bandW = 60.dp
+                        Canvas(modifier = Modifier.matchParentSize()) {
+                            val w = this.size.width
+                            val h = this.size.height
+                            if (w > bandW.toPx() * 1.5f) {
+                                val span = w + bandW.toPx() * 2f
+                                val cx = flowPhase.value * span - bandW.toPx()
+                                drawRect(
+                                    brush = Brush.horizontalGradient(
+                                        0.0f to Color.White.copy(alpha = 0f),
+                                        0.5f to Color.White.copy(alpha = 0.35f),
+                                        1.0f to Color.White.copy(alpha = 0f)
+                                    ),
+                                    topLeft = Offset(cx, 0f),
+                                    size = Size(bandW.toPx(), h)
+                                )
+                            }
+                        }
+                    }
+                }
+                // 发光播放头（拖动放大）——精确居中于 fillFrac 位置
+                val thumbScale by animateFloatAsState(
+                    targetValue = if (isDragging) 1.4f else 1f,
+                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
+                    label = "thumbScale"
+                )
+                val thumbBaseDp = thumbR * 2f   // Dp（thumbR 已是 Dp）
+                val thumbDp = thumbBaseDp * thumbScale   // Dp * Float = Dp
+                var barWidthPx by remember { mutableIntStateOf(0) }
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp)
+                        .onSizeChanged { barWidthPx = it.width }
+                ) {}
+                // thumb 独立定位：x 从 0..(barWidth - thumbW) 映射 fillFrac，y 垂直居中
+                val thumbWpx = with(LocalDensity.current) { thumbDp.toPx() }
+                Box(
+                    modifier = Modifier
+                        .offset {
+                            val maxX = (barWidthPx - thumbWpx).coerceAtLeast(0f)
+                            IntOffset(
+                                x = (maxX * fillFrac).roundToInt(),
+                                y = (barTopDp.toPx() + (trackHeight.toPx() - thumbWpx) / 2f).roundToInt()
+                            )
+                        }
+                        .size(thumbDp)
+                        .graphicsLayer {
+                            // Compose 1.6 仅支持 shadowElevation（shape/ambient/spot 需 1.7）
+                            shadowElevation = 6f * thumbScale
+                        }
+                        .background(accentColor, CircleShape)
+                )
+            }
         }
         Row(
             modifier = Modifier.fillMaxWidth(),

@@ -42,6 +42,8 @@ import com.sdw.music.player.Playlist
 fun AddToPlaylistSheet(
     song: Song,
     onDismiss: () -> Unit,
+    songs: List<Song>? = null,
+    title: String? = null,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val context = LocalContext.current
@@ -100,10 +102,20 @@ fun AddToPlaylistSheet(
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(song.title, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(song.artist.ifBlank { "Unknown Artist" }, style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    val batch = songs
+                    if (batch == null) {
+                        Text(song.title, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground,
+                            maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(song.artist.ifBlank { "Unknown Artist" }, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    } else {
+                        Text(
+                            "${batch.size} songs", style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis
+                        )
+                        Text(title ?: song.title, style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
                 }
             }
 
@@ -137,17 +149,29 @@ fun AddToPlaylistSheet(
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp)
                 )
                 LazyColumn(modifier = Modifier.fillMaxWidth().heightIn(max = 320.dp)) {
+                    val batch = songs
                     items(playlists, key = { it.id }) { pl ->
-                        val contains = song.id in pl.songIds
+                        val contains = if (batch == null) song.id in pl.songIds else batch.all { it.id in pl.songIds }
                         Row(
                             modifier = Modifier.fillMaxWidth()
                                 .clickable(enabled = !contains) {
-                                    if (PlaylistManager.addSongToPlaylist(pl.id, song.id)) {
-                                        playlists[playlists.indexOfFirst { it.id == pl.id }] =
-                                            playlists.first { it.id == pl.id }.copy(songIds = playlists.first { it.id == pl.id }.songIds + song.id)
-                                        toast = context.getString(R.string.playlist_added_to, pl.name)
+                                    if (batch == null) {
+                                        if (PlaylistManager.addSongToPlaylist(pl.id, song.id)) {
+                                            playlists[playlists.indexOfFirst { it.id == pl.id }] =
+                                                playlists.first { it.id == pl.id }.copy(songIds = playlists.first { it.id == pl.id }.songIds + song.id)
+                                            toast = context.getString(R.string.playlist_added_to, pl.name)
+                                        } else {
+                                            toast = context.getString(R.string.playlist_already_in, pl.name)
+                                        }
                                     } else {
-                                        toast = context.getString(R.string.playlist_already_in, pl.name)
+                                        val added = PlaylistManager.addSongsToPlaylist(pl.id, batch.map { it.id })
+                                        if (added > 0) {
+                                            playlists[playlists.indexOfFirst { it.id == pl.id }] =
+                                                playlists.first { it.id == pl.id }.copy(songIds = (playlists.first { it.id == pl.id }.songIds + batch.map { it.id }.filter { id -> id !in playlists.first { it.id == pl.id }.songIds }))
+                                            toast = context.getString(R.string.playlist_added_to, pl.name)
+                                        } else {
+                                            toast = context.getString(R.string.playlist_already_in, pl.name)
+                                        }
                                     }
                                 }
                                 .padding(horizontal = 20.dp, vertical = 10.dp),
@@ -203,7 +227,12 @@ fun AddToPlaylistSheet(
                     enabled = newName.isNotBlank(),
                     onClick = {
                         val pl = PlaylistManager.createPlaylist(newName.trim())
-                        PlaylistManager.addSongToPlaylist(pl.id, song.id)
+                        val batch = songs
+                        if (batch == null) {
+                            PlaylistManager.addSongToPlaylist(pl.id, song.id)
+                        } else {
+                            PlaylistManager.addSongsToPlaylist(pl.id, batch.map { it.id })
+                        }
                         playlists.add(0, pl)
                         newName = ""
                         showCreate = false

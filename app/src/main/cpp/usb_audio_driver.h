@@ -132,7 +132,6 @@ public:
         if (!en) {
             autoEqEnabled_.store(false, std::memory_order_release);
             autoEqPreGain_ = 1.0f;
-            curAutoEqPreGain_ = 1.0f;
         }
     }
     bool isDspEnabled() const { return dspEqEnabled_.load(std::memory_order_acquire); }
@@ -277,7 +276,6 @@ private:
     BiquadFilter autoEqBand10L_, autoEqBand10R_;
     std::atomic<bool> autoEqEnabled_{false};
     float autoEqPreGain_ = 1.0f;
-    float curAutoEqPreGain_ = 1.0f;
     float lastAutoEqGains_[10] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f,
                                    999.0f, 999.0f, 999.0f, 999.0f, 999.0f };
     // 【V8.3】M/S 声场（跨声道矩阵）

@@ -631,7 +631,6 @@ void UsbAudioDriver::resetAutoEq() {
     for (int i = 0; i < 10; i++) lastAutoEqGains_[i] = 999.0f;  // 强制下次重新应用
     autoEqEnabled_.store(false, std::memory_order_release);
     autoEqPreGain_ = 1.0f;
-    curAutoEqPreGain_ = 1.0f;
     LOGI("DAC AutoEQ 10-band reset (flat)");
 }
 
@@ -1001,7 +1000,7 @@ int UsbAudioDriver::trySetSampleRate(int rate) {
 int UsbAudioDriver::setSampleRate(int rate) {
     if (fd_ < 0) return -1;
     if (streaming_.load(std::memory_order_acquire)) {
-        LOGW("setSampleRate(%d): skipped 锟?stream active", rate);
+        LOGW("setSampleRate(%d): skipped - stream active", rate);
         return sampleRate_;
     }
     return trySetSampleRate(rate);

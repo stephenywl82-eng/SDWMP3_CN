@@ -33,10 +33,7 @@ import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.ui.components.AddToPlaylistSheet
 import com.sdw.music.player.Song
 import com.sdw.music.player.core.SongSorter
-import com.sdw.music.player.core.audio.BpmScanner
-import com.sdw.music.player.BpmKeyCache
 import com.sdw.music.player.ui.components.BpmBadge
-import kotlinx.coroutines.launch
 import androidx.compose.material.icons.filled.Sort
 import com.sdw.music.player.ui.theme.*
 import androidx.compose.ui.res.stringResource
@@ -56,10 +53,6 @@ fun PlaylistDetailScreen(
     var longPressSong by remember { mutableStateOf<Song?>(null) }
     var showSongMenu by remember { mutableStateOf(false) }
     var bpmSort by remember { mutableStateOf(false) }
-    var isScanning by remember { mutableStateOf(false) }
-    var scanProgress by remember { mutableStateOf(0f) }
-    val scope = rememberCoroutineScope()
-    val context = androidx.compose.ui.platform.LocalContext.current
 
     LaunchedEffect(playlistId) {
         playlist = PlaylistManager.getPlaylist(playlistId)
@@ -99,47 +92,13 @@ fun PlaylistDetailScreen(
                     }
                 },
                 actions = {
-                    // 【v8.13】BPM 平滑排序开关
+                    // 【v8.13】BPM 平滑排序开关（扫描入口在 设置 → 扫描 BPM）
                     IconButton(onClick = { bpmSort = !bpmSort }) {
                         Icon(
                             Icons.Default.Sort,
                             stringResource(R.string.playlist_sort_bpm),
                             tint = if (bpmSort) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
                         )
-                    }
-                    // 【v8.13】BPM 扫描（补测无 tag 歌曲）
-                    if (isScanning) {
-                        Box(modifier = Modifier.size(24.dp).padding(4.dp)) {
-                            CircularProgressIndicator(
-                                strokeWidth = 2.dp,
-                                modifier = Modifier.fillMaxSize(),
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                        Spacer(Modifier.width(4.dp))
-                    } else {
-                        IconButton(onClick = {
-                            isScanning = true
-                            scope.launch {
-                                BpmKeyCache.init(context)
-                                // 【v8.13】扫全库（缓存全局生效，所有歌单共享）
-                                val allSongs = com.sdw.music.player.SongRepository.getSongs()
-                                val detected = BpmScanner.scanLibrary(context, allSongs) { done, total, _ ->
-                                    scanProgress = done.toFloat() / total.coerceAtLeast(1)
-                                }
-                                isScanning = false
-                                com.sdw.music.player.SongRepository.applyBpmCache(context)
-                                songs = PlaylistManager.getPlaylistSongs(playlistId)
-                                playlist = PlaylistManager.getPlaylist(playlistId)
-                                android.widget.Toast.makeText(
-                                    context,
-                                    if (detected > 0) "$detected BPM detected" else "No new BPM detected",
-                                    android.widget.Toast.LENGTH_SHORT
-                                ).show()
-                            }
-                        }) {
-                            Icon(Icons.Default.Add, stringResource(R.string.playlist_scan_bpm), tint = MaterialTheme.colorScheme.primary)
-                        }
                     }
                     IconButton(onClick = onAddSongs) {
                         Icon(Icons.Default.Add, stringResource(R.string.title_add_songs), tint = MaterialTheme.colorScheme.primary)

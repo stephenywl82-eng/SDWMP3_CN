@@ -140,14 +140,14 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 ## 版本与更新日志
 
 - 当前：`versionName` 9.0 / `versionCode` 900
-- `CHANGELOG.md` 目前记录到 **8.2**，后续版本（`v8.3` ~ `v9.0`）的改动请直接看 git 提交历史。近期主要工作包括：
+- 完整更新记录见 **`CHANGELOG.md`**（已补齐至 9.0，8.2 及更早同样收录）。其中几个值得注意的节点：
 
-  - V9.0：歌词页玻璃浮层、ReplayGain 响度归一化
-  - V8.33~8.36：液态进度条、文件夹批量加入歌单、歌单 BPM 扫描清理、灭屏元数据补推
-  - V8.7~8.32：DAC 状态机、FLAC seek 修正、蓝牙预加重、壁纸自适应文字、歌单三项增强、33d8 DAC 白名单、音量/体积优化
-  - V8.17x：MSEB 预设携带 DSP 快照、DAC AutoEQ、APK 瘦身
-  - V8.6：交叉淡化封面过渡、队列自动滚到当前、MSEB 预设删除、VU 表抖动修复
-  - V8.5：UAC1 DAC 支持（Qudelix-5K / Moondrop Chu II DSP）
+  - **9.0**：ReplayGain 响度归一化、歌词页玻璃浮层
+  - **8.36**：液态进度条、文件夹批量加入歌单、灭屏元数据补推
+  - **8.32**：DAC 连接状态机、FLAC seek 修正、33d8 DAC 白名单、蓝牙预加重
+  - **8.3–8.5**：MSEB 10 段 + M/S 空间 + 瞬态整形 + 压缩器、DAC AutoEQ、UAC1 DAC 支持、APK 瘦身
+
+- 注：8.2 之后的版本历史上多是以「工作区快照」形式整批提交的，因此 CHANGELOG 里按版本区间归档，逐次提交的粒度无法还原；需要最细粒度请看 `git log`。
 
 ---
 

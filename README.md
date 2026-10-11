@@ -1,50 +1,125 @@
 # Moto Music Premium（中文版 / 多语言）
 
 > Android 高保真本地无损音乐播放器，主打 **USB DAC 独占直通** 的 Bit-Perfect 输出。
+> 当前版本 **9.0**（versionCode 900）。
 
 ## 定位
 
-面向发烧友的本地音乐播放器，核心是绕过 Android 系统 SRC 重采样，把手写 USB Host API 直连 DAC，实现无损、逐比特的输出。非 DAC 场景走 Oboe/AAudio 直连，全程不经过系统混音器。
+面向发烧友的本地音乐播放器，核心是绕过 Android 系统 SRC 重采样，用手写 USB Host API 直连 DAC，实现无损、逐比特的输出；非 DAC 场景走 Oboe/AAudio 直连，全程不经过系统混音器。
+
+它不是在线音乐 App：没有曲库推荐、没有电台，曲库就是你自己拷进手机的文件。换来的是**对音频链路每一个环节的完全控制**。
+
+---
+
+## 快速事实
+
+| 项目 | 值 |
+|------|------|
+| `applicationId` | `com.sdw.music.player.cn` |
+| `versionName` / `versionCode` | 9.0 / 900 |
+| `minSdk` / `targetSdk` / `compileSdk` | 24 / 35 / 35 |
+| 语言 | 9 种（10 个 locale：简中、繁中、English、Español、日本語、한국어、Français、Português、हिन्दी） |
+| 模块 | `:app`（主工程，131 个 Kotlin 文件）、`:analyzer`（音频分析） |
+| 播放核心 | 自研 native 引擎（`liboboe_bridge.so`），**已彻底移除 ExoPlayer** |
+| UI | Jetpack Compose + Material You + MVI + Hilt + StateFlow |
+| 媒体框架 | Media3 `MediaSessionService`（`MusicService`） |
+
+---
 
 ## 主要功能
 
-- **USB DAC 独占输出**：手写 USB Host API（USBDEVFS_CLAIM + ISO URB），44.1k/48k 双时钟切换，支持 16/24/32-bit
-- **Oboe / AAudio 直连**：未知 DAC 的默认路径，由内核 USB 驱动处理 quirks
-- **多语言**：9 种语言运行时切换（简中 / 繁中 / English / Español / 日本語 / 한국어 / Français / Português / हिन्दी）
-- **MSEB 心理声学 EQ**：10 维主观参数 → 5 段 native Biquad，A/B 对比
-- **FLAC 内嵌歌词**：读写 Vorbis Comment `LYRICS` 字段，支持 Embedded 歌词来源
-- **封面嵌入工具**：iTunes API 优先 + MusicBrainz Cover Art Archive 兜底，FLAC PICTURE block / MP3 ID3v2 APIC 帧写入
-- **无缝切歌（Gapless）**、睡眠定时器、A-Z 快速索引、折叠屏分屏布局
+### 一、音频输出
+
+- **USB DAC 独占 Bit-Perfect**：手写 USB Host API（USBDEVFS_CLAIM + ISO URB），44.1k/48k 双时钟切换，支持 16/24/32-bit
+- **UAC1 / UAC2 双支持**：含 UAC1 描述符解析修正，已接入 Qudelix-5K、Moondrop Chu II DSP 等设备
+- **已知 DAC 白名单 + 状态机**：按 VID/PID 识别并建立连接状态机，避免拔出/重插时的爆音与卡死
+- **Oboe / AAudio 直连**：未知 DAC 的默认路径
+- **硬件音量优先**：DAC 带 Feature Unit 音量时直接调 DAC，不在软件里削信号
+
+### 二、解码
+
+| 格式 | 解码方式 | 备注 |
+|------|---------|------|
+| FLAC | libFLAC 硬解（native） | 避开系统解码器把 24bit 强转 16bit 造成的字节错位与杂音 |
+| ALAC | Apple 官方 ALAC 解码器（native） | Apple Lossless 直通 |
+| WAV | dr_wav 直读 | 原生无损 |
+| MP3 / AAC / M4A / Opus / OGG | MediaCodec | 有损格式走系统解码 |
+| DSD (dsf/dsd/dff/dxd) | ❌ 不支持播放 | 仅识别格式标签，无 DSD 解码器 |
+
+### 三、DSP 与调音
+
+- **MSEB 心理声学 EQ**：主观维度（温度 / 厚度 / 人声远近 / 空气感 / 瞬态…）映射到 **10 段 native Biquad**，而非传统频段增益
+- **13 维预设 + DSP 快照**：预设不再只是一组滑块，切换时压缩器 / 等响 / Crossfeed / DTS / SpaceReverb 等模块开关一起跟着走
+- **处理链路模块**：M/S 空间处理、瞬态整形（Transient Shaper）、压缩器（阈值/压缩比/启动/释放/补偿增益）、等响补偿、Crossfeed、DTS、空间混响
+- **AutoEq 补偿曲线**：针对已收录机型的自动 EQ 修正（`AutoEqPresetManager`）
+- **32 位浮点全链路**：解码 → float 环形缓冲 → float 域 EQ/音量 → 最后一刻才量化，中途不落地成整数
+
+### 四、响度与 ReplayGain
+
+- 读取 ReplayGain / 标签增益（`LoudnessTags`、`TagGainCache`），由 `LoudnessNormalizer` 统一目标响度，换专辑不再忽大忽小
+- 分析结果带本地缓存（`LoudnessCache`），二次扫描秒开
+
+### 五、元数据、封面、歌词
+
+- **封面嵌入**：iTunes API 优先 + MusicBrainz Cover Art Archive 兜底；FLAC 写 PICTURE block、MP3 写 ID3v2 APIC 帧
+- **封面读取**：FLAC / WAV 内嵌封面直接抽帧（`FlacCoverReader`、`WavCoverReader`）
+- **FLAC 内嵌歌词**：读写 Vorbis Comment `LYRICS` 字段
+- **歌词四级优先级**：`.lrc` → FLAC 内嵌 → 在线 LRCLIB → 手动编辑，可内嵌回音频文件
+- **歌词页玻璃浮层**（V9.0）：全屏歌词 + 平滑滚动 + 渐隐遮罩 + 字号/可见行数可调
+
+### 六、曲库与歌单
+
+- 曲目扫描与排序（艺术家 / 专辑 / 曲目号）、A-Z 快速索引
+- 歌单管理：新建、编辑、删除，文件夹递归播放、**文件夹批量加入歌单**
+- 多歌手拆分：一首歌多位艺术家可分别点击查看
+- 播放队列：自动滚动到当前曲目、交叉淡化过渡
+- 播放状态与「最近播放」持久化，冷启动接着上次的位置继续
+
+### 七、分析与扩展
+
+- **BPM / 音乐调性扫描**（`BpmScanner`、`BpmKeyCache`）
+- **曲式结构分析**（`SongStructureAnalyzer`）、波形缓存（`WaveformCache`）、能量取色（`EnergyColor`）
+- **STEM 插件接入**：通过 AIDL 总线对接外部 `com.sdw.stem.plugin`，做音轨分离（插件不可用时不影响主流程）
+- `:analyzer` 独立模块负责离线分析任务
+- 蓝牙编解码追踪（`BtCodecTracker`）
+
+### 八、界面与系统
+
+- 浅色 / 深色 Material You 主题、壁纸自适应文字取色
+- 折叠屏分屏布局、壁纸自适应取色（背景光晕与文字配色随封面/主题调整）
+- 桌面小部件、通知栏媒体卡片、媒体按键接管
+- 无缝切歌（Gapless）、睡眠定时器、灭屏播放、音频焦点管理
+
+---
 
 ## 技术架构
 
 ```
-文件 → 解码 → Ring Buffer(32768 帧 lock-free) → 播放核心 → 输出
+文件 → 解码 → Ring Buffer(32768 帧 lock-free) → 32bit float 域处理 → 输出
 ```
 
 ### 输出路径（三层）
 
 | 路径 | 说明 |
 |------|------|
-| Path 1 | USB Host Exclusive Bit-Perfect（已知 DAC：TTGK 33C0 / Realtek 4BA6） |
-| Path 2 | Oboe System Route（未知 DAC 默认，内核 USB 驱动处理 quirks） |
+| Path 1 | USB Host Exclusive Bit-Perfect（已知 DAC 走白名单） |
+| Path 2 | Oboe / AAudio 直连（未知 DAC 默认） |
 | Path 3 | SimpleBasePlayer 兜底（仅做 MediaSession 外壳） |
-
-### 解码层
-
-- **FLAC** — libFLAC 硬解（编入 `.so`）
-- **WAV** — dr_wav
-- **MP3 / AAC / M4A / Opus / OGG** — MediaCodec
 
 ### Native 层（liboboe_bridge.so）
 
 - `usb_audio_driver.cpp` — USB 音频驱动：12 URB 预队列 + phase accumulator（5/6 帧交替精确 44100Hz），16-bit TPDF 抖动
-- `biquad_filter.h` — 5 段 double 系数均衡器
+- `oboe_audio_engine.cpp` — Oboe/AAudio 播放引擎（解码调度、交叉淡化、输出回调）
 - `flac_decoder_jni.cpp` — FLAC 硬解 + 内嵌歌词读取
+- `alac_decoder_jni.cpp` — Apple Lossless 官方解码器
+- `biquad_filter.h` — Biquad 滤波器组（10 段）
+- `bpm_detector.*` — BPM 检测
 
 ### 架构模式
 
 MVI + Hilt DI + StateFlow + Media3 MediaSession。
+
+---
 
 ## 构建
 
@@ -58,22 +133,39 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 产物：`app/build/outputs/apk/release/app-release.apk`
 
-> 注意：C++ 改动后 CMake 被注释，需手动编译脚本重新生成 `liboboe_bridge.so`。
+> 注意：项目内含 C++ 源码，若改动 native 需按对应 NDK 构建脚本重新生成 `liboboe_bridge.so` 后再打 APK。
 
-## 版本
+---
 
-- `versionName`：8.0
-- `versionCode`：16
-- `applicationId`：`com.sdw.music.player.cn`
+## 版本与更新日志
+
+- 当前：`versionName` 9.0 / `versionCode` 900
+- `CHANGELOG.md` 目前记录到 **8.2**，后续版本（`v8.3` ~ `v9.0`）的改动请直接看 git 提交历史。近期主要工作包括：
+
+  - V9.0：歌词页玻璃浮层、ReplayGain 响度归一化
+  - V8.33~8.36：液态进度条、文件夹批量加入歌单、歌单 BPM 扫描清理、灭屏元数据补推
+  - V8.7~8.32：DAC 状态机、FLAC seek 修正、蓝牙预加重、壁纸自适应文字、歌单三项增强、33d8 DAC 白名单、音量/体积优化
+  - V8.17x：MSEB 预设携带 DSP 快照、DAC AutoEQ、APK 瘦身
+  - V8.6：交叉淡化封面过渡、队列自动滚到当前、MSEB 预设删除、VU 表抖动修复
+  - V8.5：UAC1 DAC 支持（Qudelix-5K / Moondrop Chu II DSP）
+
+---
+
+## 车机互联（当前状态）
+
+- 暂无车机互联能力。
+- 曾尝试接入 **Android Auto**，已停止：在测试设备（moto X50 Ultra / 国行 ROM）上无法通过 DHU 完成投影握手（`ActivityNotFoundException`，降级/重装/换模式均无效），判定为设备与 ROM 层面的兼容问题。
+- 后续优先考虑 **百度 CarLife+**：该方案需要开发者在 CarLife 开放平台立项并获取官方 SDK，届时才能实施。
+
+---
 
 ## 许可
 
 自用 / 本地分发。含 `MANAGE_EXTERNAL_STORAGE` 权限（用于歌词/封面写入共享存储），若上架 Google Play 需评估审核风险。
 
-
 ---
 
-## 通俗解读（给非技术朋友看）
+# 通俗解读（给非技术朋友看）
 
 ## 一句话定位
 
@@ -93,19 +185,19 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 > 你拍了一张 4K 高清照片，系统为了省事，先把它压缩成 1080p，再拉伸回 4K 给你看。分辨率数字没变，但细节已经丢了。
 
-这个「换算」过程叫 **重采样（SRC）**，是所有普通播放器（包括 QQ 音乐、网易云）都在干的事。它引入的失真虽然小，但对发烧友来说，就是「数码味」「不够干净」的来源。
+这个「换算」叫 **重采样（SRC）**，是所有普通播放器（包括 QQ 音乐、网易云）都在干的事。它引入的失真虽然小，但对发烧友来说，就是「数码味」「不够干净」的来源。
 
 **这个播放器做的事，就是绕过这个加工环节。**
 
-它自己写了一套 USB 驱动，直接跟你的 USB 解码耳放（DAC）对话，音乐数据一个比特都不改，原样送出去。这叫 **Bit-Perfect（位完美）**：44.1k 就按 44.1k 出，96k 就按 96k 出，16bit/24bit/32bit 各是各的，绝不动一个比特。
+它自己写了一套 USB 驱动，直接跟你的 USB 解码耳放（DAC）对话，音乐数据一个比特都不改，原样送出去。这叫 **Bit-Perfect（位完美）**：44.1k 就按 44.1k 出，96k 就按 96k 出，16/24/32bit 各是各的，绝不动一个比特。
 
-**一句话：普通播放器是「翻译」你的音乐，它是在「原样搬运」你的音乐。**
+**一句话：普通播放器在「翻译」你的音乐，它是在「原样搬运」你的音乐。**
 
 ### 音质上几个「较真」的细节
 
 - **舍入误差**：24bit 打包时，普通做法「直接砍小数」会让负半周波形整体偏一点点（-0.5 LSB 直流偏置），长期听会发死。它用银行家舍入（lrintf），四舍六入五取偶，消除偏置。
-- **抖动（Dither）**：24bit 塞进 16bit 时，硬砍会出「量化毛刺」，它加极微小的随机噪声（TPDF 抖动）把毛刺抹匀，听感更顺滑。而且只在「降位」时才加，16bit 转 16bit 绝不画蛇添足。
-- **硬件音量**：普通播放器调音量是在软件里「削」数字信号，损失动态范围；它发现 DAC 自带音量芯片（Feature Unit）时，直接调 DAC 的硬件音量，信号全程不衰减。
+- **抖动（Dither）**：24bit 塞进 16bit 时，硬砍会出「量化毛刺」，它加极微小的随机噪声（TPDF 抖动）把毛刺抹匀。而且只在「降位」时才加，16bit 转 16bit 绝不画蛇添足。
+- **硬件音量**：普通播放器调音量是在软件里「削」数字信号，损失动态范围；它发现 DAC 自带音量芯片时直接调硬件音量，信号全程不衰减。
 
 ---
 
@@ -127,14 +219,6 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 **实时优先级**：播放线程优先级调到系统最高（-19），别的 App 再卡，音乐这条线也优先跑，减少爆音。
 
-### 三层「路由」，按 DAC 聪明选择
-
-它不搞一招鲜，而是看设备是什么 DAC，走不同的路：
-
-1. **已知 DAC（TTGK、Realtek）** → 走自己手写的 USB 独占通道（Bit-Perfect，最强）
-2. **未知 DAC** → 走系统 Oboe/AAudio 直连（兜底，也能绕过部分重采样）
-3. **兜底** → 只做系统媒体卡片的「外壳」，不实际发声
-
 **ExoPlayer 被彻底删了**——主流播放器用 ExoPlayer 当播放核心，它已弃用，因为这层东西跟 Bit-Perfect 的目标冲突。
 
 ---
@@ -143,10 +227,11 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 | 格式 | 解码方式 | 为什么 |
 |------|---------|--------|
-| FLAC | libFLAC 硬解（写进 .so，C++ 层） | 不经过系统解码器，避免系统把 24bit 擅自转成 16bit 造成字节错位、噪音 |
+| FLAC | libFLAC 硬解（C++ 层） | 不经过系统解码器，避免系统把 24bit 擅自转成 16bit 造成字节错位、噪音 |
+| ALAC | Apple 官方解码器（C++ 层） | 苹果无损同样走原生直通 |
 | WAV | dr_wav 直读 | 原生无损，直接读 |
 | MP3 / AAC / M4A / Opus / OGG | MediaCodec 系统解码 | 有损格式，解出来就是有损，无所谓 |
-| DSD | ❌ 不支持播放 | 只识别格式标签，解码层没有 DSD 解码器 |
+| DSD | ❌ 不支持播放 | 只识别格式标签，没有 DSD 解码器 |
 
 **FLAC 硬解是解码上最关键的一步。** 系统默认的 MediaCodec 解码器，会把 24bit FLAC 强行转成 16bit，这中间「三个字节装进两个字节」的错位，正是很多人用普通播放器放 24bit 无损时听到「左声道杂音、右声道跑调」的元凶。它用 libFLAC 在 native 层直接解，从源头避开这个坑。
 
@@ -164,24 +249,38 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 ---
 
+## 五、调音：不让你拧旋钮，让你描述「听起来什么感觉」
+
+普通均衡器给你 10 个频率滑块，但「温暖一点」「人声近一点」到底要拧哪个？
+
+**MSEB** 的思路不是调频率，而是调主观感受：温度、厚度、人声远近、空气感、瞬态这些维度，每个滑块背后是一整套滤波器联动。你描述「想要什么样的声音」，它负责翻译成频响曲线。
+
+再往上一层是**预设快照**：换一个 preset 时，压缩器、等响补偿、Crossfeed、空间混响这些模块的开关一起跟着切换 —— 过去你得手动再拨一遍四个开关，现在一步到位。
+
+还有一个容易被忽略但很实用的：**ReplayGain 响度归一化**。不同专辑母带电平差异巨大，听完一张再切下一张常常要重新摸音量键；它读出音频里的响度标签，自动把每张专辑拉到同一条听感电平线上。
+
+---
+
 ## 附加亮点
 
-- **MSEB 心理声学 EQ**：不是调频率增益，而是调「温度 / 厚度 / 人声远近 / 空气感 / 瞬态」等主观听感维度，11 维映射到 5 段 native Biquad。
-- **9 种语言**：简体 / 繁体 / English / Español / 日本語 / 한국어 / Français / Português / हिन्दी，点一下循环切换，无需重启。
+- **9 种语言**：简体 / 繁体 / English / Español / 日本語 / 한국어 / Français / Português / हिन्दी，点一下切换，无需重启。
 - **封面系统**：iTunes + MusicBrainz 双源下载，FLAC 写 PICTURE block、MP3 写 ID3v2 APIC 帧嵌入。
-- **歌词系统**：.lrc → FLAC 内嵌 → 在线 LRCLIB 四级优先级，支持编辑并内嵌回音频。
-- **无缝切歌 / 睡眠定时 / 灭屏播放 / 音频焦点 / 系统级删除**。
+- **歌词系统**：四级优先级取词，支持编辑并内嵌回音频文件。
+- **分析能力**：BPM / 调性 / 曲式结构 / 波形，还能接外部音轨分离插件。
+- **无缝切歌 / 睡眠定时 / 灭屏播放 / 桌面小部件 / 媒体按键接管**。
 
 ---
 
 ## 短板（客观说明）
 
 - 纯本地播放器，无曲库、无在线功能，跟流媒体体验完全不同。
-- DAC 兼容性靠「磨型号」，目前调通的已知 DAC 型号有限。
+- DAC 兼容性靠「磨型号」，UAC1 已可解析但调通的型号仍然有限。
 - 不支持 DSD 播放（仅识别标签）。
 - 异步 DAC 的 feedback 闭环尚未接入（目前纯开环扛着，真·XMOS/Amanero 异步 DAC 才需要）。
+- **暂无车机互联**：Android Auto 适配已停止（设备端投影握手失败），百度 CarLife+ 需等官方 SDK 到位。
 - 单机自研，成熟度不如商业产品，音质由用户耳朵验收。
 
 ---
 
 *对标 Salt Player / USB Audio Player Pro 这一类专业 HiFi 播放器，而非 QQ 音乐 / 网易云。*
+</content>

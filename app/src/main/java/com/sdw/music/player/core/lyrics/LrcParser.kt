@@ -9,6 +9,9 @@ object LrcParser {
     // 【关键】Steven 建议的正则表达式，支持毫秒
     private val LRC_REGEX = Regex("""\[(\d{2}):(\d{2})[.:](\d{2,3})\](.*)""")
 
+    // 【V8.121】逐字时间戳：行内 <mm:ss.xx> 尖括号标记（增强型 LRC / KRC 导出）
+    private val WORD_REGEX = Regex("""<(\d{2}):(\d{2})[.:](\d{2,3})>""")
+
     /**
      * 检查文本是否为 LRC 格式
      */
@@ -42,11 +45,43 @@ object LrcParser {
             
             // 每个时间戳创建一行Lyrics
             timeStamps.forEach { timeMs ->
-                lines.add(LyricLine(timeMs, content))
+                // 【V8.121】解析行内逐字时间戳；有则拆词并去标记后作为纯文本显示
+                val words = parseWords(content, timeMs)
+                val displayText = if (words != null) words.joinToString("") { it.text } else content
+                lines.add(LyricLine(timeMs, displayText, null, words))
             }
         }
 
         return lines.sortedBy { it.timeMs }
+    }
+
+    /**
+     * 【V8.121】解析行内逐字时间戳 <mm:ss.xx>，返回词序列；无则返回 null
+     *
+     * 语义：<time> 标记其后文本段的开始时间；首个 <time> 之前的文本用行首时间。
+     * 例：[00:12.00]今天<00:12.50>天气<00:13.00>不错
+     *   -> [今天@12.00][天气@12.50][不错@13.00]
+     */
+    private fun parseWords(content: String, lineStartMs: Long): List<LyricWord>? {
+        val matches = WORD_REGEX.findAll(content).toList()
+        if (matches.isEmpty()) return null
+
+        val words = mutableListOf<LyricWord>()
+        var cursor = 0
+        var prevTime = lineStartMs
+        for (m in matches) {
+            // 【V8.127】不做 trim：QRC/逐字歌词的词间空格需原样保留，
+            // 否则 joinToString("") 无法还原显示文本；content 整体已在 parse() 里 trim 过。
+            val seg = content.substring(cursor, m.range.first)
+            if (seg.isNotEmpty()) words.add(LyricWord(prevTime, seg))
+            cursor = m.range.last + 1
+            val (mm, ss, ms) = m.destructured
+            prevTime = mm.toLong() * 60_000 + ss.toLong() * 1000 +
+                       (if (ms.length == 2) ms.toLong() * 10 else ms.toLong())
+        }
+        val tail = content.substring(cursor)
+        if (tail.isNotEmpty()) words.add(LyricWord(prevTime, tail))
+        return if (words.isEmpty()) null else words
     }
 
     /**
@@ -107,10 +142,21 @@ object LrcParser {
 data class LyricLine(
     val timeMs: Long,      // 时间戳（毫秒）
     val text: String,      // Lyrics文本
-    val translation: String? = null  // 【v2.9.6 新增】翻译文本
+    val translation: String? = null,  // 【v2.9.6 新增】翻译文本
+    val words: List<LyricWord>? = null  // 【V8.121】逐字时间戳词序列（增强型 LRC）
 ) {
     // 辅助方法：是否有翻译
     fun hasTranslation(): Boolean = !translation.isNullOrBlank()
+    // 【V8.121】是否有逐字时间戳
+    fun hasWords(): Boolean = !words.isNullOrEmpty()
 }
+
+/**
+ * 【V8.121】逐字时间戳词条（增强型 LRC 行内 <mm:ss.xx> 标记）
+ */
+data class LyricWord(
+    val timeMs: Long,      // 该词开始时间（毫秒）
+    val text: String       // 词文本
+)
 
 

@@ -20,11 +20,17 @@ class UsbDacPlaybackController(
         const val DEFAULT_CHANNELS = 2
         const val DEFAULT_BITS = 16  // TTGK DAC output 16-bit (Salt verified)
         private const val TIMEOUT_US = 10000L
-        private const val PREBUFFER_TARGET_MS = 200L  // 【V3.3.21】从 500ms 降到 200ms，减少切歌延迟
+        const val PREBUFFER_TARGET_MS = 200L  // 【V3.3.21】从 500ms 降到 200ms，减少切歌延迟
         // [V3.3.4] streamLoop only consumes whole URBs (44.1k≈353 / 48k=384 / 96k=768 frames);
         // an EOS tail smaller than one URB can never drain to 0 and was stalling auto-next
         // for the full 10s timeout. Anything below this is unplayable residue — treat as drained.
         private const val EOS_DRAIN_RESIDUE_FRAMES = 1024
+        // [2026-09-10 C] Cross-rate reclaim deep prebuffer. A cross-rate switch does a full
+        // release + reclaim, so the supply gap right after startStreaming is wider than a
+        // same-rate keep-claim switch. 500ms of ring absorbs it (was the V3.3.21 value).
+        const val CROSS_RATE_PREBUFFER_MS = 500L
+        /** [2026-09-10 C] Normal (same-rate / first-claim) prebuffer target. */
+        const val DEFAULT_PREBUFFER_MS = PREBUFFER_TARGET_MS
     }
 
 
@@ -65,6 +71,8 @@ class UsbDacPlaybackController(
     @Volatile var sourceSampleRate = 0; private set
     @Volatile var sourceBits = 16; private set
     @Volatile var sourceChannelCount = 0; private set
+    /** [2026-09-10 C] Effective ring prebuffer target for this controller instance. */
+    @Volatile var prebufferTargetMs: Long = PREBUFFER_TARGET_MS
     @Volatile private var currentFilePath = ""
 
     private var decodeThread: Thread? = null
@@ -150,6 +158,9 @@ class UsbDacPlaybackController(
                         val fmt = ByteArray(csize.toInt().coerceAtMost(40))
                         raf.readFully(fmt)
                         if (csize > fmt.size) raf.skipBytes((csize - fmt.size).toInt())
+                        // 【V8.207】chunk 一律按偶数字节对齐（RIFF 规定奇数大小的 chunk 后面补 1 字节）。
+                        // 漏掉这一字节会让后面所有 chunk 的 id 都错位，fmt/data 直接找不到。
+                        if (csize and 1L == 1L) raf.skipBytes(1)
                         fun u16(o: Int) = (fmt[o].toInt() and 0xFF) or ((fmt[o + 1].toInt() and 0xFF) shl 8)
                         fun u32(o: Int) = (fmt[o].toInt() and 0xFF) or ((fmt[o + 1].toInt() and 0xFF) shl 8) or
                                 ((fmt[o + 2].toInt() and 0xFF) shl 16) or ((fmt[o + 3].toInt() and 0xFF) shl 24)
@@ -173,9 +184,14 @@ class UsbDacPlaybackController(
             }
             if (!fmtFound || !dataFound || wavBlockAlign <= 0 || sourceSampleRate <= 0 ||
                 (wavFmtCode != 1 && wavFmtCode != 3)) { raf.close(); return false }
+            // 【V8.207】blockAlign 与「声道×位深」对不上时记一笔 —— 这种文件正是以前会读错位的那类
+            if (wavBlockAlign != sourceChannelCount * (sourceBits / 8)) {
+                DebugLog.add(TAG, "wav: blockAlign=$wavBlockAlign != ch*bits/8=${sourceChannelCount * (sourceBits / 8)} — trust bits=$sourceBits")
+            }
             raf.seek(wavDataStart)
             wavFile = raf; wavReadBytes = 0L
-            extractorDurationMs = wavDataSize * 1000L / (sourceSampleRate.toLong() * wavBlockAlign)
+            extractorDurationMs = wavDataSize * 1000L /
+                (sourceSampleRate.toLong() * sourceChannelCount * (sourceBits / 8).coerceAtLeast(1))
             true
         } catch (e: Exception) {
             DebugLog.add(TAG, "parseWavHeader fail: ${e.message}")
@@ -189,16 +205,31 @@ class UsbDacPlaybackController(
         val raf = wavFile ?: return FloatArray(0)
         val remaining = wavDataSize - wavReadBytes
         if (remaining <= 0) return FloatArray(0)
-        val bytesWanted = (maxFrames.toLong() * wavBlockAlign).coerceAtMost(remaining).toInt()
-        val alignedBytes = bytesWanted - (bytesWanted % wavBlockAlign)
+        // 【V8.207】位深以 fmt 的 wBitsPerSample 为准，不再用 blockAlign/channels 反推。
+        // 有些 WAV（转码器/录音笔写的）blockAlign 字段填错、或与位深对不上，反推出的
+        // 每样本字节数就会错位 —— 24bit 数据被当 16bit 读，听感就是持续的电子杂音。
+        // 帧长同样按位深算（blockAlign 只用来做一次合理性校验），读多少字节也跟着它走。
+        val bytesPerSample = when (sourceBits) {
+            8 -> 1
+            16 -> 2
+            24 -> 3
+            32 -> 4
+            else -> (wavBlockAlign / sourceChannelCount).coerceAtLeast(1)
+        }
+        val frameBytes = (bytesPerSample * sourceChannelCount).coerceAtLeast(1)
+        val bytesWanted = (maxFrames.toLong() * frameBytes).coerceAtMost(remaining).toInt()
+        val alignedBytes = bytesWanted - (bytesWanted % frameBytes)
         if (alignedBytes <= 0) return FloatArray(0)
         val bytes = ByteArray(alignedBytes)
         return try {
             raf.readFully(bytes)
             wavReadBytes += alignedBytes
-            val bytesPerSample = wavBlockAlign / sourceChannelCount
             val sampleCount = alignedBytes / bytesPerSample
             when {
+                // 【V8.207】8bit WAV 是 unsigned offset binary（128 = 0），按有符号读会整体偏移半幅
+                bytesPerSample == 1 -> FloatArray(sampleCount) { i ->
+                    ((bytes[i].toInt() and 0xFF) - 128).toFloat() / 128.0f
+                }
                 wavFmtCode == 3 && bytesPerSample == 4 -> FloatArray(sampleCount) { i ->
                     java.lang.Float.intBitsToFloat(
                         (bytes[i * 4].toInt() and 0xFF) or ((bytes[i * 4 + 1].toInt() and 0xFF) shl 8) or
@@ -283,16 +314,21 @@ class UsbDacPlaybackController(
         // 只有真 ALAC（audio/alac）才走直解，其他编码直接走 MediaCodec。
         if ((filePath.endsWith(".m4a", ignoreCase = true) || filePath.endsWith(".alac", ignoreCase = true) ||
              filePath.endsWith(".mp4", ignoreCase = true))) {
+            // 【V8.429】短命mime 探测收敛到单线程闸门（native abort 详见 MediaProbe 类注释）。
+            // 注意只包这一段：下面那个长命 extractor 整个播放会话都持有，不能进闸门。
             val isAlacMime = try {
-                val ex = MediaExtractor()
-                ex.setDataSource(filePath)
-                var m = false
-                for (i in 0 until ex.trackCount) {
-                    val fmt = ex.getTrackFormat(i)
-                    if (fmt.getString(MediaFormat.KEY_MIME) == "audio/alac") { m = true; break }
+                MediaProbe.onProbeThread {
+                    val ex = MediaExtractor()
+                    try {
+                        ex.setDataSource(filePath)
+                        var m = false
+                        for (i in 0 until ex.trackCount) {
+                            val fmt = ex.getTrackFormat(i)
+                            if (fmt.getString(MediaFormat.KEY_MIME) == "audio/alac") { m = true; break }
+                        }
+                        m
+                    } finally { runCatching { ex.release() } }
                 }
-                ex.release()
-                m
             } catch (_: Exception) { false }
             DebugLog.v(TAG, "open: m4a container, mime=audio/alac? $isAlacMime")
             if (isAlacMime && UsbDacManager.alacOpen(filePath)) {
@@ -414,7 +450,7 @@ class UsbDacPlaybackController(
             // 【2026-08-25】ALAC 直解：native 解码线程自行填 ring，Kotlin 只做预缓冲等待+监控（同 flac）
             if (alacDirect) {
                 UsbDacManager.alacStart()
-                val ringTarget = ((dacSampleRate * PREBUFFER_TARGET_MS) / 1000L).toInt()
+                val ringTarget = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt()
                 val t0 = System.currentTimeMillis()
                 while (!shouldStop && UsbDacManager.getRingFill() < ringTarget &&
                     !UsbDacManager.alacIsEos() && System.currentTimeMillis() - t0 < 3000) {
@@ -457,7 +493,7 @@ class UsbDacPlaybackController(
                     UsbDacManager.flacStart()
                 }
 
-                val ringTarget = ((dacSampleRate * PREBUFFER_TARGET_MS) / 1000L).toInt()
+                val ringTarget = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt()
                 val t0 = System.currentTimeMillis()
                 while (!shouldStop && UsbDacManager.getRingFill() < ringTarget &&
                     !UsbDacManager.flacIsEos() && System.currentTimeMillis() - t0 < 3000) {
@@ -482,7 +518,7 @@ class UsbDacPlaybackController(
             }
 
             // Pre-buffer before starting DAC stream (Salt pattern: fill ring, then open tap)
-            val targetFrames = ((dacSampleRate * PREBUFFER_TARGET_MS) / 1000L).toInt() * dacChannels
+            val targetFrames = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt() * dacChannels
             val preBufFrames = preBuffer(targetFrames)
             DebugLog.v(TAG, "play: prebuffer done, $preBufFrames frames")
 
@@ -553,7 +589,7 @@ class UsbDacPlaybackController(
         synchronized(pauseLock) { (pauseLock as java.lang.Object).notifyAll() }
 
         // 等 ring 预缓冲 ~200ms，避免开流瞬间 underrun + 数据跳变爆音
-        val ringTarget = ((dacSampleRate * PREBUFFER_TARGET_MS) / 1000L).toInt()
+        val ringTarget = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt()
         val t0 = System.currentTimeMillis()
         while (!shouldStop && UsbDacManager.getRingFill() < ringTarget && System.currentTimeMillis() - t0 < 2000) {
             try { Thread.sleep(10) } catch (_: InterruptedException) { break }

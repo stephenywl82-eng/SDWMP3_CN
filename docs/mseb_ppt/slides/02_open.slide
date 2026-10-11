@@ -1,0 +1,28 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', top: -100, right: -80, width: 360, height: 360, borderRadius: '50%', background: 'linear-gradient(135deg, #3B82F6 0%, #22D3EE 100%)', opacity: 0.08 }} />
+  <Box style={{ flexDirection: 'row', height: '100%', paddingTop: 40, paddingBottom: 40, paddingLeft: 64, paddingRight: 64 }}>
+    <Box style={{ width: '34%', paddingRight: 40, justifyContent: 'center' }}>
+      <Box style={{ width: 40, height: 5, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+      <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#E5EDF7', marginTop: 18, lineHeight: 1.2 }}>怎么打开<br />MSEB</Text>
+      <Text style={{ fontSize: 17, color: '#8DA2BC', marginTop: 20, lineHeight: 1.6 }}>三步进入音效台，<br />边调边看实时频谱。</Text>
+    </Box>
+    <Box style={{ width: '66%', justifyContent: 'center', gap: 18 }}>
+      <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 20, padding: 22, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <Box style={{ width: 52, height: 52, borderRadius: 12, background: 'linear-gradient(135deg,#3B82F6,#22D3EE)', justifyContent: 'center', alignItems: 'center' }}><Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0B1120' }}>1</Text></Box>
+        <Box><Text style={{ fontSize: 20, fontWeight: 'bold', color: '#E5EDF7' }}>播放页 → 右上角音效菜单 → MSEB</Text><Text style={{ fontSize: 16, color: '#8DA2BC', marginTop: 6, lineHeight: 1.5 }}>找到带「B」标的开关，点开即进入音效台。</Text></Box>
+      </Box>
+      <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 20, padding: 22, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <Box style={{ width: 52, height: 52, borderRadius: 12, background: 'linear-gradient(135deg,#3B82F6,#22D3EE)', justifyContent: 'center', alignItems: 'center' }}><Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0B1120' }}>2</Text></Box>
+        <Box><Text style={{ fontSize: 20, fontWeight: 'bold', color: '#E5EDF7' }}>顶部实时频谱</Text><Text style={{ fontSize: 16, color: '#8DA2BC', marginTop: 6, lineHeight: 1.5 }}>边推滑块边"看"声音怎么变，所见即所听。</Text></Box>
+      </Box>
+      <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 20, padding: 22, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <Box style={{ width: 52, height: 52, borderRadius: 12, background: 'linear-gradient(135deg,#3B82F6,#22D3EE)', justifyContent: 'center', alignItems: 'center' }}><Text style={{ fontSize: 24, fontWeight: 'bold', color: '#0B1120' }}>3</Text></Box>
+        <Box><Text style={{ fontSize: 20, fontWeight: 'bold', color: '#E5EDF7' }}>随备份导出 / 导入</Text><Text style={{ fontSize: 16, color: '#8DA2BC', marginTop: 6, lineHeight: 1.5 }}>设置里导出 JSON，换手机一键恢复全部调音。</Text></Box>
+      </Box>
+    </Box>
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 64, right: 64, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>MSEB 攻略</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>02 / 10</Text>
+  </Box>
+</Slide>

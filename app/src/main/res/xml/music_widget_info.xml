@@ -12,4 +12,4 @@
     android:description="@string/widget_music_desc"
     android:initialLayout="@layout/widget_music_player_4x1"
     android:previewImage="@drawable/widget_preview_bg"
-    android:previewLayout="@layout/widget_preview_4x1" />
+    android:previewLayout="@layout/widget_music_player_4x1" />

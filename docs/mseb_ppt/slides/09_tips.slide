@@ -1,0 +1,32 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', top: -90, left: -70, width: 320, height: 320, borderRadius: '50%', background: 'linear-gradient(135deg, #3B82F6 0%, #22D3EE 100%)', opacity: 0.07 }} />
+  <Box style={{ flexDirection: 'row', height: '100%', paddingTop: 40, paddingBottom: 40, paddingLeft: 64, paddingRight: 64 }}>
+    <Box style={{ width: '34%', paddingRight: 40, justifyContent: 'center' }}>
+      <Box style={{ width: 40, height: 5, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+      <Text style={{ fontSize: 34, fontWeight: 'bold', color: '#E5EDF7', marginTop: 18, lineHeight: 1.2 }}>排错 &<br />小贴士</Text>
+      <Text style={{ fontSize: 16, color: '#8DA2BC', marginTop: 18, lineHeight: 1.6 }}>遇到这些情况，先看这里。</Text>
+    </Box>
+    <Box style={{ width: '66%', justifyContent: 'center', gap: 16 }}>
+      <Box style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 18, padding: 18, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <FAIcon name="info-circle" style={{ fill: '#22D3EE', width: 28, height: 28, marginTop: 2 }} />
+        <Box><Text style={{ fontSize: 18, fontWeight: 'bold', color: '#E5EDF7' }}>某些输出不支持 MSEB</Text><Text style={{ fontSize: 15, color: '#8DA2BC', marginTop: 5, lineHeight: 1.5 }}>会显示「当前输出不可用」——正常，换回支持的源即可。</Text></Box>
+      </Box>
+      <Box style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 18, padding: 18, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <FAIcon name="wifi" style={{ fill: '#22D3EE', width: 28, height: 28, marginTop: 2 }} />
+        <Box><Text style={{ fontSize: 18, fontWeight: 'bold', color: '#E5EDF7' }}>蓝牙 SBC 砍掉 16k 以上</Text><Text style={{ fontSize: 15, color: '#8DA2BC', marginTop: 5, lineHeight: 1.5 }}>动态 EQ 补瞬态 + 限幅守底；切 LDAC / LHDC 才能吃满 DTS 高频。</Text></Box>
+      </Box>
+      <Box style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 18, padding: 18, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <FAIcon name="undo" style={{ fill: '#22D3EE', width: 28, height: 28, marginTop: 2 }} />
+        <Box><Text style={{ fontSize: 18, fontWeight: 'bold', color: '#E5EDF7' }}>调乱了</Text><Text style={{ fontSize: 15, color: '#8DA2BC', marginTop: 5, lineHeight: 1.5 }}>点 Reset to flat 一键归零，从头再来。</Text></Box>
+      </Box>
+      <Box style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 18, padding: 18, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <FAIcon name="music" style={{ fill: '#22D3EE', width: 28, height: 28, marginTop: 2 }} />
+        <Box><Text style={{ fontSize: 18, fontWeight: 'bold', color: '#E5EDF7' }}>想完全原汁原味</Text><Text style={{ fontSize: 15, color: '#8DA2BC', marginTop: 5, lineHeight: 1.5 }}>切到 Original Bit-Perfect (A)，听原始母带。</Text></Box>
+      </Box>
+    </Box>
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 64, right: 64, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>MSEB 攻略</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>09 / 10</Text>
+  </Box>
+</Slide>

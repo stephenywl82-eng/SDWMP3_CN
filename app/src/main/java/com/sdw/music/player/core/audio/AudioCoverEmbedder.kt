@@ -14,10 +14,23 @@ import java.nio.charset.StandardCharsets
 
 object AudioCoverEmbedder {
 
+    // 【V8.107】Failure 增加 unsupportedFormat：非空 = 「该格式暂不支持嵌入封面」，
+    // 与真正的「嵌入失败」区分开，UI 给出不同提示。
     sealed class EmbedResult {
         data object Success : EmbedResult()
-        data class Failure(val reason: String) : EmbedResult()
+        data class Failure(
+            val reason: String,
+            val unsupportedFormat: String? = null
+        ) : EmbedResult()
     }
+
+    private const val TAG = "CoverEmbed"
+
+    // 【V8.107】FLAC 元数据块长度是 24 位字段（单块上限 16MB）。
+    // 旧代码把 64KB 当成单块上限，导致内嵌大封面(>64KB)的文件全部误报
+    // "Invalid FLAC block size" —— 实测设备 538 个 FLAC 里 416 个中招。
+    private const val MAX_METADATA_BLOCK = 0xFFFFFF
+    private const val MAX_METADATA_TOTAL = 64 * 1024 * 1024
 
     fun embedCover(
         context: Context,
@@ -35,26 +48,44 @@ object AudioCoverEmbedder {
             val header = ByteArray(16)
             FileInputStream(songFile).use { it.read(header) }
             val format = detectFormat(header)
+            DebugLog.v(TAG, "start ${songFile.name} format=$format cover=${coverBytes.size}B")
 
-            when (format) {
+            val result = when (format) {
                 "flac" -> embedFlacStream(songFile, coverBytes)
                 "mp3" -> embedMp3Stream(songFile, coverBytes)
-                "m4a" -> return EmbedResult.Failure("M4A not supported yet")
-                else -> return EmbedResult.Failure("Unsupported format: $format")
+                else -> EmbedResult.Failure(
+                    "Unsupported format: $format",
+                    unsupportedFormat = format
+                )
             }
+
+            when (result) {
+                is EmbedResult.Success -> DebugLog.v(TAG, "OK ${songFile.name}")
+                is EmbedResult.Failure -> DebugLog.v(TAG, "FAIL ${songFile.name} -> ${result.reason}")
+            }
+            result
         } catch (e: Exception) {
+            DebugLog.v(TAG, "ERROR $filePath -> ${e.message}")
             EmbedResult.Failure(e.message ?: "Unknown error")
         }
     }
 
+    // 【V8.107】旧实现只认 flac/mp3，其余一律归 "m4a" —— 于是 WAV/OGG/OPUS/APE
+    // 全都弹「M4A not supported yet」，既不准确也误导。改为按魔数返回真实容器名。
     private fun detectFormat(data: ByteArray): String {
+        fun u(i: Int) = data[i].toInt() and 0xFF
         return when {
-            data.size >= 4 && data[0] == 0x66.toByte() && data[1] == 0x4C.toByte()
-                && data[2] == 0x61.toByte() && data[3] == 0x43.toByte() -> "flac"
-            data.size >= 3 && data[0] == 0x49.toByte() && data[1] == 0x44.toByte()
-                && data[2] == 0x33.toByte() -> "mp3"
-            data.size >= 2 && (data[0] == 0xFF.toByte() && (data[1].toInt() and 0xE0) == 0xE0) -> "mp3"
-            else -> "m4a"
+            data.size >= 4 && u(0) == 0x66 && u(1) == 0x4C && u(2) == 0x61 && u(3) == 0x43 -> "flac"
+            data.size >= 3 && u(0) == 0x49 && u(1) == 0x44 && u(2) == 0x33 -> "mp3"
+            data.size >= 2 && u(0) == 0xFF && (u(1) and 0xE0) == 0xE0 -> "mp3"
+            data.size >= 4 && u(0) == 0x52 && u(1) == 0x49 && u(2) == 0x46 && u(3) == 0x46 -> "wav"
+            data.size >= 4 && u(0) == 0x4F && u(1) == 0x67 && u(2) == 0x67 && u(3) == 0x53 -> "ogg"
+            data.size >= 8 && u(4) == 0x66 && u(5) == 0x74 && u(6) == 0x79 && u(7) == 0x70 -> "m4a"
+            data.size >= 4 && u(0) == 0x4D && u(1) == 0x41 && u(2) == 0x43 && u(3) == 0x20 -> "ape"
+            data.size >= 4 && u(0) == 0x77 && u(1) == 0x76 && u(2) == 0x70 && u(3) == 0x6B -> "wavpack"
+            data.size >= 4 && u(0) == 0x46 && u(1) == 0x4F && u(2) == 0x52 && u(3) == 0x4D -> "aiff"
+            data.size >= 4 && u(0) == 0x44 && u(1) == 0x53 && u(2) == 0x44 && u(3) == 0x20 -> "dsd"
+            else -> "unknown"
         }
     }
 
@@ -85,11 +116,9 @@ object AudioCoverEmbedder {
             // Collect metadata blocks (they're small �?usually < 8KB total)
             val metaBlocks = mutableListOf<ByteArray>()
             var lastBlock = false
-            var lastBlockType = 0
-            val maxMetaBytes = 65536 // 64KB safety limit
 
             while (!lastBlock && raf.filePointer < raf.length()) {
-                if (raf.filePointer >= maxMetaBytes) {
+                if (raf.filePointer >= MAX_METADATA_TOTAL) {
                     return EmbedResult.Failure("FLAC metadata too large")
                 }
                 val header = raf.readUnsignedByte()
@@ -100,11 +129,16 @@ object AudioCoverEmbedder {
                 val b1 = raf.readUnsignedByte()
                 val b2 = raf.readUnsignedByte()
                 val blockSize = (b0 shl 16) or (b1 shl 8) or b2
-                if (blockSize > maxMetaBytes || blockSize > raf.length() - raf.filePointer) {
-                    return EmbedResult.Failure("Invalid FLAC block size")
+                if (blockSize > MAX_METADATA_BLOCK || blockSize > raf.length() - raf.filePointer) {
+                    return EmbedResult.Failure("Invalid FLAC block size: $blockSize")
                 }
-                // Check if PICTURE block already exists
-                if (blockType == 6) return EmbedResult.Success // already has cover
+                if (blockType == 6) {
+                    // 【V8.107】已有 PICTURE：不读进内存直接跳过，稍后统一写新封面替换。
+                    // 旧代码在这里直接 return Success（假成功：既不写入也不替换）。
+                    DebugLog.v(TAG, "existing PICTURE ${blockSize}B -> will be replaced")
+                    raf.seek(raf.filePointer + blockSize)
+                    continue
+                }
 
                 val blockData = ByteArray(4 + blockSize)
                 blockData[0] = header.toByte()
@@ -113,7 +147,6 @@ object AudioCoverEmbedder {
                 blockData[3] = b2.toByte()
                 raf.readFully(blockData, 4, blockSize)
                 metaBlocks.add(blockData)
-                lastBlockType = blockType
             }
 
             if (metaBlocks.isEmpty()) return EmbedResult.Failure("No FLAC metadata blocks found")

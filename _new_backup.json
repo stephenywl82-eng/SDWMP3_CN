@@ -1,0 +1,145 @@
+{
+  "format": "sdwmp3-settings",
+  "version": 1,
+  "appVersion": "8.211",
+  "device": "motorola XT2401-2",
+  "exportedAt": "2026-09-29T15:30:01+0800",
+  "files": {
+    "compressor": {
+      "makeup": 0,
+      "threshold": 0,
+      "attack": 58.610107,
+      "release": 229.86752,
+      "enabled": false,
+      "ratio": 5.4407954
+    },
+    "crossfeed": {
+      "amount": 0.4926806,
+      "enabled": false
+    },
+    "equalizer_prefs": {
+      "eq_enabled": false,
+      "eq_preset": "flat"
+    },
+    "loudness": {
+      "intensity": 1.0887398,
+      "enabled": false
+    },
+    "loudness_norm": {
+      "mode": 2,
+      "enabled": false,
+      "target_db": -3
+    },
+    "mseb": {
+      "dts_height": 4.9550023,
+      "thickness": 5,
+      "subBass": 0,
+      "bassTexture": 3,
+      "vocalForward": 4,
+      "air": 0,
+      "impulseResponse": 0,
+      "imaging": 0,
+      "enabled": true,
+      "sibilanceHf": 0,
+      "preset_name": "Pop Forward Vocal",
+      "sibilanceLf": 0,
+      "sibilance": -2,
+      "dts_surround": 5.3267555,
+      "temperature": 3,
+      "femaleOvertones": 0,
+      "dts_enabled": false,
+      "soundstage": 0
+    },
+    "mseb_presets": {
+      "items": "[]"
+    },
+    "settings": {
+      "crossfade_dj_enabled": true,
+      "shuffle_mode": "bpm",
+      "crossfade_bars": 4,
+      "usb_exclusive": false,
+      "crossfade_smart_align": true,
+      "crossfade_dj_effect": "random",
+      "tpdf_dither": true,
+      "dac_soft_start": false,
+      "direct_passthrough": false,
+      "bt_pre_emphasis": false,
+      "agc_enabled": false,
+      "debug_log_enabled": false,
+      "crossfade_align_prefer": "beat",
+      "audio_focus_register": true,
+      "crossfade_enabled": true,
+      "crossfade_duration_ms": 10000,
+      "crossfade_dj_depth": 1
+    }
+  },
+  "types": {
+    "compressor": {
+      "makeup": "f",
+      "threshold": "f",
+      "attack": "f",
+      "release": "f",
+      "enabled": "b",
+      "ratio": "f"
+    },
+    "crossfeed": {
+      "amount": "f",
+      "enabled": "b"
+    },
+    "equalizer_prefs": {
+      "eq_enabled": "b",
+      "eq_preset": "s"
+    },
+    "loudness": {
+      "intensity": "f",
+      "enabled": "b"
+    },
+    "loudness_norm": {
+      "mode": "i",
+      "enabled": "b",
+      "target_db": "f"
+    },
+    "mseb": {
+      "dts_height": "f",
+      "thickness": "f",
+      "subBass": "f",
+      "bassTexture": "f",
+      "vocalForward": "f",
+      "air": "f",
+      "impulseResponse": "f",
+      "imaging": "f",
+      "enabled": "b",
+      "sibilanceHf": "f",
+      "preset_name": "s",
+      "sibilanceLf": "f",
+      "sibilance": "f",
+      "dts_surround": "f",
+      "temperature": "f",
+      "femaleOvertones": "f",
+      "dts_enabled": "b",
+      "soundstage": "f"
+    },
+    "mseb_presets": {
+      "items": "s"
+    },
+    "settings": {
+      "crossfade_dj_enabled": "b",
+      "shuffle_mode": "s",
+      "crossfade_bars": "i",
+      "usb_exclusive": "b",
+      "crossfade_smart_align": "b",
+      "crossfade_dj_effect": "s",
+      "tpdf_dither": "b",
+      "dac_soft_start": "b",
+      "direct_passthrough": "b",
+      "bt_pre_emphasis": "b",
+      "agc_enabled": "b",
+      "debug_log_enabled": "b",
+      "crossfade_align_prefer": "s",
+      "audio_focus_register": "b",
+      "crossfade_enabled": "b",
+      "crossfade_duration_ms": "i",
+      "crossfade_dj_depth": "f"
+    }
+  }
+}

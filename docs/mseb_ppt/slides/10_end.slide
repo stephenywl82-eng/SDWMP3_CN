@@ -1,0 +1,21 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', top: -160, left: -120, width: 520, height: 520, borderRadius: '50%', background: 'linear-gradient(135deg, #3B82F6 0%, #22D3EE 100%)', opacity: 0.14 }} />
+  <Box style={{ position: 'absolute', bottom: -180, right: -120, width: 520, height: 520, borderRadius: '50%', background: 'linear-gradient(135deg, #22D3EE 0%, #3B82F6 100%)', opacity: 0.12 }} />
+  <Box style={{ position: 'relative', zIndex: 1, height: '100%', justifyContent: 'center', alignItems: 'center' }}>
+    <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 24 }}>
+      <Box style={{ width: 38, height: 4, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+      <Text style={{ fontSize: 16, color: '#22D3EE', letterSpacing: 2 }}>MSEB · 13 段听感滑块</Text>
+      <Box style={{ width: 38, height: 4, background: 'linear-gradient(135deg, #22D3EE, #3B82F6)' }} />
+    </Box>
+    <Text style={{ fontSize: 84, fontWeight: 'bold', color: '#E5EDF7', lineHeight: 1.1 }}>调出你的声音</Text>
+    <Text style={{ fontSize: 24, color: '#8DA2BC', marginTop: 22 }}>从今天开始，随手把耳机调成喜欢的样子。</Text>
+    <Box style={{ flexDirection: 'row', gap: 14, marginTop: 40 }}>
+      <Box style={{ paddingVertical: 10, paddingHorizontal: 22, borderRadius: 999, background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.4)' }}><Text style={{ fontSize: 16, color: '#9DB8E8' }}>播放页 → 音效 → MSEB</Text></Box>
+      <Box style={{ paddingVertical: 10, paddingHorizontal: 22, borderRadius: 999, background: 'rgba(34,211,238,0.12)', border: '1px solid rgba(34,211,238,0.4)' }}><Text style={{ fontSize: 16, color: '#9DE8F2' }}>边听边调</Text></Box>
+    </Box>
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 96, right: 96, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>SDW 播放器</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>10 / 10</Text>
+  </Box>
+</Slide>

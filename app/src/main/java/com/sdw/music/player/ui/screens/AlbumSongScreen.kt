@@ -1,36 +1,34 @@
 package com.sdw.music.player.ui.screens
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
+import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.sdw.music.player.Song
-import com.sdw.music.player.ui.components.DefaultCoverImage
-import androidx.compose.ui.res.stringResource
-import com.sdw.music.player.R
+import com.sdw.music.player.SongRepository
 import com.sdw.music.player.ui.components.AddToPlaylistSheet
+import com.sdw.music.player.ui.components.CountKind
+import com.sdw.music.player.ui.components.CountText
+import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.DetailHero
+import com.sdw.music.player.ui.components.LibraryRow
+import com.sdw.music.player.R
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -49,76 +47,34 @@ fun AlbumSongScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(albumName, color = MaterialTheme.colorScheme.onBackground, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+            SDWTopBar(
+                // V8.118 详情页标题统一放在 hero（内容区），topBar 只留返回与操作键。
+                // 以前专辑名同时出现在 topBar 和头图里，两处同一个词，滚起来像重影。
+                title = { },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
                     }
                 },
-                actions = {
-                    // Play All button
-                    TextButton(onClick = onPlayAll) {
-                        Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Play All", fontSize = 13.sp)
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
         },
         containerColor = MaterialTheme.colorScheme.background
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            // Clean header: small cover + album name + play all
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                // Small album cover
-                Box(
-                    modifier = Modifier.size(80.dp).clip(RoundedCornerShape(10.dp)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    if (coverUri.isNotBlank()) {
-                        AsyncImage(
-                            model = ImageRequest.Builder(context).data(coverUri).size(256).crossfade(true).build(),
-                            contentDescription = albumName,
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    } else {
-                        DefaultCoverImage(
-                            songTitle = albumName, songArtist = "",
-                            modifier = Modifier.fillMaxSize(),
-                            shape = RoundedCornerShape(10.dp)
-                        )
-                    }
+            // V8.118 头图统一到 DetailHero：与歌手页、歌单页同一骨架。
+            // 播放入口从 topBar 的 TextButton 挪到这里——详情页的动作区应该在内容区，
+            // 而不是挤在标题栏里跟返回键抢位置。
+            DetailHero(
+                title = albumName,
+                coverTitle = albumName,
+                coverArtist = "",
+                coverUri = coverUri,
+                coverSize = 96.dp,
+                onPlayAll = onPlayAll,
+                subtitle = {
+                    CountText(songs.size, CountKind.SONGS)
                 }
-
-                Spacer(Modifier.width(16.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = albumName,
-                        style = MaterialTheme.typography.titleLarge,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        text = "${songs.size} songs",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
+            )
 
             // Song list
             LazyColumn(
@@ -126,11 +82,12 @@ fun AlbumSongScreen(
                 contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp)
             ) {
                 items(songs, key = { it.id }) { song ->
-                                        AlbumSongItem(
+                    AlbumSongItem(
                         song = song,
                         isPlaying = song.id == currentSongId && isPlaying,
                         onClick = { onSongClick(song) },
-                        onLongClick = { longPressSong = song }
+                        onLongClick = { longPressSong = song },
+                        modifier = Modifier.animateItemPlacement()
                     )
                 }
             }
@@ -146,60 +103,33 @@ fun AlbumSongScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+/**
+ * 专辑内的歌曲行。
+ *
+ * V8.118 换成 LibraryRow，与歌单页、主曲库完全同形：正在播放的行不再只是把歌名染成
+ * 主色，而是整行主色水洗 + 上缘光晕 + 时长换成跳动波形 —— 播到哪首一眼可见。
+ */
 @Composable
 private fun AlbumSongItem(
     song: Song,
     isPlaying: Boolean,
     onClick: () -> Unit,
-    onLongClick: () -> Unit = {}
+    onLongClick: () -> Unit = {},
+    modifier: Modifier = Modifier
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)
-                        .clip(RoundedCornerShape(8.dp))
-            .background(if (isPlaying) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent)
-            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        if (song.albumArtUri.isNotBlank()) {
-            AsyncImage(
-                model = ImageRequest.Builder(LocalContext.current)
-                    .data(song.albumArtUri).size(256).crossfade(true).build(),
-                contentDescription = song.title,
-                modifier = Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)),
-                contentScale = ContentScale.Crop
-            )
-        } else {
-            DefaultCoverImage(
-                songTitle = song.title,
-                songArtist = song.artist,
-                modifier = Modifier.size(44.dp),
-                shape = RoundedCornerShape(6.dp)
-            )
-        }
-        Column(modifier = Modifier.weight(1f).padding(start = 12.dp)) {
-            Text(song.title, style = MaterialTheme.typography.bodyLarge,
-                color = if (isPlaying) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onBackground,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.height(1.dp))
-            Text(song.artist, style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1, overflow = TextOverflow.Ellipsis)
-        }
-        Text(
-            text = formatDuration(song.duration),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-            modifier = Modifier.padding(start = 8.dp)
-        )
-    }
-}
-
-private fun formatDuration(ms: Long): String {
-    if (ms <= 0) return ""
-    val totalSec = ms / 1000
-    val min = totalSec / 60
-    val sec = totalSec % 60
-    return "%d:%02d".format(min, sec)
+    LibraryRow(
+        title = song.title,
+        subtitle = song.artist.ifBlank { stringResource(R.string.unknown_artist) },
+        coverTitle = song.title,
+        coverArtist = song.artist,
+        coverUri = song.albumArtUri,
+        coverSize = 48.dp,
+        isPlaying = isPlaying,
+        showDuration = song.duration > 0,
+        showNowPlayingBars = isPlaying,
+        durationMs = song.duration,
+        onClick = onClick,
+        onLongClick = onLongClick,
+        modifier = modifier
+    )
 }

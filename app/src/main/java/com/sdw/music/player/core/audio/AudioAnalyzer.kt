@@ -27,59 +27,68 @@ object AudioAnalyzer {
      */
     suspend fun detectBPM(context: Context, uri: Uri): Int = withContext(Dispatchers.IO) {
         try {
-            val extractor = MediaExtractor()
-            extractor.setDataSource(context, uri, null)
+            // 【V8.429】整个 extractor 生命周期收敛到单线程闸门，且 release 放进 finally
+            // （原来异常路径完全不release → 实例泄漏；泄漏的内部 codec 正是并发拆卸
+            //  native abort 的来源）。一次探测同时带回采样率与样本，避免开第二个 extractor。
+            //  闸门与 abort 的详细说明见 MediaProbe 类注释。
+            val probeOrNull: ProbeResult? = com.sdw.music.player.core.audio.MediaProbe.onProbeThread {
+                val extractor = MediaExtractor()
+                try {
+                    extractor.setDataSource(context, uri, null)
 
-            // 找到音频轨道
-            var audioTrackIndex = -1
-            var format: MediaFormat? = null
-            for (i in 0 until extractor.trackCount) {
-                val trackFormat = extractor.getTrackFormat(i)
-                val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
-                if (mime.startsWith("audio/")) {
-                    audioTrackIndex = i
-                    format = trackFormat
-                    break
+                    // 找到音频轨道
+                    var audioTrackIndex = -1
+                    var format: MediaFormat? = null
+                    for (i in 0 until extractor.trackCount) {
+                        val trackFormat = extractor.getTrackFormat(i)
+                        val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
+                        if (mime.startsWith("audio/")) {
+                            audioTrackIndex = i
+                            format = trackFormat
+                            break
+                        }
+                    }
+                    val fmt = format
+                    if (audioTrackIndex < 0 || fmt == null) return@onProbeThread null
+
+                    val sampleRate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                    extractor.selectTrack(audioTrackIndex)
+
+                    // 多点采样：On头 + 1/3 + 中间，每段 2 秒
+                    val duration = extractor.sampleTime
+                    val samplePositions = listOf(0L, duration / 3, duration / 2).distinct()
+                    val buffer = ByteBuffer.allocate(sampleRate * 2 * 2) // 2秒音频
+                    val allSamples = mutableListOf<Short>()
+
+                    for (pos in samplePositions) {
+                        try {
+                            extractor.seekTo(pos.coerceAtLeast(0), MediaExtractor.SEEK_TO_CLOSEST_SYNC)
+                            val readBytes = extractor.readSampleData(buffer, 0)
+                            if (readBytes > 0) {
+                                buffer.rewind()
+                                val chunk = ShortArray(readBytes / 2)
+                                buffer.asShortBuffer().get(chunk)
+                                allSamples.addAll(chunk.toList())
+                            }
+                        } catch (_: Exception) { /* skip unreadable section */ }
+                    }
+                    ProbeResult(sampleRate, allSamples.toShortArray())
+                } finally {
+                    try { extractor.release() } catch (_: Throwable) {}
                 }
             }
+            // withContext 是 suspend 边界，编译器不做 smart cast；显式收窄
+            val probe: ProbeResult = probeOrNull ?: return@withContext 0
 
-            if (audioTrackIndex < 0 || format == null) {
-                extractor.release()
-                return@withContext 0
-            }
-
-            extractor.selectTrack(audioTrackIndex)
-            val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-            val duration = extractor.sampleTime
-
-            // 多点采样：On头 + 1/3 + 中间，每段 2 秒
-            val samplePositions = listOf(0L, duration / 3, duration / 2).distinct()
-            val buffer = ByteBuffer.allocate(sampleRate * 2 * 2) // 2秒音频
-            val allSamples = mutableListOf<Short>()
-
-            for (pos in samplePositions) {
-                try {
-                    extractor.seekTo(pos.coerceAtLeast(0), MediaExtractor.SEEK_TO_CLOSEST_SYNC)
-                    val readBytes = extractor.readSampleData(buffer, 0)
-                    if (readBytes > 0) {
-                        buffer.rewind()
-                        val chunk = ShortArray(readBytes / 2)
-                        buffer.asShortBuffer().get(chunk)
-                        allSamples.addAll(chunk.toList())
-                    }
-                } catch (_: Exception) { /* skip unreadable section */ }
-            }
-            extractor.release()
-
-            if (allSamples.size < sampleRate / 2) return@withContext 0  // 至少 0.5 秒数据
-
-            val samples = allSamples.toShortArray()
-            val bpm = estimateBPM(samples, sampleRate)
-            bpm
+            if (probe.samples.size < probe.sampleRate / 2) return@withContext 0  // 至少 0.5 秒数据
+            estimateBPM(probe.samples, probe.sampleRate)
         } catch (e: Exception) {
             0
         }
     }
+
+    /** 【V8.429】detectBPM 在闸门内一次性带回的采样结果（避免为拿采样率再开一个 extractor）。 */
+    private data class ProbeResult(val sampleRate: Int, val samples: ShortArray)
 
     /**
      * 【Steven】估算 BPM
@@ -266,10 +275,19 @@ object AudioAnalyzer {
      */
     private fun readKeyFromMetadata(context: Context, uri: Uri): String {
         return try {
-            val retriever = android.media.MediaMetadataRetriever()
-            retriever.setDataSource(context, uri)
-            val key = retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE)
-            retriever.release()
+            // 【V8.429】收敛到单线程闸门 + release 放进 finally（原来抛异常就泄漏实例，
+            // 泄漏的 retriever 内部 codec 正是并发拆卸 abort 的来源之一）。
+            com.sdw.music.player.core.audio.MediaProbe.onProbeThread {
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(context, uri)
+                    retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE)
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    try { retriever.release() } catch (_: Throwable) {}
+                }
+            }
             // METADATA_KEY 不直接支持 TKEY，需要用原始方式
             ""
         } catch (e: Exception) {
@@ -281,13 +299,20 @@ object AudioAnalyzer {
      * 从文件路径读取 TKEY
      */
     private fun readKeyFromFile(filePath: String): String {
+        if (filePath.isBlank()) return ""
         return try {
-            val retriever = android.media.MediaMetadataRetriever()
-            retriever.setDataSource(filePath)
-            // 尝试读取 key (METADATA_KEY = 18 是自定义 key，部分设备支持)
-            val key = retriever.extractMetadata(18) // 尝试各个可能的 key index
-            retriever.release()
-            key?.takeIf { it.isNotBlank() && isValidKey(it) } ?: ""
+            com.sdw.music.player.core.audio.MediaProbe.onProbeThread {
+                val retriever = android.media.MediaMetadataRetriever()
+                try {
+                    retriever.setDataSource(filePath)
+                    // 尝试读取 key (METADATA_KEY = 18 是自定义 key，部分设备支持)
+                    retriever.extractMetadata(18) // 尝试各个可能的 key index
+                } catch (_: Throwable) {
+                    null
+                } finally {
+                    try { retriever.release() } catch (_: Throwable) {}
+                }
+            }?.takeIf { it.isNotBlank() && isValidKey(it) } ?: ""
         } catch (e: Exception) {
             ""
         }
@@ -298,42 +323,46 @@ object AudioAnalyzer {
      */
     private fun estimateKeyFromAudio(context: Context, uri: Uri): String {
         try {
-            val extractor = MediaExtractor()
-            extractor.setDataSource(context, uri, null)
+            // 【V8.429】收敛到单线程闸门 + release 放进 finally（同 detectBPM 的理由）。
+            val keyProbeOrNull: KeyProbe? = com.sdw.music.player.core.audio.MediaProbe.onProbeThread {
+                val extractor = MediaExtractor()
+                try {
+                    extractor.setDataSource(context, uri, null)
 
-            var audioTrackIndex = -1
-            var format: MediaFormat? = null
-            for (i in 0 until extractor.trackCount) {
-                val trackFormat = extractor.getTrackFormat(i)
-                val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
-                if (mime.startsWith("audio/")) {
-                    audioTrackIndex = i
-                    format = trackFormat
-                    break
+                    var audioTrackIndex = -1
+                    var format: MediaFormat? = null
+                    for (i in 0 until extractor.trackCount) {
+                        val trackFormat = extractor.getTrackFormat(i)
+                        val mime = trackFormat.getString(MediaFormat.KEY_MIME) ?: ""
+                        if (mime.startsWith("audio/")) {
+                            audioTrackIndex = i
+                            format = trackFormat
+                            break
+                        }
+                    }
+                    val fmt = format
+                    if (audioTrackIndex < 0 || fmt == null) return@onProbeThread null
+
+                    extractor.selectTrack(audioTrackIndex)
+                    val sampleRate = fmt.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+
+                    // 读取约 10 秒音频进行分析
+                    val buffer = ByteBuffer.allocate(sampleRate * 2 * 10)
+                    val readBytes = extractor.readSampleData(buffer, 0)
+                    if (readBytes <= 0) return@onProbeThread null
+
+                    buffer.rewind()
+                    val samples = ShortArray(readBytes / 2)
+                    buffer.asShortBuffer().get(samples)
+                    KeyProbe(sampleRate, samples)
+                } finally {
+                    try { extractor.release() } catch (_: Throwable) {}
                 }
             }
-
-            if (audioTrackIndex < 0 || format == null) {
-                extractor.release()
-                return ""
-            }
-
-            extractor.selectTrack(audioTrackIndex)
-            val sampleRate = format.getInteger(MediaFormat.KEY_SAMPLE_RATE)
-
-            // 读取约 10 秒音频进行分析
-            val buffer = ByteBuffer.allocate(sampleRate * 2 * 10)
-            val readBytes = extractor.readSampleData(buffer, 0)
-            extractor.release()
-
-            if (readBytes <= 0) return ""
-
-            buffer.rewind()
-            val samples = ShortArray(readBytes / 2)
-            buffer.asShortBuffer().get(samples)
+            val probe: KeyProbe = keyProbeOrNull ?: return ""
 
             // 计算色度向量（12 个音级的能量分布）
-            val chroma = computeChroma(samples, sampleRate)
+            val chroma = computeChroma(probe.samples, probe.sampleRate)
 
             // Krumhansl-Schmuckler 密钥检测
             return krumhanslSchmuckler(chroma)
@@ -341,6 +370,9 @@ object AudioAnalyzer {
             return ""
         }
     }
+
+    /** 【V8.429】estimateKeyFromAudio 在闸门内一次性带回的采样结果。 */
+    private data class KeyProbe(val sampleRate: Int, val samples: ShortArray)
 
     /**
      * 计算色度向量

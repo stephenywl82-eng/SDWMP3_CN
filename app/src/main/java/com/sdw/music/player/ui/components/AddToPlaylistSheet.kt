@@ -1,6 +1,7 @@
 package com.sdw.music.player.ui.components
 
 import androidx.compose.foundation.background
+import com.sdw.music.player.ui.components.SDWDivider
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -22,6 +23,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
@@ -65,17 +67,11 @@ fun AddToPlaylistSheet(
         contentColor = MaterialTheme.colorScheme.onBackground,
         scrimColor = Color.Black.copy(alpha = 0.5f),
         shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
-        dragHandle = {
-            Box(
-                modifier = Modifier
-                    .padding(top = 12.dp, bottom = 8.dp)
-                    .width(36.dp)
-                    .height(4.dp)
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.35f))
-            )
-        }
+        // [V8.117] 去掉顶部拖拽小短条；下滑关闭不受影响。
+        dragHandle = null
     ) {
+        // [V8.117] 独立 Dialog 窗口需自行隐藏状态栏。
+        SheetImmersiveStatusBar()
         Column(modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
             // ── 歌曲信息 ──
             Row(
@@ -83,10 +79,10 @@ fun AddToPlaylistSheet(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
-                    modifier = Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)),
+                    modifier = Modifier.size(44.dp).clip(SDWShapes.Thumb),
                     contentAlignment = Alignment.Center
                 ) {
-                    DefaultCoverImage(song.title, song.artist, Modifier.fillMaxSize(), RoundedCornerShape(6.dp))
+                    DefaultCoverImage(song.title, song.artist, Modifier.fillMaxSize(), SDWShapes.Thumb)
                     val painter = rememberAsyncImagePainter(
                         model = remember(song.albumArtUri) {
                             ImageRequest.Builder(context)
@@ -106,7 +102,7 @@ fun AddToPlaylistSheet(
                     if (batch == null) {
                         Text(song.title, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground,
                             maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        Text(song.artist.ifBlank { "Unknown Artist" }, style = MaterialTheme.typography.bodySmall,
+                        Text(song.artist.ifBlank { stringResource(R.string.unknown_artist) }, style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     } else {
                         Text(
@@ -119,7 +115,7 @@ fun AddToPlaylistSheet(
                 }
             }
 
-            HorizontalDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+            SDWDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
 
             // ── 新建歌单入口 ──
             Row(
@@ -130,7 +126,7 @@ fun AddToPlaylistSheet(
                     modifier = Modifier.size(36.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
                     contentAlignment = Alignment.Center
                 ) {
-                    Icon(Icons.Default.Add, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Default.Add, stringResource(R.string.action_add), tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
                 }
                 Spacer(Modifier.width(12.dp))
                 Text(stringResource(R.string.playlist_create_new), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyLarge)
@@ -219,7 +215,7 @@ fun AddToPlaylistSheet(
                         focusedContainerColor = MaterialTheme.colorScheme.surface,
                         unfocusedContainerColor = MaterialTheme.colorScheme.surface
                     ),
-                    shape = RoundedCornerShape(12.dp)
+                    shape = SDWShapes.Media
                 )
             },
             confirmButton = {

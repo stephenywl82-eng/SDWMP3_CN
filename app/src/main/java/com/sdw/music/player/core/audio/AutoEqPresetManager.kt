@@ -39,7 +39,7 @@ object AutoEqPresetManager {
     }
 
     /** 预设数据库 — 精选 48 款热门耳机 */
-    val presets: List<AutoEqPreset> = listOf(
+    private val builtinPresets: List<AutoEqPreset> = listOf(
         // =========== Sony ===========
         AutoEqPreset("Sony WH-1000XM4", "Sony", "over-ear", -6.1f, listOf(
     AutoEqFilter("LS", 105.0f, -4.2f, 0.70f),
@@ -640,18 +640,39 @@ object AutoEqPresetManager {
     )
 
     /** 按品牌分组获取预设列表 */
+    val presets: List<AutoEqPreset>
+        get() = AutoEqPresetStore.presets().ifEmpty { builtinPresets }
+
+    /** 是否为全量库（6033 款）；UI 据此决定用搜索框还是品牌折叠列表 */
+    fun isFullLibrary(): Boolean = AutoEqPresetStore.presets().isNotEmpty()
+
+    /** 按品牌分组获取预设列表 */
     fun getPresetsByBrand(): Map<String, List<AutoEqPreset>> {
         return presets.groupBy { it.brand }
     }
 
     /** 获取所有品牌名称（排序） */
     fun getBrands(): List<String> {
-        return presets.map { it.brand }.distinct().sorted()
+        val full = AutoEqPresetStore.getBrands()
+        return full.ifEmpty { builtinPresets.map { it.brand }.distinct().sorted() }
     }
 
-    /** 根据名称查找预设 */
+    /** 按品牌取预设 */
+    fun findByBrand(brand: String): List<AutoEqPreset> =
+        if (isFullLibrary()) AutoEqPresetStore.findByBrand(brand)
+        else builtinPresets.filter { it.brand == brand }
+
+    /** 型号/品牌模糊搜索（全量库专用） */
+    fun search(query: String, limit: Int = 300): List<AutoEqPreset> =
+        AutoEqPresetStore.search(query, limit)
+
+    /** 热门品牌（按预设数量倒序，全量库专用） */
+    fun topBrands(limit: Int): List<String> = AutoEqPresetStore.topBrands(limit)
+
+    /** 根据名称查找预设（全量库优先，兼容旧存档名） */
     fun findByName(name: String): AutoEqPreset? {
-        return presets.find { it.name == name }
+        AutoEqPresetStore.findByName(name)?.let { return it }
+        return builtinPresets.find { it.name == name }
     }
 
     /**

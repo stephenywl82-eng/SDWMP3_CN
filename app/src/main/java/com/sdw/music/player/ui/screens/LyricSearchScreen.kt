@@ -1,6 +1,8 @@
 package com.sdw.music.player.ui.screens
 
 import android.util.Log
+import com.sdw.music.player.ui.components.SDWDivider
+import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -23,11 +25,15 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import com.sdw.music.player.LrcParser
 import com.sdw.music.player.R
 import com.sdw.music.player.lyric.LyricRepository
 import com.sdw.music.player.lyric.LyricResult
 import com.sdw.music.player.ui.theme.*
+import com.sdw.music.player.ui.components.glassSurface
+import com.sdw.music.player.ui.components.springPress
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -64,16 +70,15 @@ fun LyricSearchScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            SDWTopBar(
                 title = {
-                    Text(stringResource(R.string.title_search_lyrics), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.title_search_lyrics), color = MaterialTheme.colorScheme.onBackground)
                 },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = MaterialTheme.colorScheme.onBackground)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
         },
         containerColor = MaterialTheme.colorScheme.background
@@ -84,7 +89,7 @@ fun LyricSearchScreen(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
                 placeholder = { Text("Title + Artist", color = MaterialTheme.colorScheme.outlineVariant) },
-                leadingIcon = { Icon(Icons.Default.Search, null, tint = MaterialTheme.colorScheme.outlineVariant) },
+                leadingIcon = { Icon(Icons.Default.Search, stringResource(R.string.action_search), tint = MaterialTheme.colorScheme.outlineVariant) },
                 trailingIcon = {
                     if (searchQuery.isNotBlank()) {
                         TextButton(
@@ -112,7 +117,7 @@ fun LyricSearchScreen(
                     unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
                     cursorColor = MaterialTheme.colorScheme.primary
                 ),
-                shape = RoundedCornerShape(12.dp)
+                shape = SDWShapes.Media
             )
 
             when {
@@ -145,14 +150,15 @@ fun LyricSearchScreen(
                             val syncBadge = if (result.hasSyncedLyrics()) "⏱" else ""
                             val transBadge = if (result.hasTranslation()) " 🌐" else ""
 
-                            Card(
+                            // [V8.115] 结果卡统一到主界面玻璃语言（glassSurface + 弹簧按压）。
+                            val resInteraction = remember { MutableInteractionSource() }
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 12.dp, vertical = 3.dp)
-                                    .clickable { selectedResult = result },
-                                shape = RoundedCornerShape(10.dp),
-                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+                                    .padding(horizontal = 10.dp, vertical = 2.dp)
+                                    .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
+                                    .springPress(resInteraction, pressedScale = 0.975f)
+                                    .clickable(interactionSource = resInteraction, indication = null) { selectedResult = result }
                             ) {
                                 Row(
                                     modifier = Modifier.fillMaxWidth().padding(12.dp),
@@ -195,7 +201,7 @@ fun LyricSearchScreen(
                                             .padding(top = 3.dp)
                                             .background(
                                                 Color(android.graphics.Color.parseColor(sourceColors)).copy(alpha = 0.15f),
-                                                RoundedCornerShape(4.dp)
+                                                SDWShapes.Badge
                                             )
                                             .padding(horizontal = 6.dp, vertical = 2.dp)
                                     )
@@ -251,7 +257,7 @@ private fun LyricDetailView(
                 }
             }
         }
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.1f))
+        SDWDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.1f))
 
         // Lyrics text
         Box(

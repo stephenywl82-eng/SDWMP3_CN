@@ -28,10 +28,12 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.SongRepository
 import androidx.compose.foundation.Image
 import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.rememberSharedCoverPainter
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -190,10 +192,14 @@ fun SharedCoverOverlay(
                     } else Modifier
                 )
         ) {
-            if (albumArtUri.isNotEmpty()) {
-                val overlayPainter = rememberAsyncImagePainter(
-                    model = albumArtUri,
-                    contentScale = ContentScale.Crop
+            if (SongRepository.hasRealCover(albumArtUri)) {
+                // V8.69 - the flight overlay was decoding the artwork unbounded (full
+                // source size) while the two ends of the flight sample the 260dp tier.
+                // Reuse that tier so the flight never falls back to a raw decode.
+                val overlayPainter = rememberSharedCoverPainter(
+                    uri = albumArtUri,
+                    contentScale = ContentScale.Crop,
+                    big = true
                 )
                 val imgState = overlayPainter.state
                 if (imgState is AsyncImagePainter.State.Loading || imgState is AsyncImagePainter.State.Error) {

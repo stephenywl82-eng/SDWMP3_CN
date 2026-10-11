@@ -62,7 +62,42 @@ data class DacProfile(
     /** dB range of the volume FU (16.16, e.g. -74.0 = -74.00 dB). */
     val featureUnitMinDb: Float = -127.0f,
     val featureUnitMaxDb: Float = 0.0f,
-    val featureUnitResDb: Float = 1.0f
+    val featureUnitResDb: Float = 1.0f,
+
+    // ── [2026-09-10 multi-DAC quirk table] Native Linux snd-usb-audio flag equivalents ──
+    // Overrides pushed to native open() via JNI after nativeClaim. Native keeps its
+    // built-in default table (open() quirk init) as fallback; these override it when
+    // nonzero/non-default, so Kotlin DacProfile stays the single source of truth.
+
+    /** ISO packets per URB. 0 = native default (64, FS auto-drops to 16).
+     *  Full-speed 96k/24bit DACs (Qudelix-5K 576B/pkt) exceed usbfs in-flight
+     *  limits at 64 pkts -> ENOMEM on submit #13. Linux fix reference:
+     *  DIYINHK 0x20b1:0x2009 high-rate URB overrun -> SKIP_IMPLICIT_FB. */
+    val urbPacketsOverride: Int = 0,
+
+    /** Delay (us) after SET_CUR before data flow — lets DAC PLL lock the new clock.
+     *  0 = native default. Linux CTL_MSG_DELAY: MOONDROP Moonriver2 Ti / iBasso
+     *  DC-Elite(1M)/DC07 Pro(1M). JDS Labs XMOS firmware: 2ms PLL relock. */
+    val ctlMsgDelayUs: Int = 0,
+
+    /** Delay (us) between interface ops (setInterfaceAlt(0) teardown & reactivate).
+     *  0 = native default. Linux IFACE_DELAY: TTGK 3302:17c2, Luxman D-10X. */
+    val ifaceDelayUs: Int = 0,
+
+    /** Force full interface teardown+reactivate on every restart, even same-alt.
+     *  Default false = keep endpoint (9/9 fix: Qudelix ES9219 loses lock on
+     *  teardown -> noise). Linux FORCE_IFACE_RESET: TTGK 3302:17c2 — if a device
+     *  needs full reset to clear a stuck state, set true. */
+    val forceIfaceReset: Boolean = false,
+
+    /** True = firmware lies about UAC version (e.g. claims UAC2, only implements
+     *  UAC1). Linux UQ_AU_FORCE_REV_1 (Sony NW-A50 054c:0b8c). Forces descriptor
+     *  parse as UAC1. */
+    val forceUac1: Boolean = false,
+
+    /** Skip SET_CUR sample-rate control entirely (alt-switch implicit lock).
+     *  HIFI_A001 (2D13:A001) locks clock at 384k on SET_CUR. */
+    val skipSetCurQuirk: Boolean = false
 ) {
     companion object {
         // ── Known DACs ─────────────────────────────────────────
@@ -72,7 +107,8 @@ data class DacProfile(
         val TTGK_REFERENCE = DacProfile(0x3302, 0x33C0, "TTGK Audio (reference)",
             useSystemRoute = false,
             featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
-            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f)
+            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
 
         /** TTGK CX31993 (pid=33D8) — 用户新 DAC。descriptor 与 33C0 同构：
          *  iface1 alt=1/2/3 OUT ep 0x01 mps=192/288/384, iface2 IN fb ep 0x81,
@@ -81,7 +117,19 @@ data class DacProfile(
         val TTGK_33D8 = DacProfile(0x3302, 0x33D8, "CX31993 (3302:33d8)",
             useSystemRoute = false,
             featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
-            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f)
+            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
+
+        /** TTGK CX31993+97220 HiFi (pid=3382) — 用户新 DAC（2026-09-23）。
+         *  descriptor 与 33D8 同构：iface1 alt=1/2/3 OUT ep0x01 mps=192/288/384
+         *  （16/24/32bit subslot），iface2 IN fb ep0x81 mps=24/36，iface3 HID。
+         *  支持 44.1k（sampleRates 含 44100），encodings=[2,4,21,22]。
+         *  Oboe system-route 下 Stream OFF 无声，改走手写 USB Host Exclusive。 */
+        val TTGK_3382 = DacProfile(0x3302, 0x3382, "CX31993+97220 HiFi (3302:3382)",
+            useSystemRoute = false,
+            featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
+            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
 
         /** TTGK Note (pid=201D) — UAC2 adaptive (attributes=0x09), multi-alt.
          *  Salt verified: endpoint=0x04, alt=1 mps=196 (16bit), alt=2 mps=294 (24bit),
@@ -89,7 +137,8 @@ data class DacProfile(
          *  Adaptive endpoint syncs via SOF, no feedback endpoint.
          *  Hand-rolled USB Host Exclusive. */
         val TTGK_NOTE = DacProfile(0x3302, 0x201D, "TTGK Note",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false)
+            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
 
         /** vid=2972 pid=0047 (FiiO BTR5) — UAC2 async (attributes=0x05), multi-alt.
          *  Salt verified: interface=1, alt=1 mps=392 (32bit), alt=2 mps=196 (16bit),
@@ -97,13 +146,15 @@ data class DacProfile(
          *  Async endpoint has explicit feedback 0x81. NOT broken Clock Entity.
          *  Hand-rolled USB Host Exclusive. */
         val VID2972_0047 = DacProfile(0x2972, 0x0047, "FiiO BTR5",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false)
+            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false,
+            ctlMsgDelayUs = 1000)
 
         /** 2D13:A001 "USB HiFi Audio" — S32_LE wire, buggy SET_CUR.
          *  Hardware supports 44.1k but SET_CUR locks clock at 384k.
          *  Hand-rolled USB Host Exclusive with skipSetCur = alt-switch implicit lock. */
         val HIFI_A001 = DacProfile(0x2D13, 0xA001, "USB HiFi Audio (2D13:A001)",
-            useSystemRoute = false, skipSetCur = true, wireBits = 32)
+            useSystemRoute = false, skipSetCur = true, wireBits = 32,
+            skipSetCurQuirk = true)
 
         /** Realtek USB2.0 Audio (0BDA:4BA6) — UAC2 adaptive, 3 alt settings (mps 248/372/496).
          *  44.1k AND 48k both supported (Salt verified 44.1k output, clockVerified=true).
@@ -112,7 +163,8 @@ data class DacProfile(
         val REALTEK_4BA6 = DacProfile(0x0BDA, 0x4BA6, "Realtek USB2.0 Audio (0BDA:4BA6)",
             useSystemRoute = false, lacks44k1Clock = false,
             featureUnitId = 16, featureUnitChannel = 1, featureUnitChannels = 2,
-            featureUnitMinDb = -65.25f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.38f)
+            featureUnitMinDb = -65.25f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.38f,
+            ctlMsgDelayUs = 1000)
 
         /** Qudelix-5K (0A12:4007) — UAC1 synchronous DAC/AMP.
          *  Single alt=1 AudioStreaming iface, ISO OUT ep=0x03 mps=576 (full-speed 1ms).
@@ -122,7 +174,8 @@ data class DacProfile(
          *  Sample rate switched via SET_CUR (single alt, not multi-alt).
          *  Supports 44.1/48/88.2/96 kHz. Hand-rolled USB Host Exclusive. */
         val QUDELIX_5K = DacProfile(0x0A12, 0x4007, "Qudelix-5K USB DAC",
-            useSystemRoute = false, lacks44k1Clock = false, wireBits = 24)
+            useSystemRoute = false, lacks44k1Clock = false, wireBits = 24,
+            urbPacketsOverride = 16, ctlMsgDelayUs = 2000)
 
         /** Moondrop Chu II DSP (31B2:0113) — UAC1 synchronous DSP IEM.
          *  Multi-alt AudioStreaming OUT iface (id=2):
@@ -132,7 +185,8 @@ data class DacProfile(
          *  (DSP control). Wire format 24-bit S24_3LE. Sample rate via SET_CUR.
          *  Hand-rolled USB Host Exclusive. */
         val CHU2_DSP = DacProfile(0x31B2, 0x0113, "Moondrop Chu II DSP",
-            useSystemRoute = false, lacks44k1Clock = false, wireBits = 24)
+            useSystemRoute = false, lacks44k1Clock = false, wireBits = 24,
+            ctlMsgDelayUs = 1000)
 
         /** CX31993 (0BDA:0023) — 山寨小尾巴（抄 Realtek VID），结构同 TTGK Note：
          *  iface#1 单 AudioStreaming，alt=1 ep=0x04 mps=196 (16bit) / alt=2 mps=294 (24bit)
@@ -140,12 +194,26 @@ data class DacProfile(
          *  （内核 ALSA 驱动兼容问题），改走手写 USB Host Exclusive——descriptor 驱动
          *  自适应可识别该 alt 表（同 201D 同构，201D 已跑通）。 */
         val CX31993_0BDA_0023 = DacProfile(0x0BDA, 0x0023, "CX31993 (0bda:0023)",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false)
+            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
+
+        /** CX31993 384Khz HIFI AUDIO (31B2:0111) — 用户 DAC（2026-09-29）。
+         *  descriptor 与 TTGK Note / 0BDA:0023 同构（实测 dumpsys）：
+         *    iface id=2 OUT ep=0x04, alt=1/2/3 → mps=196/294/392（16/24/32bit 子槽）
+         *    iface id=1 IN ep=0x84（麦克风），iface id=3 HID（音量）
+         *  UAC2（proto=32），44.1k/48k/96k/176.4k/192k 都在 AudioDevice sampleRates。
+         *  无 profile 时落进 Oboe system-route —— 而这个家族全系"system-route 下
+         *  Stream OFF 无声"，用户实测无声。改走手写 USB Host Exclusive
+         *  （描述符自适应 alt 表，与 201D/0BDA:0023 同构已跑通）。
+         *  FU 音量走 native 通用 UAC2 auto-probe（同 0BDA:0023，不写死）。 */
+        val CX31993_31B2_0111 = DacProfile(0x31B2, 0x0111, "CX31993 384K HIFI (31b2:0111)",
+            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
 
         // ── Lookup ─────────────────────────────────────────────
 
         private val byKey: Map<Pair<Int, Int>, DacProfile> = listOf(
-            TTGK_REFERENCE, TTGK_NOTE, TTGK_33D8, VID2972_0047, HIFI_A001, REALTEK_4BA6, QUDELIX_5K, CHU2_DSP, CX31993_0BDA_0023
+            TTGK_REFERENCE, TTGK_NOTE, TTGK_33D8, TTGK_3382, VID2972_0047, HIFI_A001, REALTEK_4BA6, QUDELIX_5K, CHU2_DSP, CX31993_0BDA_0023, CX31993_31B2_0111
         ).associateBy { it.vid to it.pid }
 
         /** Look up a known profile, or return a generic safe default (system-route). */

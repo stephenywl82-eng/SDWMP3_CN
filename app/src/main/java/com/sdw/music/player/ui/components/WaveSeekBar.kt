@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
@@ -67,6 +68,12 @@ fun WaveSeekBar(
     )
     val phase = if (isPlaying) animatedPhase else 0f
 
+    // V8.69 - one Path reused across frames (rewind instead of reallocate). The gradient
+    // only depends on the track bounds and the two theme colours, so keep the last one and
+    // rebuild only when one of those actually changes.
+    val path = remember { Path() }
+    val brushCache = remember { WaveBrushCache() }
+
     Canvas(
         modifier = modifier.pointerInput(Unit) {
             detectHorizontalDragGestures(
@@ -99,7 +106,10 @@ fun WaveSeekBar(
         )
 
         if (thumbX > left) {
-            val path = Path()
+            // V8.69 - the phase animates on a 2s infinite tween, so this redraws every
+            // frame while playing. Reuse one Path and one Brush instead of allocating a
+            // fresh Path + linearGradient per frame (and re-running both loops).
+            path.rewind()
             val halfH = trackH / 2f
             path.moveTo(left, centerY - halfH)
             var x = 0f
@@ -121,16 +131,43 @@ fun WaveSeekBar(
             path.close()
             drawPath(
                 path = path,
-                brush = Brush.linearGradient(
-                    0f to progressColor,
-                    1f to waveColor,
-                    start = Offset(left, 0f),
-                    end = Offset(right, 0f)
-                )
+                brush = brushCache.obtain(left, right, progressColor, waveColor)
             )
         }
 
         drawCircle(color = THUMB_RING_COLOR, radius = thumbR + 2f, center = Offset(thumbX, centerY))
         drawCircle(color = thumbColor, radius = thumbR, center = Offset(thumbX, centerY))
+    }
+}
+
+/**
+ * V8.69 - holds the wave gradient across frames.
+ *
+ * Deliberately a plain class with plain fields: this is written from inside a Canvas draw
+ * lambda, and writing snapshot state there would invalidate every frame - the exact trap
+ * V8.67 hit with the edge band cache.
+ */
+private class WaveBrushCache {
+    private var cached: Brush? = null
+    private var l = Float.NaN
+    private var r = Float.NaN
+    private var c1: Color? = null
+    private var c2: Color? = null
+
+    fun obtain(
+        left: Float, right: Float, progressColor: Color, waveColor: Color
+    ): Brush {
+        val hit = cached
+        if (hit != null && l == left && r == right && c1 == progressColor && c2 == waveColor) {
+            return hit
+        }
+        val fresh = Brush.linearGradient(
+            0f to progressColor,
+            1f to waveColor,
+            start = Offset(left, 0f),
+            end = Offset(right, 0f)
+        )
+        cached = fresh; l = left; r = right; c1 = progressColor; c2 = waveColor
+        return fresh
     }
 }

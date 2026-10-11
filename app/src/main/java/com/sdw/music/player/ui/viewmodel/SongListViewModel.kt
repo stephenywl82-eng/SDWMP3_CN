@@ -10,7 +10,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 data class SongListState(
     val songs: List<Song> = emptyList(),
@@ -42,6 +44,26 @@ class SongListViewModel(application: Application) : AndroidViewModel(application
 
     init {
         loadSongs()
+        // [V8.214] 缓存恢复已移出主线程：若首帧 FAST PATH 尚未拿到缓存（解析未完成），
+        // 这里监听 songsFlow，缓存一就绪即补一次状态刷新，避免列表一直空白。
+        viewModelScope.launch {
+            withTimeoutOrNull(5000) { SongRepository.songsFlow.first { it.isNotEmpty() } }
+                ?.let { loaded ->
+                    if (_state.value.songs.isEmpty()) {
+                        SongRepository.syncFavoritesToSongs()
+                        _state.update {
+                            it.copy(
+                                songs = loaded,
+                                filteredSongs = loaded,
+                                isLoading = false,
+                                songCount = loaded.size,
+                                folders = SongRepository.getFolders(),
+                                favoriteCount = SongRepository.getFavoriteCount()
+                            )
+                        }
+                    }
+                }
+        }
     }
 
     private fun loadSongs() {

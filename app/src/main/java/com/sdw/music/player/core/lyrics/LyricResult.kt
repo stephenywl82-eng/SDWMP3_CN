@@ -69,7 +69,7 @@ data class LyricResult(
             "local" -> "Local"
             "embedded" -> "Embedded"
             "salt" -> "SaltLyrics"
-            "QQ" -> "QQ Music"
+            "QQ" -> "Int Music"
             "NetEase" -> "NetEase"
             "LRCLIB" -> "LRCLIB"
             "kugou" -> "Kugou"

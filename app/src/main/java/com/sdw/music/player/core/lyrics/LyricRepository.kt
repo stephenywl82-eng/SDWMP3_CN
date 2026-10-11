@@ -3,6 +3,7 @@
 import android.content.Context
 import android.util.Log
 import com.sdw.music.player.Song
+import com.sdw.music.player.SongRepository
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.channelFlow
@@ -43,6 +44,7 @@ class LyricRepository private constructor(
     // 优先级：LRCLIB（Kuwo已废、QQ/网易已移除）
     private val providers: List<ILyricProvider> by lazy {
         listOf(
+            QqLyricProvider(),      // V8.127 逐字歌词唯一来源（QRC），中文歌覆盖最好
             LRCLIBProvider(context)  // 兜底，英文歌友好但较慢
         )
     }
@@ -70,6 +72,7 @@ class LyricRepository private constructor(
     fun getAvailableProviderOptions(): List<Pair<String, String>> {
         return listOf(
             "auto" to "Auto",
+            "QQ" to "Int Music",
             "lrclib" to "LRCLIB",
             "local" to "Local",
             "embedded" to "Embedded"
@@ -97,6 +100,65 @@ class LyricRepository private constructor(
         }
     }
 
+
+    // [V8.117] 内嵌歌词「忽略」集合（B）：用户清除过后，即使内嵌标签还在（WAV 无写入器、
+    // 或没有「所有文件访问」权限），也不再用它 —— 否则读取端内嵌最优先，错歌词永远赢。
+    private val ignoredPrefs by lazy { context.getSharedPreferences("lyric_prefs", Context.MODE_PRIVATE) }
+
+    private fun markEmbeddedIgnored(songId: Long) {
+        val cur = ignoredPrefs.getStringSet("ignored_embedded", emptySet()) ?: emptySet()
+        ignoredPrefs.edit().putStringSet("ignored_embedded", cur + songId.toString()).apply()
+    }
+
+    private fun isEmbeddedIgnored(songId: Long): Boolean =
+        (ignoredPrefs.getStringSet("ignored_embedded", emptySet()) ?: emptySet()).contains(songId.toString())
+
+    // [V8.134] 内嵌写入成功后解除「忽略内嵌」标记。此前只 mark 从不 clear：
+    // 一次失败留下的标记会永久压制内嵌源，之后即使真的写成功，读取端仍按「已忽略」
+    // 走 .lrc / 网络源 —— 用户观感还是「保存了却读不到新词」。
+    private fun clearEmbeddedIgnored(songId: Long) {
+        val cur = ignoredPrefs.getStringSet("ignored_embedded", emptySet()) ?: emptySet()
+        if (!cur.contains(songId.toString())) return
+        ignoredPrefs.edit().putStringSet("ignored_embedded", cur - songId.toString()).apply()
+    }
+
+    /**
+     * 【V8.117】 清除歌词：①标记忽略内嵌（WAV / 无写权限也能生效，可逆）
+     * ②移除音频内嵌 LYRICS/USLT（FLAC/MP3，需写权限）③删除同目录与兜底目录的 .lrc ④清内存缓存。
+     * @return 是否成功（至少完成标记 + 缓存清理）
+     */
+    suspend fun deleteLyrics(song: Song): Boolean = withContext(Dispatchers.IO) {
+        val actualPath = song.filePath.ifBlank { song.path }
+        markEmbeddedIgnored(song.id)
+
+        if (actualPath.isNotBlank() && !actualPath.startsWith("content://")) {
+            val ext = actualPath.substringAfterLast('.', "").lowercase()
+            // [V8.134] removeWavLyrics 在 V8.129 已写好，但门闸漏了 wav/wave -> 永远走不到
+            if (ext == "flac" || ext == "mp3" || ext == "wav" || ext == "wave") {
+                val removed = com.sdw.music.player.core.audio.LyricsEmbedder.removeLyrics(actualPath)
+                Log.d(TAG, "🧹 移除内嵌歌词${if (removed) "成功" else "失败/无"}: $actualPath")
+            }
+            // 删除同目录 .lrc / .LRC
+            val base = LrcPaths.deriveBase(actualPath)
+            if (base != null) {
+                File("$base.lrc").takeIf { it.exists() }?.delete()
+                File("$base.LRC").takeIf { it.exists() }?.delete()
+            }
+        }
+        // 删除兜底目录 .lrc
+        val fallbackDir = File(context.getExternalFilesDir(null), "lyrics")
+        val safeName = "${song.title}_${song.artist}.lrc".replace(Regex("[^a-zA-Z0-9_.-]"), "_")
+        File(fallbackDir, safeName).takeIf { it.exists() }?.delete()
+
+        // 清缓存 / 索引
+        val cacheKey = "${song.title}_${song.artist}_${song.duration}"
+        synchronized(cacheLock) { lyricsCache.remove(cacheKey) }
+        localFileIndex.remove(actualPath)
+        LrcPaths.derive(actualPath)?.let { localFileIndex.remove(it) }
+        Log.d(TAG, "🧹 歌词已清除: ${song.title}")
+        true
+    }
+
     /**
      * 【v8.0】直接读音频文件内嵌歌词（验证用）
      * FLAC：native dr_flac 读 Vorbis comment LYRICS / UNSYNCEDLYRICS；其他格式暂不支持
@@ -105,11 +167,24 @@ class LyricRepository private constructor(
         val actualPath = song.filePath.ifBlank { song.path }
         Log.d(TAG, "loadEmbedded: path=$actualPath")
         if (actualPath.isBlank()) return@withContext null
-        val isFlac = actualPath.substringAfterLast('.', "").equals("flac", ignoreCase = true)
-        if (!isFlac) { Log.d(TAG, "loadEmbedded: not flac, skip"); return@withContext null }
+        // [V8.117] 用户已清除过该曲内嵌歌词 -> 忽略，交给本地 .lrc / 网络源
+        if (isEmbeddedIgnored(song.id)) { Log.d(TAG, "loadEmbedded: 已忽略内嵌歌词"); return@withContext null }
+        val ext = actualPath.substringAfterLast('.', "").lowercase()
+        val isFlac = ext == "flac"
+        // [V8.91] WAV 走内嵌 ID3v2 的 USLT 帧。平台索引对 WAV 完全拿不到标签，
+        // 所以这里没有平台兜底可用 —— 有 USLT 就用，没有就交给后面的本地 LRC / 网络源。
+        val isWav = ext == "wav" || ext == "wave"
+        // [V8.96] MP3：内嵌 USLT 帧此前只写不读（写入端早已支持），这里补齐读取。
+        // 复用 SongRepository.readId3v2Lyrics（支持 ID3v2.3 / v2.4）。
+        val isMp3 = ext == "mp3"
+        if (!isFlac && !isWav && !isMp3) { Log.d(TAG, "loadEmbedded: 未支持的格式 $ext, skip"); return@withContext null }
         try {
-            val lyrics = com.sdw.music.player.core.audio.UsbDacManager.flacReadLyrics(context, actualPath)
-            if (lyrics.isNullOrBlank()) { Log.d(TAG, "loadEmbedded: flacReadLyrics 返回空"); return@withContext null }
+            val lyrics = when {
+                isWav -> com.sdw.music.player.core.audio.WavCoverReader.readTags(actualPath)?.lyrics
+                isMp3 -> SongRepository.readId3v2Lyrics(actualPath)
+                else -> com.sdw.music.player.core.audio.UsbDacManager.flacReadLyrics(context, actualPath)
+            }
+            if (lyrics.isNullOrBlank()) { Log.d(TAG, "loadEmbedded: 内嵌歌词为空"); return@withContext null }
             Log.d(TAG, "loadEmbedded: 读到 ${lyrics.length} 字")
             val hasSync = lyrics.contains('[')
             LyricResult(
@@ -363,11 +438,13 @@ class LyricRepository private constructor(
             return@withContext localLrc
         }
         
-        // 只查 LRCLIB（最稳定）
+        // 优先 QQ（唯一逐字源），失败再回退 LRCLIB（最稳定）
         try {
             withTimeout(QUICK_MATCH_TIMEOUT_MS) {
+                val qq = providers.find { it.providerId == "QQ" }
                 val lrclib = providers.find { it.providerId == "lrclib" }
-                val result = lrclib?.match(song.title, song.artist, song.duration)
+                val result = qq?.match(song.title, song.artist, song.duration)
+                    ?: lrclib?.match(song.title, song.artist, song.duration)
                 
                 if (result != null) {
                     launch {
@@ -399,13 +476,15 @@ class LyricRepository private constructor(
         
         // 2. 同目录查找
         val extensions = listOf("lrc", "LRC", "txt", "TXT")
-        val basePath = actualPath.replace(Regex("\\.(flac|mp3|m4a|wav|ogg|aac|wma)$", RegexOption.IGNORE_CASE), "")
+        val basePath = LrcPaths.deriveBase(actualPath)
         
-        for (ext in extensions) {
-            val file = File("$basePath.$ext")
-            if (file.exists()) {
-                localFileIndex[actualPath] = file
-                return readLyricsFile(file, song)
+        if (basePath != null) {
+            for (ext in extensions) {
+                val file = File("$basePath.$ext")
+                if (file.exists()) {
+                    localFileIndex[actualPath] = file
+                    return readLyricsFile(file, song)
+                }
             }
         }
         
@@ -504,18 +583,17 @@ class LyricRepository private constructor(
      */
     suspend fun saveLyricsDirectly(song: Song, lyrics: String): String? = withContext(Dispatchers.IO) {
         try {
+            // [V8.134] 实际落盘的 .lrc 路径。同目录写成功 / 兜底目录写成功都记在这里，
+            // 不再用提前 return 短路 —— 那会整个跳过下面的内嵌写入。
+            var savedPath: String? = null
             val actualPath = song.filePath.ifBlank { song.path }
 
             // 目标文件：优先同目录；content URI / 空路径 → 走 fallback
             val targetFile: File
             if (actualPath.isNotBlank() && !actualPath.startsWith("content://")) {
-                val lrcPath = actualPath.replace(
-                    Regex("\\.(flac|mp3|m4a|wav|ogg|aac|wma)$", RegexOption.IGNORE_CASE),
-                    ".lrc"
-                )
-                val lrcFile = File(lrcPath)
-                val parent = lrcFile.parentFile
-                if (parent != null && parent.canWrite()) {
+                val lrcFile = LrcPaths.safeTarget(actualPath)
+                val parent = lrcFile?.parentFile
+                if (lrcFile != null && parent != null && parent.canWrite()) {
                     targetFile = lrcFile
                 } else {
                     val fallbackDir = File(context.getExternalFilesDir(null), "lyrics").apply { mkdirs() }
@@ -531,31 +609,55 @@ class LyricRepository private constructor(
                 targetFile.writeText(lyrics, Charsets.UTF_8)
             } catch (perm: Exception) {
                 // Android 10+ scoped storage: canWrite() may return true but writeText still gets EACCES
+                // [V8.134] 关键修复：这里**不能提前 return**。旧代码从这条分支直接 return，
+                // 下面的内嵌写入整段被跳过 —— 于是「.lrc 落到兜底目录（算保存成功）
+                // + 内嵌歌词从未被尝试」。用户看到的就是「编辑后保存了，内嵌却没变」。
+                // 现在只记录「.lrc 走了兜底」，继续往下无条件尝试一次内嵌写入。
                 val fallbackDir = File(context.getExternalFilesDir(null), "lyrics").apply { mkdirs() }
                 val safeName = "${song.title}_${song.artist}.lrc".replace(Regex("[^a-zA-Z0-9_.-]"), "_")
                 val fallbackFile = File(fallbackDir, safeName)
                 fallbackFile.writeText(lyrics, Charsets.UTF_8)
                 Log.w(TAG, "💾 Lyrics write to co-located path denied, saved to fallback: ${fallbackFile.name}")
                 localFileIndex[fallbackFile.absolutePath] = fallbackFile
+                val cacheKey0 = "${song.title}_${song.artist}_${song.duration}"
+                synchronized(cacheLock) { lyricsCache.remove(cacheKey0) }
+                savedPath = fallbackFile.absolutePath
+            }
+            if (savedPath == null) {
+                localFileIndex[targetFile.absolutePath] = targetFile
                 val cacheKey = "${song.title}_${song.artist}_${song.duration}"
                 synchronized(cacheLock) { lyricsCache.remove(cacheKey) }
-                return@withContext fallbackFile.absolutePath
+                Log.d(TAG, "💾 Lyrics已Save: ${targetFile.name}")
+                savedPath = targetFile.absolutePath
             }
-            localFileIndex[targetFile.absolutePath] = targetFile
-            val cacheKey = "${song.title}_${song.artist}_${song.duration}"
-            synchronized(cacheLock) { lyricsCache.remove(cacheKey) }
-            Log.d(TAG, "💾 Lyrics已Save: ${targetFile.name}")
 
-            // 内嵌进音频 tag（FLAC / MP3），失败不影响 .lrc 保存结果
+            // 内嵌进音频 tag（FLAC / MP3 / WAV），失败不影响 .lrc 保存结果
+            var embeddedOk = false
             if (actualPath.isNotBlank() && !actualPath.startsWith("content://")) {
                 val ext = actualPath.substringAfterLast('.', "").lowercase()
-                if (ext == "flac" || ext == "mp3") {
-                    val embedded = com.sdw.music.player.core.audio.LyricsEmbedder.embedLyrics(actualPath, lyrics)
-                    Log.d(TAG, "💾 内嵌歌词${if (embedded) "成功" else "失败/不支持"}: $actualPath")
+                // [V8.134] 补 wav/wave：V8.129 的 WAV 写入器此前被这道门闸挡死
+                if (ext == "flac" || ext == "mp3" || ext == "wav" || ext == "wave") {
+                    embeddedOk = com.sdw.music.player.core.audio.LyricsEmbedder.embedLyrics(actualPath, lyrics)
+                    Log.d(TAG, "💾 内嵌歌词${if (embeddedOk) "成功" else "失败/不支持"}: $actualPath")
+                }
+            }
+            // [V8.128] 内嵌源在 autoMatch 里是第 0 优先级：内嵌没更新就抑制它，
+            // 否则旧的内嵌词会在下次加载时盖掉刚保存的 .lrc。
+            // [V8.134] 写入成功则相反 —— 解除抑制，让新内嵌成为权威来源（对称收口）。
+            if (embeddedOk) clearEmbeddedIgnored(song.id) else markEmbeddedIgnored(song.id)
+
+            // [V8.138] 整文件重写（改内嵌歌词）后 size/mtime 全变，而工程从不通知媒体库 ->
+            // albumart 虚拟表那一行失效 -> 各界面取不到图只露 logo，看起来就是「封面被删了」。
+            // 写入成功时重新抽取容器内封面并通知媒体库，把封面 URI 救回来。
+            if (embeddedOk) {
+                try {
+                    SongRepository.refreshArtAfterRewrite(context, actualPath)
+                } catch (e: Exception) {
+                    Log.w(TAG, "刷新封面失败: ${e.message}")
                 }
             }
 
-            targetFile.absolutePath
+            savedPath
         } catch (e: Exception) {
             Log.e(TAG, "手动SaveLyrics失败: ${e.message}")
             null
@@ -570,11 +672,7 @@ class LyricRepository private constructor(
             val actualPath = song.filePath.ifBlank { song.path }
             if (actualPath.isBlank()) return@withContext
             
-            val lrcPath = actualPath.replace(
-                Regex("\\.(flac|mp3|m4a|wav|ogg|aac|wma)$", RegexOption.IGNORE_CASE), 
-                ".lrc"
-            )
-            val lrcFile = File(lrcPath)
+            val lrcFile = LrcPaths.safeTarget(actualPath) ?: return@withContext
             
             // 检查目录可写性
             val parent = lrcFile.parentFile
@@ -612,11 +710,8 @@ class LyricRepository private constructor(
             musicFiles.forEach { song ->
                 val actualPath = song.filePath.ifBlank { song.path }
                 if (actualPath.isNotBlank()) {
-                    val basePath = actualPath.replace(
-                        Regex("\\.(flac|mp3|m4a|wav|ogg|aac|wma)$", RegexOption.IGNORE_CASE), 
-                        ".lrc"
-                    )
-                    val file = File(basePath)
+                    val lrcPath = LrcPaths.derive(actualPath) ?: return@forEach
+                    val file = File(lrcPath)
                     if (file.exists()) {
                         localFileIndex[actualPath] = file
                     }

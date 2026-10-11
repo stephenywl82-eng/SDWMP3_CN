@@ -1,0 +1,37 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', bottom: -160, right: -100, width: 460, height: 460, borderRadius: '50%', background: 'linear-gradient(135deg, #22D3EE 0%, #3B82F6 100%)', opacity: 0.10 }} />
+  <Box style={{ flexDirection: 'row', height: '100%', paddingTop: 40, paddingBottom: 40, paddingLeft: 64, paddingRight: 64 }}>
+    <Box style={{ width: '58%', paddingRight: 48, justifyContent: 'center' }}>
+      <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 22 }}>
+        <Box style={{ width: 38, height: 4, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+        <Text style={{ fontSize: 16, color: '#22D3EE', letterSpacing: 2 }}>核心思路</Text>
+      </Box>
+      <Text style={{ fontSize: 46, fontWeight: 'bold', color: '#E5EDF7', lineHeight: 1.2 }}>它调的是「听感维度」<br />不是频段条</Text>
+      <Text style={{ fontSize: 19, color: '#A9B8CC', marginTop: 26, lineHeight: 1.7 }}>
+        传统 EQ 是「100Hz +3dB」这种工程语言。<br />
+        MSEB 把每个滑块变成一种<span style={{ color: '#22D3EE', fontWeight: 'bold' }}>听感</span>，两端是一对反义词
+        （例如 冷 ↔ 暖），<br />你往哪边推，声音就往那个听感走——<br />
+        <span style={{ color: '#9DB8E8', fontWeight: 'bold' }}>不懂 Hz，也能调出自己喜欢的声音。</span>
+      </Text>
+    </Box>
+    <Box style={{ width: '42%', justifyContent: 'center' }}>
+      <Box style={{ padding: 30, background: '#13203A', borderRadius: 18, border: '1px solid rgba(255,255,255,0.10)' }}>
+        <Text style={{ fontSize: 18, fontWeight: 'bold', color: '#E5EDF7' }}>Temperature 温度</Text>
+        <Text style={{ fontSize: 15, color: '#8DA2BC', marginTop: 4 }}>中低频 ↔ 高频能量比</Text>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', marginTop: 26, marginBottom: 10 }}>
+          <Text style={{ fontSize: 15, color: '#9DB8E8' }}>Cool 冷</Text>
+          <Box style={{ flex: 1, height: 8, marginLeft: 14, marginRight: 14, borderRadius: 999, background: 'linear-gradient(90deg, #3B82F6 0%, #22D3EE 100%)' }} />
+          <Text style={{ fontSize: 15, color: '#9DE8F2' }}>Warm 暖</Text>
+        </Box>
+        <Box style={{ width: 22, height: 22, borderRadius: '50%', background: '#FFFFFF', border: '4px solid #22D3EE', marginLeft: '68%', marginTop: -16, boxShadow: '0 0 14px rgba(34,211,238,0.6)' }} />
+        <Box style={{ marginTop: 30, padding: 16, borderRadius: 12, background: 'rgba(34,211,238,0.10)', border: '1px solid rgba(34,211,238,0.30)' }}>
+          <Text style={{ fontSize: 15, color: '#9DE8F2', lineHeight: 1.5 }}>13 段滑块都是这种玩法：<br />每段的左右两端，就是一对反义词。</Text>
+        </Box>
+      </Box>
+    </Box>
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 64, right: 64, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>MSEB 攻略</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>03 / 10</Text>
+  </Box>
+</Slide>

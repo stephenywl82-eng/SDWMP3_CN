@@ -10,22 +10,35 @@
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <uses-feature android:name="android.hardware.type.automotive" android:required="false" />
 
-    <!-- Android 11+ 包可见性：允许发现并跳转 CoverEmbed 应用 -->
+    <!-- Android 11+ 包可见性：允许发现并跳转 CoverEmbed 应用。
+         【V8.276】必须与上面的 stem 插件 <queries> 合并成同一个块 —— 两个 <queries> 元素
+         只有最后一个生效（实测设备上 queriesPackages 只剩 com.coverembed），
+         导致 queryIntentServices(STEM_PLUGIN) 恒返回空，宿主永远认为"没装插件"。 -->
     <queries>
         <package android:name="com.coverembed" />
+        <!-- 【V8.276】显式声明插件包名：刚装好 / 进程被杀时包处于 stopped 态，
+             按 action 查询可能查不到，显式声明包名可保证始终可见。 -->
+        <package android:name="com.sdw.stem.plugin" />
+        <intent>
+            <action android:name="com.sdw.music.player.action.STEM_PLUGIN" />
+        </intent>
     </queries>
 
     <application
         android:name=".SDWApp"
         android:localeConfig="@xml/locales_config"
         android:allowBackup="true"
+        android:fullBackupContent="@xml/backup_rules"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher"
@@ -109,6 +122,7 @@
                 <action android:name="com.sdw.music.player.PLAY" />
                 <action android:name="com.sdw.music.player.PAUSE" />
                 <action android:name="com.sdw.music.player.NEXT" />
+                <action android:name="com.sdw.music.player.DJ_CUT" />
                 <action android:name="com.sdw.music.player.PREV" />
                 <action android:name="com.sdw.music.player.SHUFFLE" />
                 <action android:name="android.intent.action.MEDIA_BUTTON" />

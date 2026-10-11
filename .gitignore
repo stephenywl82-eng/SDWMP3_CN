@@ -74,3 +74,8 @@ jni_backup*/
 
 # so backups
 *.so.bak_*
+
+# --- Local archive / quarantine / vendored clones (never commit) ---
+_archive_*/
+autoeq_repo/
+autoeq_repo.bak/

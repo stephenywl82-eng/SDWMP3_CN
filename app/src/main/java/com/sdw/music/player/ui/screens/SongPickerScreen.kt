@@ -1,6 +1,7 @@
 package com.sdw.music.player.ui.screens
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -26,6 +27,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
 import androidx.compose.ui.input.pointer.pointerInput
@@ -36,6 +38,10 @@ import coil.compose.AsyncImagePainter
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.glassSurface
+import com.sdw.music.player.ui.components.springPress
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.ui.draw.alpha
 import com.sdw.music.player.Song
 import com.sdw.music.player.R
 import com.sdw.music.player.SongRepository
@@ -114,13 +120,13 @@ fun SongPickerScreen(
 
         topBar = {
 
-            TopAppBar(
+            SDWTopBar(
 
                 title = {
 
                     Column {
 
-                        Text(stringResource(R.string.title_add_songs), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium)
+                        Text(stringResource(R.string.title_add_songs), color = MaterialTheme.colorScheme.onBackground)
 
                         Text(
 
@@ -142,7 +148,7 @@ fun SongPickerScreen(
 
                     IconButton(onClick = onNavigateBack) {
 
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = MaterialTheme.colorScheme.onBackground)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
 
                     }
 
@@ -162,7 +168,6 @@ fun SongPickerScreen(
 
                 },
 
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
 
             )
 
@@ -190,7 +195,7 @@ fun SongPickerScreen(
 
                 placeholder = { Text(stringResource(R.string.search_songs), color = MaterialTheme.colorScheme.outlineVariant) },
 
-                leadingIcon = { Icon(Icons.Default.Search, null, tint = MaterialTheme.colorScheme.outlineVariant) },
+                leadingIcon = { Icon(Icons.Default.Search, stringResource(R.string.action_search), tint = MaterialTheme.colorScheme.outlineVariant) },
 
                 colors = OutlinedTextFieldDefaults.colors(
 
@@ -210,7 +215,7 @@ fun SongPickerScreen(
 
                 ),
 
-                shape = RoundedCornerShape(12.dp),
+                shape = SDWShapes.Media,
 
                 singleLine = true
 
@@ -265,57 +270,40 @@ fun SongPickerScreen(
                             }
                         } else {
                         itemsIndexed(listOf(song), key = { _, s -> s.id }) { _, songNonNull ->
+                        val pickerItemMod = Modifier.animateItemPlacement()
                         val isSelected = selectedIds.contains(songNonNull.id)
                         val isAlreadyIn = existingSongIds.contains(songNonNull.id)
 
 
 
-                        Card(
-
-                            modifier = Modifier
-
+                        // [V8.115] 统一玻璃语言：Card -> glassSurface（选中走 accent 洗底，同主界面
+                        // 正在播放行的观感），已加入歌单的行整体降透明度，不再用一个灰底卡片区分。
+                        val pickInteraction = remember { MutableInteractionSource() }
+                        Column(
+                            modifier = pickerItemMod
                                 .fillMaxWidth()
-
-                                .padding(horizontal = 12.dp, vertical = 2.dp)
-
+                                .padding(horizontal = 10.dp, vertical = 2.dp)
+                                .alpha(if (isAlreadyIn) 0.5f else 1f)
+                                .glassSurface(
+                                    shape = SDWShapes.Row,
+                                    selected = isSelected,
+                                    fillBoost = 0f
+                                )
+                                .springPress(pickInteraction, pressedScale = 0.975f)
                                 .combinedClickable(
-
+                                    interactionSource = pickInteraction,
+                                    indication = null,
                                     onClick = {
-
                                         if (!isAlreadyIn) {
-
                                             selectedIds = if (isSelected) {
                                             selectedIds - songNonNull.id
                                             } else {
                                             selectedIds + songNonNull.id
                                             }
-
                                         }
-
                                     },
-
                                     onLongClick = { longPressSong = songNonNull }
-
-                                ),
-
-                            shape = RoundedCornerShape(8.dp),
-
-                            colors = CardDefaults.cardColors(
-
-                                containerColor = when {
-
-                                    isSelected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
-
-                                    isAlreadyIn -> MaterialTheme.colorScheme.surface.copy(alpha = 0.5f)
-
-                                    else -> MaterialTheme.colorScheme.surface
-
-                                }
-
-                            ),
-
-                            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
-
+                                )
                         ) {
 
                             Row(
@@ -334,7 +322,7 @@ fun SongPickerScreen(
 
                                         .size(24.dp)
 
-                                        .clip(RoundedCornerShape(6.dp))
+                                        .clip(SDWShapes.Thumb)
 
                                         .background(
 
@@ -381,14 +369,14 @@ fun SongPickerScreen(
                                 // Album art
 
                                 Box(
-                                    modifier = Modifier.size(44.dp).clip(RoundedCornerShape(6.dp)),
+                                    modifier = Modifier.size(44.dp).clip(SDWShapes.Thumb),
                                     contentAlignment = Alignment.Center
                                 ) {
                                     DefaultCoverImage(
                                         songTitle = songNonNull.title,
                                         songArtist = songNonNull.artist,
                                         modifier = Modifier.fillMaxSize(),
-                                        shape = RoundedCornerShape(6.dp)
+                                        shape = SDWShapes.Thumb
                                     )
                                     val painter = rememberAsyncImagePainter(
                                         model = remember(songNonNull.albumArtUri) {
@@ -433,7 +421,7 @@ fun SongPickerScreen(
 
                                     Text(
 
-                                        "${songNonNull.artist.ifBlank { "Unknown Artist" }} • ${songNonNull.album.ifBlank { stringResource(R.string.unknown_album) }}",
+                                        "${songNonNull.artist.ifBlank { stringResource(R.string.unknown_artist) }} • ${songNonNull.album.ifBlank { stringResource(R.string.unknown_album) }}",
 
                                         color = MaterialTheme.colorScheme.outlineVariant,
 

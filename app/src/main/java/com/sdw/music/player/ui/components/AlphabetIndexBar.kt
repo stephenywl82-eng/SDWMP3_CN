@@ -16,6 +16,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 
 import com.sdw.music.player.ui.theme.TextSecondary
@@ -72,7 +73,7 @@ fun AlphabetIndexBar(
             Box(
                 modifier = Modifier
                     .size(20.dp)
-                    .clip(RoundedCornerShape(2.dp))
+                    .clip(SDWShapes.Badge)
                     .background(if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.3f) else Color.Transparent)
                     .pointerInput(letter) {
                         detectTapGestures { onLetterTapped(letter) }

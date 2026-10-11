@@ -15,7 +15,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import com.sdw.music.player.MemoryManager
 import com.sdw.music.player.widget.MusicWidgetProvider
 import com.sdw.music.player.lyric.LyricRepository
@@ -45,6 +47,8 @@ sealed class PlayerIntent {
     data object DeleteConfirmed : PlayerIntent()
     data object DeleteCancelled : PlayerIntent()
     data class SaveLyrics(val lyrics: String) : PlayerIntent()
+    /** 【V8.244】按能量/调性自动流程排序当前队列（以当前曲为锚） */
+    data object ReorderQueueByFlow : PlayerIntent()
     /** 外部打开音频文件：从 URI 创建临时 Song 并播放 */
     data class PlayUri(val uri: android.net.Uri, val title: String = "") : PlayerIntent()
 }
@@ -67,7 +71,14 @@ data class PlayerState(
     val repeatMode: Int = Player.REPEAT_MODE_OFF,
     val showEqSheet: Boolean = false,
     val accentColor: Long = 0L,  // 0 = no cover color, PlayerScreen falls back to system primary
+    // 【V8.207】accentColor 是从哪张封面提的（提取成功或已确认提不到，都记为这首歌）。
+    // 交叉淡化交接后 UI 靠它判断"新歌主色到手了没有"：在那之前继续挂 B 轨预读色，
+    // 否则会先闪回 A 轨的旧主色、几百毫秒后再跳到 B 的色。
+    val accentColorSource: String? = null,
     val coverColors: List<Int> = emptyList(),  // 5色 for Edge灯 (List has value equality, IntArray had ref equality causing false recomposition)
+    // 【V8.187】上面这 5 档是从哪张封面提的。UI 侧靠它判断"新歌的调色板到手了没有"：
+    // 提取是异步的，切歌瞬间 coverUri 已变而 coverColors 还是上一首的旧值，没有它就分不清新旧。
+    val coverColorsSource: String? = null,
     val songCount: Int = 0,
     val songList: List<Song> = emptyList(),
     val queue: List<Song> = emptyList(),
@@ -93,7 +104,6 @@ class PlayerViewModel @Inject constructor(
 
     companion object {
         @Volatile var skipInitScan = false
-        private val accentColorRng = java.util.Random()
     }
 
     // === Hot flows: high-frequency updates that must NOT trigger full tree recomposition ===
@@ -129,32 +139,62 @@ class PlayerViewModel @Inject constructor(
     private val _state = MutableStateFlow(PlayerState())
     val state: StateFlow<PlayerState> = _state.asStateFlow()
 
+    /**
+     * V8.87 Kick off the WAV-cover heal pass and push the result into the UI state.
+     *
+     * Background only: the pass stats + parses at most one small ID3 chunk per WAV and
+     * caches the verdict on disk, so repeat launches are effectively free. If nothing was
+     * filled in the state is left untouched, so there is no gratuitous recomposition.
+     */
+    private fun launchWavCoverHeal() {
+        // Note: the constructor's `application` param is only visible in property
+        // initializers and init blocks, so a member function must go through getApplication().
+        val ctx = getApplication<Application>().applicationContext
+        viewModelScope.launch {
+            try {
+                val fixed = SongRepository.healWavMetadata(ctx)
+                if (fixed > 0) {
+                    val list = SongRepository.getSongs()
+                    android.util.Log.i("PlayerViewModel", "wavMetaHeal: $fixed filled, refreshing ${list.size} songs")
+                    _state.update { it.copy(songList = list) }
+                    // [V8.90] B: 同步内存旁路 —— currentSong / servicePlaylist 持的是 heal 之前的
+                    // 快照，通知栏 / MediaSession 投影 / 桌面小部件读的就是它们；不同步会出现
+                    // 「列表有封面、通知栏没有」。按 id 原地刷新，不动队列顺序。
+                    try {
+                        MusicService.instance?.refreshMetadata()
+                    } catch (e: Exception) {
+                        android.util.Log.e("PlayerViewModel", "wavMetaHeal: refreshMetadata failed", e)
+                    }
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("PlayerViewModel", "wavMetaHeal failed", e)
+            }
+        }
+    }
+
     init {
         android.util.Log.i("PlayerViewModel", "init: START")
         SongRepository.init(application)
 
-        // === FAST PATH: restore from cache synchronously ===
-        // Ensures UI has songs + cover before first frame, even after process death.
-        val cachedSongs = SongRepository.getSongs()
-        android.util.Log.i("PlayerViewModel", "init: FAST PATH cachedSongs.size=${cachedSongs.size}")
-        if (cachedSongs.isNotEmpty()) {
-            android.util.Log.i("PlayerViewModel", "init: ✓ FAST PATH restoring ${cachedSongs.size} songs from cache")
-            _state.update { it.copy(
-                songCount = cachedSongs.size, songList = cachedSongs,
-                scanStatus = "done:${cachedSongs.size}", scanProgress = 1f
-            ) }
-            android.util.Log.i("PlayerViewModel", "init: after _state.update, _state.value.songList.size=${_state.value.songList.size}")
-            syncRestoreOrAutoPlay(cachedSongs, "fast")
-        } else {
-            android.util.Log.w("PlayerViewModel", "init: ✗ FAST PATH empty cache, falling back to scan")
-            _state.update { it.copy(scanStatus = "loading", scanProgress = 0.05f) }
-        }
-
-        // === SLOW PATH: background rescan (skip when cache already loaded) ===
-        if (cachedSongs.isNotEmpty()) {
-            android.util.Log.i("PlayerViewModel", "init: SKIP SLOW PATH (${cachedSongs.size} cached)")
-        } else {
-            viewModelScope.launch {
+        // [V8.214] 缓存恢复已移出主线程：等 songsFlow 给出缓存（最多 5s）即走 FAST PATH；
+        // 超时/无缓存则退回 MediaStore 全量扫描（SLOW PATH）。全程不阻塞主线程 → 不再开屏「没有响应」。
+        viewModelScope.launch {
+            val cachedSongs = withTimeoutOrNull(5000) { SongRepository.songsFlow.first { it.isNotEmpty() } }
+                ?: SongRepository.getSongs()
+            android.util.Log.i("PlayerViewModel", "init: FAST PATH cachedSongs.size=${cachedSongs.size}")
+            if (cachedSongs.isNotEmpty()) {
+                android.util.Log.i("PlayerViewModel", "init: ✓ FAST PATH restoring ${cachedSongs.size} songs from cache")
+                _state.update { it.copy(
+                    songCount = cachedSongs.size, songList = cachedSongs,
+                    scanStatus = "done:${cachedSongs.size}", scanProgress = 1f
+                ) }
+                android.util.Log.i("PlayerViewModel", "init: after _state.update, _state.value.songList.size=${_state.value.songList.size}")
+                syncRestoreOrAutoPlay(cachedSongs, "fast")
+                // [V8.87] Cached library: fill in WAV covers the platform cannot report.
+                launchWavCoverHeal()
+            } else {
+                android.util.Log.w("PlayerViewModel", "init: ✗ FAST PATH empty cache, falling back to scan")
+                _state.update { it.copy(scanStatus = "loading", scanProgress = 0.05f) }
                 try {
                     android.util.Log.i("PlayerViewModel", "init: SLOW PATH rescan starting...")
                     // 【V7.92】Snapshot SongRepository BEFORE rescan, not _state (unreliable)
@@ -187,6 +227,8 @@ class PlayerViewModel @Inject constructor(
                         scanProgress = if (c > 0) 1f else 0f
                     ) }
                 }
+                // [V8.87] Freshly scanned library: fill in WAV covers.
+                launchWavCoverHeal()
             }
         }
 
@@ -268,22 +310,43 @@ class PlayerViewModel @Inject constructor(
                                 } catch (_: Exception) {}
                             }
                         }
-                        // 提取Cover强调色（优先级：内嵌封面 > 随机色）
+                        // V8.92 提取Cover强调色；提取不到就**显式回退主题色**（accentColor = 0L）。
+                        // 旧实现在 extractAccentColor 返回 null 时什么都不做，accentColor 会保留
+                        // 上一首的残留色 —— 而扫描器给每行都写了非空 albumArtUri（专辑未知时是
+                        // .../albumart/null 这种取不到图的死 URI），所以 coverUri 几乎恒非空，
+                        // randomAccentColor 分支永不触发，表现就是「无封面歌的强调色不跟主题」。
                         viewModelScope.launch {
-                            val coverUri = it.albumArtUri.takeIf { uri -> uri.isNotEmpty() }
-                            
+                            val coverUri = it.albumArtUri.takeIf { uri -> SongRepository.hasRealCover(uri) }
+                            var gotColor = false
                             if (coverUri != null) {
                                 val color = MemoryManager.extractAccentColor(application, coverUri, it.id)
                                 if (color != null) {
-                                    _state.update { s -> s.copy(accentColor = color.toLong() and 0xFFFFFFFFL) }
+                                    gotColor = true
+                                    _state.update { s -> s.copy(
+                                        accentColor = color.toLong() and 0xFFFFFFFFL,
+                                        accentColorSource = coverUri
+                                    ) }
                                     MusicWidgetProvider.updateAllWidgets(application)
                                 }
                                 val colors = MemoryManager.extractCoverColors(application, coverUri, it.id)
-                                if (colors != null) {
-                                    _state.update { s -> s.copy(coverColors = colors.toList()) }
-                                }
-                            } else {
-                                _state.update { s -> s.copy(accentColor = randomAccentColor()) }
+                                // 【V8.178】提取失败也清空：保留旧值会让 VU 表/边缘光带
+                                // 一直挂在上首歌的调色板上（用户看到的"颜色不跟歌"）。
+                                _state.update { s -> s.copy(
+                                    coverColors = colors?.toList() ?: emptyList(),
+                                    coverColorsSource = coverUri
+                                ) }
+                            }
+                            if (!gotColor) {
+                                // 0L = 交给 UI 侧取主题色（PlayerScreen 用全局 primary，
+                                // LyricFullscreenScreen 有同样的 0L 保护）
+                                // 【V8.207】accentColorSource 照样记成这首歌：UI 要的是
+                                // "这首歌算过了"，没算出颜色也是一种结果，不能让画面一直挂旧色。
+                                _state.update { s -> s.copy(
+                                    accentColor = 0L,
+                                    accentColorSource = coverUri,
+                                    coverColors = emptyList(),
+                                    coverColorsSource = null
+                                ) }
                             }
                         }
                     }
@@ -367,6 +430,9 @@ class PlayerViewModel @Inject constructor(
                     _state.update { it.copy(queue = intent.songs, songCount = intent.songs.size) }
                 }
             }
+            is PlayerIntent.ReorderQueueByFlow -> {
+                reorderQueueByFlow()
+            }
             is PlayerIntent.ToggleEqSheet -> {
                 _state.update { it.copy(showEqSheet = intent.show) }
             }
@@ -423,6 +489,38 @@ class PlayerViewModel @Inject constructor(
             }
             is PlayerIntent.SaveLyrics -> {
                 _state.update { it.copy(currentLyrics = intent.lyrics) }
+                // [V8.138] 保存内嵌歌词会整文件重写，媒体库封面索引随之失效；LyricRepository
+                // 已在我们前方把容器内封面重新抽回并写进仓库。这里把新封面同步到 UI 状态 +
+                // 通知栏 / 小部件，否则用户停在播放页会觉得「封面被删了，只剩 logo」。
+                viewModelScope.launch {
+                    try {
+                        val fresh = SongRepository.getSongs()
+                        val id = _state.value.currentSongId
+                        val song = fresh.find { it.id == id } ?: return@launch
+                        val art = song.albumArtUri
+                        if (art.isNotBlank() && art != _state.value.currentSongAlbumArt) {
+                            _state.update { it.copy(currentSongAlbumArt = art, songList = fresh) }
+                            try { MusicService.instance?.refreshMetadata() } catch (_: Exception) {}
+                            val coverUri = art.takeIf { SongRepository.hasRealCover(it) }
+                            if (coverUri != null) {
+                                val color = MemoryManager.extractAccentColor(getApplication(), coverUri, song.id)
+                                if (color != null) {
+                                    _state.update { s -> s.copy(
+                                        accentColor = color.toLong() and 0xFFFFFFFFL,
+                                        accentColorSource = coverUri
+                                    ) }
+                                }
+                                val colors = MemoryManager.extractCoverColors(getApplication(), coverUri, song.id)
+                                _state.update { s -> s.copy(
+                                    coverColors = colors?.toList() ?: emptyList(),
+                                    coverColorsSource = coverUri
+                                ) }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.w("PlayerViewModel", "SaveLyrics art refresh failed", e)
+                    }
+                }
             }
             is PlayerIntent.PlayUri -> {
                 val song = buildSongFromUri(intent.uri, intent.title)
@@ -436,6 +534,19 @@ class PlayerViewModel @Inject constructor(
     /**
      * 鍒锋柊姝屾洸鍒楄〃锛堜粠 MediaStore 閲嶆柊鎵弿锛?
      */
+
+    /** 【V8.244】自动流程排序：把当前播放队列按能量/调性重排（以当前曲为锚）。 */
+    fun reorderQueueByFlow() {
+        connection.reorderQueueByFlow()
+        // reorderQueueByFlow() 已把重排结果同步进 PlayerConnection.songList
+        val updated = connection.songList.value
+        if (updated.isNotEmpty()) {
+            _state.update { it.copy(queue = updated, songCount = updated.size) }
+        }
+    }
+
+    /** 【V8.250】Automix 预览：接下来怎么接（歌 + 理由），只读。 */
+    fun previewUpNext(count: Int = 3): List<Pair<Song, String>> = connection.previewUpNext(count)
 
     /** Scan a SAF folder URI for audio files */
     fun scanFolderUri(uri: android.net.Uri) {
@@ -597,15 +708,21 @@ class PlayerViewModel @Inject constructor(
             }
         }
         val displayTitle = if (songTitle.isNotBlank()) songTitle else uri.lastPathSegment ?: "Unknown"
+        // file:// URI 几乎都来自文件管理器 / 「用其他应用打开」，但播放器要的是真实文件系统路径：
+        // 把 "file:///sdcard/x.flac" 直接丢给 fopen 只会得到 File does not exist。
+        // content:// 那边能靠 contentResolver 查到 _data，这里只能退回 uri.path。
+        val resolvedPath = if (uri.scheme == "file") runCatching {
+            uri.path ?: uri.toString()
+        }.getOrDefault(uri.toString()) else uri.toString()
         return Song(
             id = -(System.nanoTime() and Long.MAX_VALUE), // 临时负 ID 避免与媒体库冲突
             title = displayTitle,
-            artist = songArtist.ifBlank { "Unknown Artist" },
-            album = songAlbum.ifBlank { "Unknown Album" },
+            artist = SongRepository.sanitizeArtist(songArtist),
+            album = SongRepository.sanitizeAlbum(songAlbum),
             duration = songDuration,
-            path = uri.toString(),
+            path = resolvedPath,
             albumArtUri = "",
-            filePath = uri.toString()
+            filePath = resolvedPath
         )
     }
 
@@ -640,13 +757,6 @@ class PlayerViewModel @Inject constructor(
                 } catch (_: Exception) {}
             }
         }
-    }
-
-    private fun randomAccentColor(): Long {
-        val hue = accentColorRng.nextFloat() * 360f
-        val saturation = 0.6f + accentColorRng.nextFloat() * 0.4f
-        val value = 0.7f + accentColorRng.nextFloat() * 0.3f
-        return android.graphics.Color.HSVToColor(floatArrayOf(hue, saturation, value)).toLong() and 0xFFFFFFFFL
     }
 
     override fun onCleared() {

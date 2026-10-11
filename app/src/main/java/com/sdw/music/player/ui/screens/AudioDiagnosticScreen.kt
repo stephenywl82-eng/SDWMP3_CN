@@ -1,6 +1,7 @@
 package com.sdw.music.player.ui.screens
 
 import android.media.AudioDeviceInfo
+import com.sdw.music.player.ui.components.SDWTopBar
 import android.media.AudioFormat
 import android.media.AudioManager
 import android.media.MediaExtractor
@@ -8,6 +9,7 @@ import android.util.Log
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -20,16 +22,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import com.sdw.music.player.MusicService
 import com.sdw.music.player.OboeDirectPlayer
 import com.sdw.music.player.R
 import com.sdw.music.player.ui.theme.*
+import com.sdw.music.player.ui.components.glassSurface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -80,9 +87,22 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
     var dacStats by remember { mutableStateOf("") }
     var dacSupportedRates by remember { mutableStateOf("") }
 
+    // 【V8.209】Signal Path 与输出电平的遥测全部下沉到叶子组件（SignalPathCard /
+    // FreqBars / LevelMonitorCard 等）。原来这些值挂在页面级 State 上，一次刷新就把整页
+    // LazyColumn 重组一遍 —— 12.5Hz 的频响条看着「卡卡的」就是这么来的。现在：
+    //   · 波形/条形：逐帧从 native 读（进 TwCanvas 内部数组，不进 State），0 重组、60fps；
+    //   · 数字读数：单独 10Hz 更新，只有那一行 Text 重组；
+    //   · DSP 点阵 / Clip：250ms，变化本来就慢。
+
     // ── Live SharingMode + Output Device polling ──
     // Initial null → LaunchedEffect fills immediately on first poll
     var isExclusiveLive by remember { mutableStateOf<Boolean?>(null) }
+    // [V8.132] Physical route: is the active output Bluetooth (A2DP/SCO)?
+    // The sharing-mode label below only knows about the AAudio stream; BT also runs
+    // through the Oboe direct path and AAudio happily grants MMAP Exclusive there, so
+    // the page used to claim "Oboe Exclusive" while the audio was BT-re-encoded.
+    // BT can never be bit-perfect, so the route gates every "exclusive" label.
+    var btActive by remember { mutableStateOf(false) }
     var liveOutputDeviceInfo by remember { mutableStateOf<AudioDeviceInfo?>(null) }
     var liveOutputDeviceLabel by remember { mutableStateOf("") }
     var trackFlagsHex by remember { mutableStateOf("—") }
@@ -124,9 +144,16 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                 else if (!curPath.isNullOrEmpty()) withContext(Dispatchers.IO) { extractSampleRateFromFile(curPath) }
                 else 0
             }
-            val dev = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.firstOrNull()
+            val outDevs = audioManager?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            val dev = outDevs?.firstOrNull()
             liveOutputDeviceInfo = dev
             liveOutputDeviceLabel = getDeviceLabel(dev)
+            // [V8.132] scan the full output list (firstOrNull can be the builtin speaker
+            // while BT is the real route); any A2DP/SCO sink means audio goes over BT.
+            btActive = outDevs?.any {
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+                it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
+            } == true
 
             // V3.3.4: USB DAC exclusive live params
             isUsbDacMode = try { com.sdw.music.player.core.audio.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
@@ -156,7 +183,9 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     trackFlagsHex = "N/A"
                     trackFlagsLabel = context.getString(R.string.diag_usb_direct_write)
                 } else {
-                    val flags = fetchTrackFlags(liveOboe)
+                    // 【V8.209】dumpsys 是几十~几百毫秒的阻塞 IO，原来直接在 LaunchedEffect
+                    // （= 主线程）里跑，每 10s 卡一帧 —— 「界面卡卡的」有一半是它。挪到 IO 线程。
+                    val flags = withContext(Dispatchers.IO) { fetchTrackFlags(liveOboe) }
                     trackFlagsHex = flags.first
                     trackFlagsLabel = flags.second
                 }
@@ -165,6 +194,9 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
             delay(1000L)
         }
     }
+
+    // 【V8.209】上面那条 1000ms 主循环保留（.async 检测类），但频响/电平不再由它或任何
+    // 页面级 State 驱动 —— 见下方 「Signal Path」注释：整页重组的代价远大于读数本身。
 
     // Resampling status (uses live Exclusive state; null → assume non-exclusive)
     val effectiveDeviceRate = when {
@@ -179,14 +211,13 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.title_audio_diagnostic), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium) },
+            SDWTopBar(
+                title = { Text(stringResource(R.string.title_audio_diagnostic), color = MaterialTheme.colorScheme.onBackground) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = MaterialTheme.colorScheme.onBackground)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
         },
         containerColor = MaterialTheme.colorScheme.background
@@ -201,15 +232,19 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                 val (statusText, statusColor, statusIcon) = when {
                     isUsbDacMode && bitPerfect -> Triple("Bit-Perfect · USB DAC Exclusive", AccentGreen, Icons.Default.CheckCircle)
                     isUsbDacMode -> Triple("USB DAC Exclusive · Direct Write", AccentGreen, Icons.Default.Usb)
-                    !isOboeMode -> Triple(stringResource(R.string.diag_exoplayer_mode), Color(0xFFFF9800), Icons.Default.MusicNote)
+                    !isOboeMode -> Triple(stringResource(R.string.diag_engine_idle), Color(0xFFFF9800), Icons.Default.MusicNote)
+                    // [V8.132] BT route wins over the sharing-mode badge: A2DP re-encodes,
+                    // so an MMAP exclusive lock must never be shown as bit-perfect/exclusive.
+                    btActive -> Triple("Bluetooth · A2DP Re-encode", Color(0xFFFF9800), Icons.Default.Bluetooth)
                     isExclusiveLive == true -> Triple("Oboe Exclusive · MMAP Direct", AccentGreen, Icons.Default.CheckCircle)
                     isOboeMode -> Triple("AAudio Shared · System Mixer In Path", Color(0xFFFF9800), Icons.Default.Warning)
                     else -> Triple(stringResource(R.string.diag_detecting), MaterialTheme.colorScheme.onSurfaceVariant, Icons.Default.Info)
                 }
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = statusColor.copy(alpha = 0.12f))
+                // [V8.115] 统一玻璃语言：状态卡用 status 色做 accent 洗底（保留原语义色）。
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .glassSurface(shape = SDWShapes.Row, accent = statusColor, selected = true, fillBoost = 0f)
                 ) {
                     Row(modifier = Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(statusIcon, null, tint = statusColor, modifier = Modifier.size(28.dp))
@@ -317,16 +352,14 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     // channelMasks is more reliable than channelCounts on some HALs
                     val chsMasks = devInfo.channelMasks.joinToString(", ") { decodeChannelMask(it) }
                         .ifEmpty { "—" }
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    Column(
+                        modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)
                     ) {
                         Column(modifier = Modifier.padding(14.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Default.Settings, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("DAC Capabilities", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                Text(stringResource(R.string.diag_dac_capabilities), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                             }
                             Spacer(Modifier.height(6.dp))
                             CapRow("Sample Rates", rates)
@@ -345,16 +378,14 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     SectionTitle(stringResource(R.string.diag_usb_exclusive_transport))
                 }
                 item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    Column(
+                        modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)
                     ) {
                         Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Icon(Icons.Default.Usb, null, tint = AccentGreen, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("USB Host Exclusive", color = AccentGreen, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                                Text(stringResource(R.string.diag_usb_host_exclusive), color = AccentGreen, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                                 Spacer(Modifier.weight(1f))
                                 Text(dacName, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                             }
@@ -400,6 +431,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     targetValue = when {
                         isUsbDacMode -> AccentGreen
                         !isOboeMode -> MaterialTheme.colorScheme.onSurfaceVariant
+                        btActive -> MaterialTheme.colorScheme.primary   // [V8.132] BT route
                         isExclusiveLive == null -> MaterialTheme.colorScheme.onSurfaceVariant
                         isExclusiveLive == true -> AccentGreen
                         else -> Color(0xFFFF9800)
@@ -409,14 +441,13 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                 val dotLabel = when {
                     isUsbDacMode -> "CLAIMED"
                     !isOboeMode -> "Inactive"
+                    btActive -> "A2DP"          // [V8.132] not "EXCLUSIVE" — BT re-encodes
                     isExclusiveLive == null -> "—"
                     isExclusiveLive == true -> "EXCLUSIVE"
                     else -> "SHARED"
                 }
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                Column(
+                    modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)
                 ) {
                     Row(
                         modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -425,7 +456,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                         Box(
                             modifier = Modifier
                                 .size(12.dp)
-                                .clip(RoundedCornerShape(6.dp))
+                                .clip(SDWShapes.Thumb)
                                 .drawWithContent {
                                     drawCircle(dotColor)
                                 }
@@ -454,13 +485,16 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
             item {
                 val modeLabel = when {
                     isUsbDacMode -> "USB DAC Direct"
+                    // [V8.132] route-first: BT is its own label; never "Oboe Exclusive".
+                    btActive && isOboeMode -> "Bluetooth A2DP"
                     isExclusiveLive == true -> "Oboe Exclusive"
                     isExclusiveLive == null -> stringResource(R.string.diag_detecting)
                     isOboeMode -> "AAudio Shared"
-                    else -> "ExoPlayer"
+                    else -> stringResource(R.string.diag_engine_idle)
                 }
                 val modeColor = when {
                     isUsbDacMode -> AccentGreen
+                    btActive && isOboeMode -> MaterialTheme.colorScheme.primary
                     isExclusiveLive == true -> AccentGreen
                     isExclusiveLive == null -> MaterialTheme.colorScheme.onSurfaceVariant
                     isOboeMode -> MaterialTheme.colorScheme.primary
@@ -472,6 +506,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     value = modeLabel,
                     sublabel = when {
                         isUsbDacMode -> stringResource(R.string.diag_usb_direct_write_desc)
+                        btActive && isOboeMode -> "Audio routed over Bluetooth (A2DP) · re-encoded by BT codec, not bit-perfect"
                         isExclusiveLive == true -> stringResource(R.string.diag_exclusive_desc)
                         isExclusiveLive == null -> stringResource(R.string.diag_polling)
                         else -> stringResource(R.string.diag_standard_pipeline)
@@ -479,6 +514,21 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     accent = modeColor
                 )
             }
+
+            // ── Signal Path [V8.124] ──
+            item { Spacer(Modifier.height(4.dp)) }
+            item { SectionTitle("Signal Path") }
+            item { SignalPathCard(oboePlayer) }
+
+            // ── 【V8.210】响度归一化 ──
+            item { Spacer(Modifier.height(4.dp)) }
+            item { SectionTitle(stringResource(R.string.diag_loudness_section)) }
+            item { LoudnessNormCard() }
+
+            // ── 【V8.209】输出电平实时监控 ──
+            item { Spacer(Modifier.height(4.dp)) }
+            item { SectionTitle(stringResource(R.string.diag_level_section)) }
+            item { LevelMonitorCard() }
 
             // ── AudioFlinger Track Flags ──
             item {
@@ -504,10 +554,8 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     SectionTitle("Audio Focus Events")
                 }
                 item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    Column(
+                        modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)
                     ) {
                         Column(modifier = Modifier.padding(12.dp)) {
                             focusLog.take(8).forEach { event ->
@@ -554,10 +602,8 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     SectionTitle("Resampling Analysis")
                 }
                 item {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        shape = RoundedCornerShape(12.dp),
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                    Column(
+                        modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)
                     ) {
                         Column(modifier = Modifier.padding(16.dp)) {
                             if (bitPerfect) {
@@ -574,6 +620,26 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                                 Spacer(Modifier.height(4.dp))
                                 Text(
                                     stringResource(R.string.diag_usb_direct_eq_desc, sourceRate, dacStreamRate, dacStreamBits),
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    fontSize = 12.sp,
+                                    lineHeight = 18.sp
+                                )
+                            } else if (btActive && isOboeMode) {
+                                // [V8.132] BT: the Oboe stream can hold MMAP Exclusive, but the
+                                // signal is re-encoded by the BT codec downstream of the app.
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.Bluetooth, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "Bluetooth A2DP · Codec Re-encode",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Medium
+                                    )
+                                }
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    "Source ($sourceRate Hz) → Oboe stream → Bluetooth A2DP codec → Device. The Oboe stream may still hold an MMAP exclusive lock, but the BT codec re-encodes the signal — not bit-perfect.",
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     fontSize = 12.sp,
                                     lineHeight = 18.sp
@@ -658,10 +724,8 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                 SectionTitle(stringResource(R.string.diag_about_page))
             }
             item {
-                Card(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                Column(
+                    modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)
                 ) {
                     Column(modifier = Modifier.padding(16.dp)) {
                         Text(
@@ -692,6 +756,470 @@ private data class FocusEvent(val time: String, val event: String)
 
 // ── Private utilities ──
 
+// ═══════════════════════════════════════════════════════════════════
+// 【V8.208】输出电平监控
+//
+// 线性幅度（0..1 FS）→ dBFS 的三件套。之所以要在 UI 侧换算而不是让 native 直接给 dB：
+// dB 是对数，0 附近会炸到 -inf，所以 native 只留线性真值，显示上的取舍交给这里。
+// ── 区间 ── -60…0 dBFS 映射到条形 0…1：低于 -60dB 的部分压到看不见，因为那是底噪，
+// 放进去只会让"有声/无声"的边界看起来糊。
+// ═══════════════════════════════════════════════════════════════════
+private fun dbfsOf(v: Float): Float =
+    if (v > 1e-6f) 20f * kotlin.math.log10(v) else Float.NEGATIVE_INFINITY
+
+private fun fmtDb(v: Float): String =
+    if (v <= 1e-6f) "-∞" else String.format(Locale.US, "%.1f", dbfsOf(v))
+
+private fun dbFrac(v: Float): Float =
+    if (v <= 1e-6f) 0f else ((dbfsOf(v) + 60f) / 60f).coerceIn(0f, 1f)
+
+private fun levelColor(v: Float): Color = when {
+    v >= 0.999f -> AccentRed      // 已经到顶，随时会削波
+    v >= 0.70f -> Color(0xFFFFB300)
+    else -> AccentGreen
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// 【V8.209】Signal Path 卡片：自成叶子的重组单元
+//
+// 卡内的三类内容更新频率差两个数量级，原来共用一个 State 只能用最慢的那个（80ms）
+// 或者最快的那个（把整页拖垮）。现在按「谁读谁重组」拆开：
+//   · DSP 点阵 / Clip 计数 → 250ms，变化本来就慢；
+//   · 频响条 / 电平条 → 逐帧（见 FreqBars、LevelBarLine），走 Canvas 内部的普通数组，
+//     完全不进快照，既没有重组也没有 delay(80) 那种台阶感。
+// ═══════════════════════════════════════════════════════════════════
+@Composable
+private fun SignalPathCard(oboe: OboeDirectPlayer?) {
+    var dspChain by remember { mutableStateOf(IntArray(16)) }
+    var clipCount by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            val liveOboe = MusicService.instance?.getOboePlayer()
+            dspChain = liveOboe?.getDspChainState() ?: IntArray(16)
+            clipCount = liveOboe?.getClipCount() ?: 0
+            delay(250L)
+        }
+    }
+    Column(modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.GraphicEq, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.diag_dsp_chain), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
+            Spacer(Modifier.height(10.dp))
+            // [V8.129] 只列出本 App 真正具备、且有开关的 DSP 模块（PreGain/DC/Master/
+            // Limiter/SoftClip/SinkEQ 是固定内部级，不算「功能」，不放这里）。
+            // 【V8.176】AGC 在第 6 位，是活的 —— 之前注释说它是死代码是错的。
+            val stages = listOf(
+                "AutoEQ" to 2, "MSEB" to 3, "EQ5" to 4, "AGC" to 6, "Loud" to 7,
+                "M/S" to 8, "Xfeed" to 9, "Trans" to 10, "Comp" to 11, "Dither" to 14
+            )
+            for (chunk in stages.chunked(5)) {
+                Row(modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
+                    for ((name, idx) in chunk) {
+                        val on = dspChain.getOrElse(idx) { 0 } == 1
+                        val dotColor = if (on) AccentGreen else MaterialTheme.colorScheme.onSurfaceVariant
+                        Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier.size(7.dp).clip(SDWShapes.Badge)
+                                    .drawWithContent { drawCircle(dotColor) }
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                name,
+                                color = if (on) MaterialTheme.colorScheme.onBackground else MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 9.sp, fontFamily = FontFamily.Monospace, maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+            if (dspChain.all { it == 0 }) {
+                Spacer(Modifier.height(6.dp))
+                Text(stringResource(R.string.diag_raw_passthrough), color = Color(0xFFFF9800), fontSize = 11.sp)
+            }
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.ShowChart, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.diag_realtime_response), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
+            Spacer(Modifier.height(8.dp))
+            FreqBars()
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    if (clipCount > 0) Icons.Default.Warning else Icons.Default.CheckCircle,
+                    null,
+                    tint = if (clipCount > 0) AccentRed else AccentGreen,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.diag_clip_detection), color = MaterialTheme.colorScheme.onBackground, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    "$clipCount",
+                    color = if (clipCount > 0) AccentRed else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace
+                )
+                if (clipCount > 0) {
+                    Spacer(Modifier.width(8.dp))
+                    TextButton(onClick = { oboe?.resetClipStats(); clipCount = 0 }) {
+                        Text(stringResource(R.string.diag_action_reset), color = MaterialTheme.colorScheme.primary, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 逐帧频响条。
+ *
+ * 关键点：数据是从 native **直接读进普通 FloatArray** 的（bulk 接口，一次 JNI、不分配），
+ * 既不进 Compose 快照也不触发重组 —— 重绘只由 `tick` 这个时间戳驱动，读它的地方只有
+ * 这一个小组件。旧实现是 State + delay(80)：12.5Hz 的台阶 + 整页重组，看着就「卡卡的」。
+ */
+@Composable
+private fun FreqBars() {
+    val buf = remember { FloatArray(25) }
+    val smoothed = remember { FloatArray(8) }
+    var tick by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) { withFrameMillis { tick = it } }
+    }
+    @Suppress("UNUSED_VARIABLE") val frame = tick     // 读进组合作用域 → 每帧重组这一个 Canvas
+    Canvas(modifier = Modifier.fillMaxWidth().height(64.dp)) {
+        MusicService.instance?.getOboePlayer()?.readBandLevels(buf)
+        val gap = size.width / 8f
+        for (i in 0 until 8) {
+            // 每段取 L/R 中较大的那一条：这是「有多少内容」而不是「偏左还是偏右」
+            val target = maxOf(buf[i], buf[8 + i]).coerceIn(0f, 1f)
+            // 起快落慢的一阶平滑：60fps 下既跟得上鼓点，又不会因为帧间抖动而刺眼
+            val s = smoothed[i]
+            val k = if (target > s) 0.45f else 0.16f
+            smoothed[i] = s + (target - s) * k
+            val barH = (size.height * smoothed[i].coerceIn(0f, 1f)).coerceAtLeast(2f)
+            drawRoundRect(
+                color = AccentGreen,
+                topLeft = Offset(i * gap + gap * 0.2f, size.height - barH),
+                size = Size(gap * 0.6f, barH),
+                cornerRadius = CornerRadius(2f, 2f)
+            )
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 【V8.210】响度归一化参数
+//
+// 这套参数有四个值，分开列是故意的 —— 它们本来就该相等，不等就说明某一环断了：
+//   元数据  = 文件里读到的 ReplayGain / LUFS（读不到就是「无元数据」，增益恒 0）
+//   计算值  = LoudnessNormalizer.gainFor() 按目标档位折算出来的 dB
+//   下发值  = MusicService 实际推给链路的那个 dB
+//   生效值  = native 里 g_normGain 的真实读数（Oboe 播放器重建后会回到 1.0，
+//             只有 refreshNormalization() 补发后才对得上 —— 这个差就是「切歌后音量不对」的根）
+// ═══════════════════════════════════════════════════════════════════
+private data class NormInfo(
+    val title: String,
+    val enabled: Boolean,
+    val mode: String,
+    val targetLufs: Float,
+    val tagText: String,
+    val computedDb: Float,
+    val appliedDb: Float,
+    val activeDb: Float,
+    val link: String,
+    /** 【V8.239】false = 当前链路无法回读生效值（DAC 独占走 UsbAudioDriver，没有回读 JNI），
+     *  此时不该拿 activeDb 参与"三值对账"，否则是一个永远亮着的假告警。 */
+    val activeKnown: Boolean = true
+)
+
+private fun readNormInfo(context: android.content.Context, path: String?): NormInfo {
+    val cfg = com.sdw.music.player.core.audio.LoudnessNormalizer.load(context)
+    if (path.isNullOrBlank()) {
+        return NormInfo("—", cfg.enabled, cfg.mode.name, cfg.targetLufs, context.getString(R.string.diag_norm_no_track), 0f, 0f, 0f, "—")
+    }
+    val tag = com.sdw.music.player.core.audio.LoudnessNormalizer.debugTag(path)
+    val bits = mutableListOf<String>()
+    tag?.trackGainDb?.let { bits.add("track ${"%.1f".format(it)}dB") }
+    tag?.albumGainDb?.let { bits.add("album ${"%.1f".format(it)}dB") }
+    tag?.trackPeak?.let { bits.add("peak ${"%.3f".format(it)}") }
+    tag?.lufs?.let { bits.add("LUFS ${"%.1f".format(it)}") }
+    val computed = com.sdw.music.player.core.audio.LoudnessNormalizer.gainFor(path, cfg)
+    val svc = com.sdw.music.player.MusicService.instance
+    val dac = try { com.sdw.music.player.core.audio.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
+    return NormInfo(
+        title = com.sdw.music.player.MusicService.currentSong?.title ?: path.substringAfterLast('/'),
+        enabled = cfg.enabled,
+        mode = when (cfg.mode) {
+            com.sdw.music.player.core.audio.LoudnessNormalizer.Mode.TRACK -> context.getString(R.string.settings_loudness_mode_track)
+            com.sdw.music.player.core.audio.LoudnessNormalizer.Mode.ALBUM -> context.getString(R.string.settings_loudness_mode_album)
+            else -> context.getString(R.string.settings_loudness_mode_auto)
+        },
+        targetLufs = cfg.targetLufs,
+        tagText = if (bits.isEmpty()) context.getString(R.string.diag_norm_no_metadata) else bits.joinToString(" · "),
+        computedDb = computed,
+        appliedDb = svc?.currentNormalizationDb() ?: 0f,
+        activeDb = svc?.getOboePlayer()?.getNormalizationGainDb() ?: 0f,
+        link = if (dac) context.getString(R.string.diag_norm_link_dac) else "Oboe",
+        activeKnown = !dac    // DAC 独占：增益走 UsbAudioDriver，Oboe 侧读不到 → 不参与对账
+    )
+}
+
+@Composable
+private fun LoudnessNormCard() {
+    val context = LocalContext.current
+    var info by remember { mutableStateOf<NormInfo?>(null) }
+    LaunchedEffect(Unit) {
+        var lastPath: String? = null
+        var tick = 0
+        while (true) {
+            val song = MusicService.currentSong
+            val path = song?.filePath?.takeIf { it.isNotBlank() }
+                ?: song?.path?.takeIf { it.startsWith("/") }
+            val dac = try { com.sdw.music.player.core.audio.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
+            if (path != lastPath) {
+                lastPath = path
+                tick = 0
+                // 读文件标签是 IO —— 挪到 IO 线程
+                info = withContext(Dispatchers.IO) { readNormInfo(context, path) }
+            } else if (tick++ % 2 == 0) {
+                // 【V8.239】同一首歌也要周期性重算「计算增益」—— 之前只在换歌时算一次，
+                // 于是：① 后台扫描给当前曲补上响度 → refreshNormalization 重发，applied 变了
+                // 而 computed 停在旧值（往往是 0.00）→ 三值长期不一致且不自愈；
+                // ② 用户在设置页改目标档位/开关 → 同理。读标签仍在 IO 线程，2 秒一次可忽略。
+                val fresh = withContext(Dispatchers.IO) { readNormInfo(context, path) }
+                info = info?.copy(
+                    enabled = fresh.enabled,
+                    mode = fresh.mode,
+                    targetLufs = fresh.targetLufs,
+                    tagText = fresh.tagText,
+                    computedDb = fresh.computedDb,
+                    appliedDb = MusicService.instance?.currentNormalizationDb() ?: 0f,
+                    activeDb = if (dac) 0f else (MusicService.instance?.getOboePlayer()?.getNormalizationGainDb() ?: 0f),
+                    activeKnown = !dac
+                )
+            } else {
+                // 同一首歌也要对账：播放器重建会把 native 增益打回 1.0，补发后就又对上了
+                info = info?.copy(
+                    appliedDb = MusicService.instance?.currentNormalizationDb() ?: 0f,
+                    activeDb = if (dac) 0f else (MusicService.instance?.getOboePlayer()?.getNormalizationGainDb() ?: 0f),
+                    activeKnown = !dac
+                )
+            }
+            // 【V8.239】不一致时留一条日志：比让用户截图念数字更容易定位是哪一环断的
+            info?.let { s ->
+                if (s.enabled && s.activeKnown &&
+                    (kotlin.math.abs(s.computedDb - s.appliedDb) > 0.01f ||
+                        kotlin.math.abs(s.appliedDb - s.activeDb) > 0.01f)
+                ) {
+                    android.util.Log.w("NormDiag",
+                        "mismatch computed=%.2f applied=%.2f active=%.2f (%s)".format(
+                            s.computedDb, s.appliedDb, s.activeDb, s.title))
+                }
+            }
+            delay(1000L)
+        }
+    }
+    val i = info
+    Column(modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.VolumeUp, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.settings_loudness_norm), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.weight(1f))
+                Text(
+                    if (i?.enabled == true) stringResource(R.string.diag_norm_on) else stringResource(R.string.diag_norm_off),
+                    color = if (i?.enabled == true) AccentGreen else MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 11.sp, fontFamily = FontFamily.Monospace
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            if (i == null) {
+                Text(stringResource(R.string.diag_norm_reading), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+            } else {
+                CapRow(stringResource(R.string.diag_norm_cur_track), i.title)
+                CapRow(stringResource(R.string.settings_loudness_mode), i.mode)
+                CapRow(stringResource(R.string.settings_loudness_target),
+                    if (i.targetLufs == com.sdw.music.player.core.audio.LoudnessNormalizer.TARGET_AUTO)
+                        stringResource(R.string.diag_auto_lufs).format(
+                            com.sdw.music.player.core.audio.LoudnessNormalizer.effectiveTarget(
+                                com.sdw.music.player.core.audio.LoudnessNormalizer.load(context)))
+                    else "%.1f LUFS".format(i.targetLufs))
+                CapRow(stringResource(R.string.diag_norm_metadata), i.tagText)
+                CapRow(stringResource(R.string.diag_norm_computed), "${"%.2f".format(i.computedDb)} dB")
+                CapRow(stringResource(R.string.diag_norm_applied), "${"%.2f".format(i.appliedDb)} dB")
+                CapRow(stringResource(R.string.diag_norm_active),
+                    if (i.activeKnown) "${"%.2f".format(i.activeDb)} dB"
+                    else stringResource(R.string.diag_norm_na))
+                CapRow(stringResource(R.string.diag_norm_link), i.link)
+                // 对账提示：三个数不一致 = 某一环没接上，比让用户自己比数字有用。
+                // 【V8.239】DAC 独占读不到生效值，只对比「计算 vs 已下发」，不再假告警。
+                val mismatch = kotlin.math.abs(i.computedDb - i.appliedDb) > 0.01f ||
+                    (i.activeKnown && kotlin.math.abs(i.appliedDb - i.activeDb) > 0.01f)
+                if (i.enabled && mismatch) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        stringResource(R.string.diag_norm_mismatch),
+                        color = Color(0xFFFF9800), fontSize = 11.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 【V8.208 / V8.209】输出电平监控
+// ═══════════════════════════════════════════════════════════════════
+@Composable
+private fun LevelMonitorCard() {
+    Column(modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)) {
+        Column(modifier = Modifier.padding(14.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Speed, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text(stringResource(R.string.diag_level_realtime), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+            }
+            Spacer(Modifier.height(10.dp))
+            LevelBarLine("L", 0)
+            Spacer(Modifier.height(6.dp))
+            LevelBarLine("R", 1)
+            Spacer(Modifier.height(8.dp))
+            LevelReadout()
+            Spacer(Modifier.height(12.dp))
+            Text(
+                stringResource(R.string.diag_level_history),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, fontFamily = FontFamily.Monospace
+            )
+            Spacer(Modifier.height(4.dp))
+            LevelHistory()
+            Spacer(Modifier.height(8.dp))
+            Text(
+                stringResource(R.string.diag_level_tap_point),
+                color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp
+            )
+        }
+    }
+}
+
+/**
+ * 单声道电平条：填充 = 瞬时 RMS，游标 = native 给的 1.5s 衰减峰值。
+ * 和 [FreqBars] 同样的套路 —— 数据不进 State，因此这组条形的动态更新不引起任何重组。
+ */
+@Composable
+private fun LevelBarLine(label: String, channel: Int) {
+    val buf = remember { FloatArray(25) }
+    var tick by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) { withFrameMillis { tick = it } }
+    }
+    @Suppress("UNUSED_VARIABLE") val frame = tick
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
+            fontFamily = FontFamily.Monospace, modifier = Modifier.width(14.dp)
+        )
+        Canvas(modifier = Modifier.weight(1f).height(9.dp)) {
+            MusicService.instance?.getOboePlayer()?.readBandLevels(buf)
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.07f), topLeft = Offset.Zero,
+                size = size, cornerRadius = CornerRadius(3f, 3f)
+            )
+            val rms = buf[21 + channel]
+            val w = size.width * dbFrac(rms)
+            if (w > 1f) {
+                drawRoundRect(
+                    color = levelColor(rms), topLeft = Offset.Zero,
+                    size = Size(w, size.height), cornerRadius = CornerRadius(3f, 3f)
+                )
+            }
+            val px = size.width * dbFrac(buf[23 + channel])
+            if (px > 1f) {
+                drawRoundRect(
+                    color = Color(0xFFFF3D3D), topLeft = Offset((px - 1.5f).coerceAtLeast(0f), 0f),
+                    size = Size(3f, size.height), cornerRadius = CornerRadius(1.5f, 1.5f)
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 数字读数单独 10Hz 更新 —— 文字按 60fps 刷是没法读的，而且每次都要重排一次文本。
+ * 只有这一行会重组。
+ */
+@Composable
+private fun LevelReadout() {
+    var rmsL by remember { mutableFloatStateOf(0f) }
+    var rmsR by remember { mutableFloatStateOf(0f) }
+    var peakL by remember { mutableFloatStateOf(0f) }
+    var peakR by remember { mutableFloatStateOf(0f) }
+    LaunchedEffect(Unit) {
+        val b = FloatArray(25)
+        while (true) {
+            MusicService.instance?.getOboePlayer()?.readBandLevels(b)
+            rmsL = b[21]; rmsR = b[22]; peakL = b[23]; peakR = b[24]
+            delay(100L)
+        }
+    }
+    val over = maxOf(peakL, peakR) >= 0.999f
+    Text(
+        stringResource(
+            R.string.diag_level_readout,
+            fmtDb(rmsL), fmtDb(peakL), fmtDb(rmsR), fmtDb(peakR)
+        ),
+        color = if (over) AccentRed else MaterialTheme.colorScheme.onSurfaceVariant,
+        fontSize = 11.sp, fontFamily = FontFamily.Monospace, lineHeight = 15.sp
+    )
+}
+
+/** 24 秒电平滚动历史：200ms 采样写环形数组，Canvas 逐帧重绘。 */
+@Composable
+private fun LevelHistory() {
+    val hist = remember { FloatArray(120) }
+    val head = remember { intArrayOf(0) }
+    var tick by remember { mutableLongStateOf(0L) }
+    // 采样：200ms 一点，写环形数组（普通数组，不触发重组）
+    LaunchedEffect(Unit) {
+        val b = FloatArray(25)
+        while (true) {
+            MusicService.instance?.getOboePlayer()?.readBandLevels(b)
+            hist[head[0]] = maxOf(b[21], b[22])
+            head[0] = (head[0] + 1) % hist.size
+            delay(200L)
+        }
+    }
+    LaunchedEffect(Unit) {
+        while (true) { withFrameMillis { tick = it } }
+    }
+    @Suppress("UNUSED_VARIABLE") val frame = tick
+    Canvas(modifier = Modifier.fillMaxWidth().height(44.dp)) {
+        val bw = size.width / hist.size
+        val refY = size.height * (1f - dbFrac(0.5f))       // -6 dBFS 参考线
+        drawRoundRect(
+            color = Color.White.copy(alpha = 0.18f), topLeft = Offset(0f, refY),
+            size = Size(size.width, 1f), cornerRadius = CornerRadius(0.5f, 0.5f)
+        )
+        val start = head[0]
+        for (i in 0 until hist.size) {
+            val v = hist[(start + i) % hist.size]
+            if (v <= 1e-6f) continue
+            val hgt = (size.height * dbFrac(v)).coerceAtLeast(1f)
+            drawRoundRect(
+                color = levelColor(v),
+                topLeft = Offset(i * bw, size.height - hgt),
+                size = Size((bw * 0.7f).coerceAtLeast(1f), hgt),
+                cornerRadius = CornerRadius(1f, 1f)
+            )
+        }
+    }
+}
+
 @Composable
 private fun SectionTitle(title: String) {
     Text(
@@ -719,10 +1247,8 @@ private fun DiagnosticRow(
     sublabel: String,
     accent: Color
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(10.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+    Column(
+        modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)
     ) {
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
@@ -888,20 +1414,26 @@ private fun inferFromOboeMode(oboePlayer: Any?): Pair<String, String> {
 
 private fun extractSampleRateFromFile(path: String): Int {
     return try {
-        val extractor = MediaExtractor()
-        extractor.setDataSource(path)
-        var rate = 0
-        for (i in 0 until extractor.trackCount) {
-            val format = extractor.getTrackFormat(i)
-            val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
-            if (mime.startsWith("audio/")) {
-                rate = format.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
-                android.util.Log.d("AudioDiagnostic", "extractSampleRate: path=${path.takeLast(30)} mime=$mime rate=$rate")
-                break
+        // 【V8.429】收敛到单线程闸门（诊断页与播放页会同时探测；native abort 详见 MediaProbe）
+        com.sdw.music.player.core.audio.MediaProbe.onProbeThread {
+            val extractor = MediaExtractor()
+            try {
+                extractor.setDataSource(path)
+                var rate = 0
+                for (i in 0 until extractor.trackCount) {
+                    val format = extractor.getTrackFormat(i)
+                    val mime = format.getString(android.media.MediaFormat.KEY_MIME) ?: continue
+                    if (mime.startsWith("audio/")) {
+                        rate = format.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
+                        android.util.Log.d("AudioDiagnostic", "extractSampleRate: path=${path.takeLast(30)} mime=$mime rate=$rate")
+                        break
+                    }
+                }
+                rate
+            } finally {
+                runCatching { extractor.release() }
             }
         }
-        extractor.release()
-        rate
     } catch (e: Exception) {
         android.util.Log.e("AudioDiagnostic", "extractSampleRate failed: ${e.message}")
         0

@@ -1,0 +1,43 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', top: -100, right: -80, width: 360, height: 360, borderRadius: '50%', background: 'linear-gradient(135deg, #22D3EE 0%, #3B82F6 100%)', opacity: 0.08 }} />
+  <Box style={{ paddingTop: 40, paddingLeft: 64, paddingRight: 64, paddingBottom: 16 }}>
+    <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+      <Box style={{ width: 38, height: 4, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+      <Text style={{ fontSize: 16, color: '#22D3EE', letterSpacing: 2 }}>重点滑块</Text>
+    </Box>
+    <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#E5EDF7' }}>三个最常用的滑块怎么调</Text>
+  </Box>
+  <Box style={{ flexDirection: 'row', paddingLeft: 64, paddingRight: 64, paddingBottom: 56, gap: 28, height: 540 }}>
+    <Box style={{ width: '55%', justifyContent: 'space-between' }}>
+      <Box style={{ padding: 20, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#E5EDF7' }}>温度 Temperature <Text style={{ fontSize: 15, color: '#8DA2BC', fontWeight: 'normal' }}>中低频 ↔ 高频能量比</Text></Text>
+        <Text style={{ fontSize: 16, color: '#A9B8CC', marginTop: 8, lineHeight: 1.5 }}>嫌刺耳、发飘 → 往<span style={{ color: '#9DB8E8' }}>左（冷）</span>；嫌闷、糊 → 往<span style={{ color: '#9DE8F2' }}>右（暖）</span>。</Text>
+      </Box>
+      <Box style={{ padding: 20, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#E5EDF7' }}>厚度 Thickness <Text style={{ fontSize: 15, color: '#8DA2BC', fontWeight: 'normal' }}>基频段饱满度</Text></Text>
+        <Text style={{ fontSize: 16, color: '#A9B8CC', marginTop: 8, lineHeight: 1.5 }}>人声单薄、发虚 → 往<span style={{ color: '#9DE8F2' }}>右（厚）</span>，声音更扎实。</Text>
+      </Box>
+      <Box style={{ padding: 20, background: '#13203A', borderRadius: 14, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#E5EDF7' }}>人声 Vocal <Text style={{ fontSize: 15, color: '#8DA2BC', fontWeight: 'normal' }}>前后位置</Text></Text>
+        <Text style={{ fontSize: 16, color: '#A9B8CC', marginTop: 8, lineHeight: 1.5 }}>想听清歌词 → 往<span style={{ color: '#9DE8F2' }}>右（前）</span>，人声推到面前。</Text>
+      </Box>
+    </Box>
+    <Box style={{ width: '45%', justifyContent: 'center' }}>
+      <Box style={{ padding: 26, background: 'linear-gradient(160deg, rgba(59,130,246,0.16), rgba(34,211,238,0.10))', borderRadius: 18, border: '1px solid rgba(34,211,238,0.35)' }}>
+        <Text style={{ fontSize: 20, fontWeight: 'bold', color: '#E5EDF7' }}>速记卡</Text>
+        <Box style={{ marginTop: 18, gap: 14 }}>
+          <Box style={{ flexDirection: 'row', gap: 12 }}><Text style={{ fontSize: 16, color: '#9DE8F2', fontWeight: 'bold' }}>齿音重</Text><Text style={{ fontSize: 16, color: '#C7D2E0', lineHeight: 1.5 }}>Sibilance 往左 + LF/HF 精准削</Text></Box>
+          <Box style={{ flexDirection: 'row', gap: 12 }}><Text style={{ fontSize: 16, color: '#9DE8F2', fontWeight: 'bold' }}>低频糊</Text><Text style={{ fontSize: 16, color: '#C7D2E0', lineHeight: 1.5 }}>Bass Texture 往右（紧）</Text></Box>
+          <Box style={{ flexDirection: 'row', gap: 12 }}><Text style={{ fontSize: 16, color: '#9DE8F2', fontWeight: 'bold' }}>想通透</Text><Text style={{ fontSize: 16, color: '#C7D2E0', lineHeight: 1.5 }}>Air 往右（Airy）</Text></Box>
+        </Box>
+        <Box style={{ marginTop: 20, padding: 14, borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.10)' }}>
+          <Text style={{ fontSize: 14, color: '#8DA2BC', lineHeight: 1.5 }}>小提示：长按滑块下方的小字，App 会显示官方一句话说明。</Text>
+        </Box>
+      </Box>
+    </Box>
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 64, right: 64, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>MSEB 攻略</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>05 / 10</Text>
+  </Box>
+</Slide>

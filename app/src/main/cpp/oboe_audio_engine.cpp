@@ -46,7 +46,7 @@ bool OboeAudioEngine::startWithMode(int sampleRate, int channelCount, oboe::Shar
 
     oboe::AudioStreamBuilder builder;
     builder.setDirection(oboe::Direction::Output)
-           ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+           ->setPerformanceMode(oboe::PerformanceMode::PowerSaving)
            ->setSharingMode(mode)
            ->setFormat(oboe::AudioFormat::I16)
            ->setChannelCount(channelCount)

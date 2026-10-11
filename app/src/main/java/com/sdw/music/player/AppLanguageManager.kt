@@ -45,23 +45,35 @@ object AppLanguageManager {
     }
 
     private fun apply(context: Context, code: String) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+：用系统 LocaleManager（需 manifest 声明 localeConfig）
-            val localeManager = context.getSystemService(android.app.LocaleManager::class.java)
-            val locales = if (code.isEmpty()) {
-                android.os.LocaleList.getEmptyLocaleList()
+        // [V8.130] 兜底：本方法由 SDWApp.onCreate -> applyStored 每次冷启动必经。
+        // Android 13+ 分支原先对 LocaleManager 未判空、整段无 try/catch，
+        // 个别 ROM 上服务缺失/赋值抛异常会直接崩在 Application 启动阶段
+        // （症状：安卓13 打开即闪退）。切语言失败不应拖垮启动，故全段兜底。
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Android 13+：用系统 LocaleManager（需 manifest 声明 localeConfig）
+                val localeManager = context.getSystemService(android.app.LocaleManager::class.java)
+                if (localeManager == null) {
+                    android.util.Log.w("AppLanguageManager", "LocaleManager unavailable, skip language apply")
+                    return
+                }
+                val locales = if (code.isEmpty()) {
+                    android.os.LocaleList.getEmptyLocaleList()
+                } else {
+                    android.os.LocaleList.forLanguageTags(code)
+                }
+                localeManager.applicationLocales = locales
             } else {
-                android.os.LocaleList.forLanguageTags(code)
+                // Android 12 及以下：用 AppCompatDelegate
+                val locales = if (code.isEmpty()) {
+                    LocaleListCompat.getEmptyLocaleList()
+                } else {
+                    LocaleListCompat.forLanguageTags(code)
+                }
+                AppCompatDelegate.setApplicationLocales(locales)
             }
-            localeManager.applicationLocales = locales
-        } else {
-            // Android 12 及以下：用 AppCompatDelegate
-            val locales = if (code.isEmpty()) {
-                LocaleListCompat.getEmptyLocaleList()
-            } else {
-                LocaleListCompat.forLanguageTags(code)
-            }
-            AppCompatDelegate.setApplicationLocales(locales)
+        } catch (e: Throwable) {
+            android.util.Log.e("AppLanguageManager", "apply language failed: ${e.message}", e)
         }
     }
 }

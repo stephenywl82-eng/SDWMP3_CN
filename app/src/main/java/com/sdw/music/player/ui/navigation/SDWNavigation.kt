@@ -8,6 +8,9 @@ import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import com.sdw.music.player.ui.animation.SharedElementDestination
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,8 +44,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.sdw.music.player.ui.animation.SharedCoverOverlay
+import com.sdw.music.player.ui.animation.SharedElementDestination
 import com.sdw.music.player.ui.animation.SharedCoverState
+import com.sdw.music.player.ui.animation.PageReveal
+import com.sdw.music.player.ui.animation.Motion
 import com.sdw.music.player.ui.screens.*
 import com.sdw.music.player.SongRepository
 import com.sdw.music.player.splitArtists
@@ -56,6 +61,7 @@ import com.sdw.music.player.ui.screens.getMotorolaDeviceName
 import com.sdw.music.player.ui.viewmodel.PlayerIntent
 import com.sdw.music.player.ui.viewmodel.PlayerViewModel
 
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun SDWNavHost(
     navController: NavHostController = rememberNavController(),
@@ -71,9 +77,24 @@ fun SDWNavHost(
     val sharedCoverState = remember { SharedCoverState() }
 
     // 点歌/切歌播放：栈里已有 Player 时直接弹回它（避免重复 push 导致返回栈越来越深），否则新建
+    //
+    // [V8.100] 修「双击迷你条要按两次返回 / 闪一下」的根因：
+    // popBackStack(route, inclusive = false) 的返回值判据是「是否真的弹掉了至少一个条目」，
+    // 不是「栈里有没有这个 route」。当 Player 恰好就在栈顶时，它上面没有条目可弹，
+    // popBackStackInternal 收集的 popOperations 为空 → 直接 return false
+    // （NavController.kt:656-682：只有 inclusive || !hasRoute 时才会 add 进 popOperations）。
+    // 于是这行兜底把「Player 已在栈顶」误判成「栈里没有 Player」，又 navigate 了一次，
+    // 把 Player 压进栈两遍：双击迷你条 = 两次 onClick = [SongList, Player, Player]，
+    // 返回一次只是从上面那个 Player 换到下面那个（同屏，看着像闪一下），第二次才回主界面。
+    // 正解：先问 currentDestination 是不是 Player —— 这才是「播放器已经开着」的真判据。
     val navigateToPlayer: () -> Unit = {
-        if (!navController.popBackStack(Screen.Player.route, inclusive = false)) {
-            navController.navigate(Screen.Player.route)
+        if (navController.currentDestination?.route != Screen.Player.route) {
+            if (!navController.popBackStack(Screen.Player.route, inclusive = false)) {
+                navController.navigate(Screen.Player.route) {
+                    // 兜底：导航事务时序万一绕过上面的判断，也不许栈顶出现第二个 Player
+                    launchSingleTop = true
+                }
+            }
         }
     }
 
@@ -92,11 +113,14 @@ fun SDWNavHost(
 
     // Handle notification tap: navigate to PlayerScreen
     if (openPlayer != null) {
-        LaunchedEffect(openPlayer.value) {
+        // 冷启动时 onNewIntent 已经把 shouldOpenPlayer 置成 true，但这一帧的
+        // LaunchedEffect 可能先于 onNewIntent 跑完；只盯 openPlayer 就会漏掉这次
+        // 「从外部打开文件」，结果是 Activity 起来了、曲子没播。把待播的 uri 也加进 key。
+        LaunchedEffect(openPlayer.value, externalAudioUri?.value) {
+            val uri = externalAudioUri?.value
             if (openPlayer.value) {
                 openPlayer.value = false
                 // If external audio URI is pending, dispatch PlayUri intent
-                val uri = externalAudioUri?.value
                 if (uri != null) {
                     externalAudioUri.value = null
                     vm.handleIntent(PlayerIntent.PlayUri(uri))
@@ -116,19 +140,42 @@ fun SDWNavHost(
         if (currentRoute != Screen.Player.route && currentRoute != Screen.LyricFullscreen.route) {
             com.sdw.music.player.ui.components.WallpaperBackground()
         }
+        // [V8.52] Official shared-element host: the cover flight is now animated by
+        // Compose inside the navigation transition, not by a drawn-on-top overlay.
+        SharedTransitionLayout {
+        val sharedTransitionScope = this
         NavHost(
             navController = navController,
             startDestination = Screen.SongList.route,
-            enterTransition = { slideInHorizontally(tween(420)) { it / 4 } + fadeIn(tween(420)) },
-            exitTransition = { slideOutHorizontally(tween(360)) { -it / 5 } + fadeOut(tween(360)) },
-            popEnterTransition = { slideInHorizontally(tween(420)) { -it / 5 } + fadeIn(tween(420)) },
-            popExitTransition = { slideOutHorizontally(tween(360)) { it / 4 } + fadeOut(tween(360)) }
+            // V8.60 fade-through. The old version slid the incoming page a quarter of the
+            // width while the outgoing slid a fifth and both cross-faded, so for ~350ms two
+            // translucent pages were on screen at different offsets - the outgoing page's
+            // edge was the vertical seam the user saw. Now the outgoing page fades out fast
+            // on a much shorter slide, the incoming waits ~140ms and then travels only a
+            // sixth of the width. Only one page is ever readable, and the push is longer so
+            // it reads as motion instead of a cut.
+            enterTransition = {
+                slideInHorizontally(Motion.navSlideIn) { it / 6 } + fadeIn(Motion.navFadeIn)
+            },
+            exitTransition = {
+                slideOutHorizontally(Motion.navSlideOut) { -it / 10 } + fadeOut(Motion.navFadeOut)
+            },
+            // [V8.97] Pop direction uses springs, not the push tweens: predictive back is a
+            // pop, and the release must carry the finger's velocity (see Motion.navPopSlideIn).
+            // Fade specs are untouched, so the V8.60 fade-through gap still holds (outgoing
+            // invisible at 180ms, incoming starts at 200ms - the two pages never overlap).
+            popEnterTransition = {
+                slideInHorizontally(Motion.navPopSlideIn) { -it / 6 } + fadeIn(Motion.navFadeIn)
+            },
+            popExitTransition = {
+                slideOutHorizontally(Motion.navPopSlideOut) { it / 10 } + fadeOut(Motion.navFadeOut)
+            }
         ) {
             composable(
                 Screen.SongList.route,
-                exitTransition = { fadeOut(tween(150)) },
-                popEnterTransition = { fadeIn(tween(200)) }
-            ) {
+                exitTransition = { fadeOut(Motion.navFadeOut) },
+                popEnterTransition = { fadeIn(tween(280, easing = Motion.emphasized)) }
+            ) {PageReveal {
                 // Root back: minimize only when SongList is current route
                 // (prevent intercepting back during navigation transitions)
                 val rootContext = LocalContext.current
@@ -141,24 +188,39 @@ fun SDWNavHost(
                 val currentPlayingSong = remember(state.currentSongId, state.songList) {
                     state.songList.find { it.id == state.currentSongId }
                 }
+                SharedElementDestination(
+                    sharedScope = sharedTransitionScope,
+                    visibilityScope = this
+                ) {
                 SongListScreen(
                     songs = state.songList,
                     currentPlayingSong = currentPlayingSong,
                     isPlaying = isPlaying,
                     accentColor = state.accentColor,
                     sharedCoverState = sharedCoverState,
-                    miniCoverVisible = !sharedCoverState.isAnimating || !sharedCoverState.isEntering,
+                    // [V8.52] The mini cover is the return destination of the shared-element
+                    // flight, so it must stay visible for the whole transition.
+                    miniCoverVisible = true,
                     deviceName = getMotorolaDeviceName() ?: Build.MODEL,
                     onSongClick = { song ->
                         val index = state.songList.indexOfFirst { it.id == song.id }
                         if (index >= 0) {
+                            // [V8.84] The tapped row (not the mini bar) is the flight source.
+                            sharedCoverState.rowFlightSongId = song.id
                             vm.handleIntent(PlayerIntent.PlaySongList(state.songList, startIndex = index))
                             navigateToPlayer()
                         }
                     },
                     onNavigateToPlayer = {
-                        sharedCoverState.enter()
-                        navigateToPlayer()
+                        // [V8.100] 幂等：Player 已是当前目的地时整个动作都不做。
+                        // 双击迷你条会触发两次 onClick，这里若不拦，第二次会再跑一次
+                        // sharedCoverState.enter() → 封面飞行动画重启 → 肉眼看到「闪一下」。
+                        if (navController.currentDestination?.route != Screen.Player.route) {
+                            // [V8.84] Tapping the bar hands the cover key back to the mini bar.
+                            sharedCoverState.rowFlightSongId = null
+                            sharedCoverState.enter()
+                            navigateToPlayer()
+                        }
                     },
                     onNavigateToFolder = { navController.navigate(Screen.FolderList.route) },
                     onNavigateToPlaylist = { navController.navigate(Screen.PlaylistList.route) },
@@ -226,17 +288,32 @@ fun SDWNavHost(
                     },
                     onNavigateToLyrics = { navController.navigate(Screen.LyricFullscreen.route) }
                 )
-            }
+                }
+            }}
 
             composable(
                 Screen.Player.route,
                 // 【V8.5】进入播放器：轻量淡入（约 200ms），把舞台让给 SharedCoverOverlay 封面飞行动画，
                 // 避免整页滑动与封面动画双轨抢注意力。返回时轻快下滑 + 淡出。
-                enterTransition = { fadeIn(tween(220, easing = FastOutSlowInEasing)) },
-                exitTransition = { slideOutVertically(tween(300, easing = FastOutSlowInEasing)) { it / 3 } + fadeOut(tween(300)) },
-                popEnterTransition = { fadeIn(tween(260, easing = FastOutSlowInEasing)) },
-                popExitTransition = { slideOutVertically(tween(280, easing = FastOutSlowInEasing)) { it / 3 } + fadeOut(tween(280)) }
-            ) {
+                // V8.60 the player page fades against the flying cover, so its fade has to
+                // be long enough to cover the whole shared-element flight instead of
+                // finishing early and leaving the page visibly "arrived" mid-flight.
+                enterTransition = { fadeIn(Motion.navPlayerFadeIn) },
+                exitTransition = { slideOutVertically(Motion.navSlideOut) { it / 6 } + fadeOut(Motion.navPlayerFadeOut) },
+                popEnterTransition = { fadeIn(Motion.navPlayerFadeIn) },
+                // [V8.84] Going back, the player shrinks toward the list instead of
+                // sliding off the top edge: the page behind it becomes visible around the
+                // edges, so the two screens read as related rather than as a cut.
+                popExitTransition = {
+                    scaleOut(targetScale = 0.90f, animationSpec = Motion.playerPopScale) +
+                        fadeOut(Motion.navPlayerPopFadeOut)
+                }
+            ) {PageReveal {
+                SharedElementDestination(
+                    sharedScope = sharedTransitionScope,
+                    visibilityScope = this,
+                    dragProgress = sharedCoverState.dragProgress
+                ) {
                 // Collect hot flows inside player scope to isolate from song list recomposition
                 val positionMs by vm.positionMs.collectAsState()
                 val durationMs by vm.durationMs.collectAsState()
@@ -270,6 +347,15 @@ fun SDWNavHost(
                     }
                 }
 
+                // [V8.97] 手搓的 PredictiveBackHandler 已移除。
+                // 原因：navigation-compose 2.8.0 起 NavHost 内部会自行注册预测返回回调并
+                // 用 SeekableTransitionState 跟手 seek 转场（封面共享元素也随 seek 一起走）。
+                // 而 OnBackPressedDispatcher 把生命周期事件只发给「最后注册且 enabled」的回调，
+                // 路由内后注册的手搓 handler 会顶掉 NavHost 内建的那个 —— 正是 PlayerScreen.kt
+                // [V8.81] 注释记录过的同一个坑。删掉它，跟手能力全部交回官方实现。
+                // 保留 sharedCoverState.dragProgress / LocalCoverDragProgress 通路（默认 0f，
+                // 无副作用），若日后官方跟手观感不佳可在此处重新驱动。
+
                 PlayerScreen(
                     positionMs = positionMs,
                     durationMs = durationMs,
@@ -283,6 +369,8 @@ fun SDWNavHost(
                     onPrevious = { vm.handleIntent(PlayerIntent.Previous) },
                     onSeekTo = { vm.handleIntent(PlayerIntent.SeekTo(it)) },
                     onToggleShuffle = { vm.handleIntent(PlayerIntent.SetShuffle(!state.shuffleEnabled)) },
+                    onReorderQueueByFlow = { vm.reorderQueueByFlow() },
+                    onPreviewUpNext = { vm.previewUpNext() },
                     onCycleRepeat = {
                         val nextMode = when (state.repeatMode) {
                             Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
@@ -339,28 +427,29 @@ fun SDWNavHost(
                     },
                     onNavigateToAlbum = { albumName ->
                         when {
-                            albumName.isNotBlank() && albumName != context.getString(R.string.label_unknown_album) ->
+                            albumName.isNotBlank() && !SongRepository.isPlaceholderAlbum(albumName) ->
                                 navController.navigate(Screen.AlbumSong.createRoute(albumName))
                             else -> navController.navigate(Screen.AlbumList.route)
                         }
                     },
                     onNavigateToArtist = { artistName ->
-                        if (artistName.isNotBlank()) {
+                        // [V8.93] 空/占位歌手不进歌手页：原先 <unknown> 能穿过去，进去是空列表
+                        if (artistName.isNotBlank() && !SongRepository.isPlaceholderArtist(artistName)) {
                             navController.navigate(Screen.ArtistSong.createRoute(artistName))
                         }
                     },
                     audioSessionId = MusicService.instance?.getAudioSessionId() ?: 0,
                     onPlayQueueIndex = { index -> vm.handleIntent(PlayerIntent.PlaySong(index)) },
                     onDismiss = {
-                        sharedCoverState.exit()
-                        sharedCoverState.onAnimationEnd = {
-                            navController.popBackStack()
-                        }
+                        // [V8.52] The official shared element flies the cover back; there
+                        // is no overlay left to await, so pop immediately.
+                        navController.popBackStack()
                     }
                 )
-            }
+                }
+            }}
 
-            composable(Screen.FolderList.route) {
+            composable(Screen.FolderList.route) {PageReveal {
                 FolderListScreen(
                     onNavigateBack = { navController.popBackStack() },
                     onPlaySongs = { songs ->
@@ -371,8 +460,8 @@ fun SDWNavHost(
                         navController.navigate(Screen.FolderDetail.createRoute(path))
                     }
                 )
-            }
-            composable(Screen.FolderDetail.route) { backStackEntry ->
+            }}
+            composable(Screen.FolderDetail.route) { backStackEntry ->PageReveal {
                 val rawToken = backStackEntry.arguments?.getString("token") ?: ""
                 val folderPath = rawToken.toIntOrNull()
                     ?.let { com.sdw.music.player.FolderPathRegistry.get(it) }
@@ -388,8 +477,8 @@ fun SDWNavHost(
                         navigateToPlayer()
                     }
                 )
-            }
-            composable(Screen.PlaylistList.route) {
+            }}
+            composable(Screen.PlaylistList.route) {PageReveal {
                 PlaylistListScreen(
                     onNavigateBack = { navController.popBackStack() },
                     onOpenPlaylist = { playlistId ->
@@ -400,8 +489,8 @@ fun SDWNavHost(
                         navigateToPlayer()
                     }
                 )
-            }
-            composable(Screen.Settings.route) {
+            }}
+            composable(Screen.Settings.route) {PageReveal {
                 SettingsScreen(
                     onNavigateBack = { navController.popBackStack() },
                     onNavigateToAudioDiagnostic = { navController.navigate(Screen.AudioDiagnostic.route) },
@@ -409,14 +498,14 @@ fun SDWNavHost(
                     onNavigateToCoverEmbed = { navController.navigate(Screen.CoverEmbed.route) },
                     onBpmScanned = { vm.refreshSongs() }
                 )
-            }
-            composable(Screen.CoverEmbed.route) {
+            }}
+            composable(Screen.CoverEmbed.route) {PageReveal {
                 CoverEmbedScreen(
                     songs = state.songList,
                     onNavigateBack = { navController.popBackStack() }
                 )
-            }
-            composable(Screen.AudioQuality.route) {
+            }}
+            composable(Screen.AudioQuality.route) {PageReveal {
                 AudioQualityScreen(
                     onNavigateBack = { navController.popBackStack() },
                     songs = state.songList,
@@ -429,9 +518,10 @@ fun SDWNavHost(
                         }
                     }
                 )
-            }
-            composable(Screen.LyricFullscreen.route) {
+            }}
+            composable(Screen.LyricFullscreen.route) {PageReveal {
                 val lyricsPositionMs by vm.positionMs.collectAsState()
+                val lyricsIsPlaying by vm.isPlaying.collectAsState()
                 LyricFullscreenScreen(
                     songId = state.currentSongId,
                     songTitle = state.currentSongTitle,
@@ -439,15 +529,20 @@ fun SDWNavHost(
                     albumArt = state.currentSongAlbumArt,
                     accentColor = state.accentColor,
                     positionMs = lyricsPositionMs,
+                    isPlaying = lyricsIsPlaying,
                     onSeekTo = { pos -> vm.handleIntent(PlayerIntent.SeekTo(pos)) },
                     onNavigateBack = { navController.popBackStack() },
+                    onPrevious = { vm.handleIntent(PlayerIntent.Previous) },
+                    onNext = { vm.handleIntent(PlayerIntent.Next) },
                     onLyricsSaved = { lyrics -> vm.handleIntent(PlayerIntent.SaveLyrics(lyrics)) }
                 )
-            }
-            composable(Screen.PlaylistDetail.route) { backStackEntry ->
+            }}
+            composable(Screen.PlaylistDetail.route) { backStackEntry ->PageReveal {
                 val playlistId = backStackEntry.arguments?.getString("playlistId")?.toLongOrNull() ?: 0L
                 PlaylistDetailScreen(
                     playlistId = playlistId,
+                    currentSongId = state.currentSongId,
+                    isPlaying = isPlaying,
                     onNavigateBack = { navController.popBackStack() },
                     onPlaySongs = { songs ->
                         if (songs.isNotEmpty()) vm.handleIntent(PlayerIntent.PlaySongList(songs, startIndex = 0))
@@ -455,8 +550,8 @@ fun SDWNavHost(
                     },
                     onAddSongs = { navController.navigate(Screen.SongPicker.createRoute(playlistId)) }
                 )
-            }
-            composable(Screen.SongPicker.route) { backStackEntry ->
+            }}
+            composable(Screen.SongPicker.route) { backStackEntry ->PageReveal {
                 val playlistId = backStackEntry.arguments?.getString("playlistId")?.toLongOrNull() ?: 0L
                 val playlist = PlaylistManager.getPlaylist(playlistId)
                 SongPickerScreen(
@@ -465,20 +560,20 @@ fun SDWNavHost(
                     onNavigateBack = { navController.popBackStack() },
                     onSongsAdded = { navController.popBackStack() }
                 )
-            }
-            composable(Screen.Equalizer.route) {
+            }}
+            composable(Screen.Equalizer.route) {PageReveal {
                 EqualizerScreen(
                     onBack = { navController.popBackStack() },
                     onNavigateToMseb = { navController.navigate(Screen.Mseb.route) }
                 )
-            }
-            composable(Screen.Mseb.route) {
+            }}
+            composable(Screen.Mseb.route) {PageReveal {
                 MsebScreen(onBack = { navController.popBackStack() })
-            }
-            composable(Screen.AudioDiagnostic.route) {
+            }}
+            composable(Screen.AudioDiagnostic.route) {PageReveal {
                 AudioDiagnosticScreen(onNavigateBack = { navController.popBackStack() })
-            }
-            composable(Screen.LyricSearch.route) { backStackEntry ->
+            }}
+            composable(Screen.LyricSearch.route) { backStackEntry ->PageReveal {
                 val songId = backStackEntry.arguments?.getString("songId")?.toLongOrNull() ?: 0L
                 val title = backStackEntry.arguments?.getString("songTitle") ?: ""
                 val artist = backStackEntry.arguments?.getString("songArtist") ?: ""
@@ -488,13 +583,14 @@ fun SDWNavHost(
                     songArtist = artist,
                     onNavigateBack = { navController.popBackStack() }
                 )
-            }
+            }}
 
             // === Album Views ===
-            composable(Screen.AlbumList.route) {
+            composable(Screen.AlbumList.route) {PageReveal {
                 val groupedAlbums = remember(state.songList) {
                     state.songList
-                        .filter { it.album.isNotBlank() }
+                        // [V8.93] 占位专辑不进专辑墙
+                        .filter { it.album.isNotBlank() && !SongRepository.isPlaceholderAlbum(it.album) }
                         .groupBy { it.album }
                         .toList()
                         .sortedBy { it.first }
@@ -506,9 +602,9 @@ fun SDWNavHost(
                     },
                     onNavigateBack = { navController.popBackStack() }
                 )
-            }
+            }}
 
-            composable(Screen.AlbumSong.route) { backStackEntry ->
+            composable(Screen.AlbumSong.route) { backStackEntry ->PageReveal {
                 val rawAlbumName = backStackEntry.arguments?.getString("albumName") ?: ""
                 val albumName = java.net.URLDecoder.decode(rawAlbumName, "UTF-8")
                 val filtered = remember(albumName, state.songList) {
@@ -530,10 +626,10 @@ fun SDWNavHost(
                     },
                     onNavigateBack = { navController.popBackStack() }
                 )
-            }
+            }}
 
             // === Artist Views ===
-            composable(Screen.ArtistList.route) {
+            composable(Screen.ArtistList.route) {PageReveal {
                 ArtistListScreen(
                     songs = state.songList,
                     currentSongId = state.currentSongId,
@@ -543,9 +639,9 @@ fun SDWNavHost(
                     },
                     onNavigateBack = { navController.popBackStack() }
                 )
-            }
+            }}
 
-            composable(Screen.ArtistSong.route) { backStackEntry ->
+            composable(Screen.ArtistSong.route) { backStackEntry ->PageReveal {
                 val rawArtistName = backStackEntry.arguments?.getString("artistName") ?: ""
                 val artistName = java.net.URLDecoder.decode(rawArtistName, "UTF-8")
                 val filtered = remember(artistName, state.songList) {
@@ -567,28 +663,12 @@ fun SDWNavHost(
                     },
                     onNavigateBack = { navController.popBackStack() }
                 )
-            }
+            }}
         }
 
-        // === Shared Element 覆盖层 ===
-        // 条件：正在动画中（进入或退出），且 Mini 位置已捕获
-        if (sharedCoverState.isAnimating && sharedCoverState.miniCoverPosition.size.width > 0f) {
-            SharedCoverOverlay(
-                state = sharedCoverState,
-                albumArtUri = state.currentSongAlbumArt ?: "",
-                screenHeightPx = screenHeightPx,
-                onAnimationFinished = {
-                    sharedCoverState.onAnimationEnd?.invoke()
-                    sharedCoverState.onAnimationEnd = null
-                },
-                defaultCover = { modifier ->
-                    com.sdw.music.player.ui.components.DefaultCoverImage(
-                        songTitle = state.currentSongTitle,
-                        songArtist = state.currentSongArtist,
-                        modifier = modifier
-                    )
-                }
-            )
+        // [V8.52] The hand-rolled SharedCoverOverlay is retired: the real
+        // shared element (SharedTransitionLayout + sharedElement) flies the cover
+        // inside the navigation transition itself.
         }
     }
 }

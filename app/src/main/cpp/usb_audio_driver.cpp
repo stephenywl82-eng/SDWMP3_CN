@@ -34,6 +34,36 @@
 
 // 鈹€鈹€ nativeLog ring buffer implementation 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
+// ============================================================================
+// [V8.118] DAC-path safety soft-clip shaper.
+// The DAC streaming chain (decode thread -> ring -> URB) had NO look-ahead
+// limiter, unlike the Oboe path. EQ / compressor / loudness boosts were
+// therefore hard-clipped by the plain `if (s>1) s=1` guards at PACK time,
+// which is square-wave distortion — heard as a buzz/crackle on drums & bass.
+// This shaper (same cubic sigmoid as the Oboe softClip, MAKEUP=1.0) keeps the
+// signal below the packer's clamp. Bit-perfect path (no DSP) is untouched.
+// ============================================================================
+// [V8.119] NOTE: these must NOT be `static` -- usb_audio_driver.h setters reference
+// them from an inline member function, which lives in every TU that includes the header.
+std::atomic<bool> g_dacWideHeadroom{true};          // DAC headroom profile
+std::atomic<bool> g_dacDirectPassthrough{false};    // DAC 原声直通（整链旁路）
+
+static inline float dacSoftClip(float x) {
+    // [V8.119] knee follows the headroom profile (same rationale as the Oboe
+    // softClip): 0.92 stays linear up to -0.7 dBFS instead of wave-shaping
+    // every drum/vocal peak from -3.5 dBFS.
+    const float T = g_dacWideHeadroom.load() ? 0.92f : (2.0f / 3.0f);
+    const float RANGE = 1.0f - T;
+    float ax = fabsf(x);
+    if (ax <= T) return x;
+    float s = (x < 0.0f) ? -1.0f : 1.0f;
+    float norm = (ax - T) / RANGE;
+    if (norm >= 1.0f) return s * (T + (2.0f / 3.0f) * RANGE);   // ceiling ~0.8889
+    float ct = norm - (1.0f / 3.0f) * norm * norm * norm;
+    return s * (T + ct * RANGE);
+}
+static std::atomic<int64_t> g_dacClipCount{0};   // [V8.118] samples the packer had to clamp
+
 void UsbAudioDriver::nativeLog(const char* tag, const char* fmt, ...) {
     if (!fmt) return;
     char line[384];
@@ -97,7 +127,7 @@ UsbAudioDriver::UsbAudioDriver() {
     }
     // Allocate variable-length usbdevfs_urb for each slot
     for (int i = 0; i < kMaxUrbCount; i++) {
-        size_t urbSize = sizeof(usbdevfs_urb) + kPacketsPerUrb * sizeof(usbdevfs_iso_packet_desc);
+        size_t urbSize = sizeof(usbdevfs_urb) + urbPackets_ * sizeof(usbdevfs_iso_packet_desc);
         urbSlots_[i].urb = static_cast<usbdevfs_urb*>(calloc(1, urbSize));
         if (!urbSlots_[i].urb) {
             LOGE("Failed to allocate URB slot %d", i);
@@ -150,6 +180,34 @@ bool UsbAudioDriver::open(int fd, int epAddress, int maxPacketSize, int interval
     int speed = ioctl(fd_, USBDEVFS_GET_SPEED, nullptr);
     highSpeed_ = (speed == 3 /*USB_SPEED_HIGH*/);
     LOGI("Open: USB bus speed=%d (%s)", speed, highSpeed_ ? "HIGH" : (speed == 2 ? "FULL" : "other"));
+
+    // [2026-09-10 quirk init] Per-device behavior, seeded from Linux snd-usb-audio
+    // quirks.c as *candidates* — each entry must be confirmed by our own capture
+    // logs before trusting it (principle: kernel entry = clue, not gospel).
+    urbPackets_ = kPacketsPerUrb;
+    ctlMsgDelayUs_ = 0;
+    if (vid_ == 0x3302) {
+        // TTGK Technology (kernel: DEVICE_FLG 3302:17c2 FORCE_IFACE_RESET|IFACE_DELAY).
+        // FORCE_IFACE_RESET is already our teardown path (setInterfaceAlt(0) when alt
+        // changes); IFACE_DELAY = 5ms between interface ops.
+        ctlMsgDelayUs_ = 2000;   // small settle after SET_CUR
+        LOGI("quirk[TTGK 3302]: iface-delay 5ms on alt switch, ctl-delay 2ms");
+    } else if (vid_ == 0x0A12 && pid_ == 0x4007) {
+        // Qudelix-5K: UAC1 full-speed pushing 96k/24bit. 64 pkts * 576B = 36.8KB/URB
+        // x 12 in-flight = 442KB -> usbfs ENOMEM on submit #13. Drop to 16 pkts
+        // (9.2KB/URB, ~110KB in flight) to stay under the kernel limit.
+        ctlMsgDelayUs_ = 2000;   // ES9219 needs a moment to lock the PLL after SET_CUR
+    }
+    if (!highSpeed_) {
+        // Generic full-speed safety: 64*576B*12 = 442KB in flight exceeds usbfs
+        // limits even at 48k/24bit (288B*64*12=221KB borderline). 16 pkts is safe.
+        urbPackets_ = 16;
+        LOGI("quirk: full-speed bus -> urbPackets_=%d (was 64)", urbPackets_);
+    }
+    if (urbPackets_ != kPacketsPerUrb || ctlMsgDelayUs_ != 0) {
+        LOGI("quirk[vid=%04X pid=%04X hs=%d]: urbPackets_=%d ctlMsgDelayUs_=%d",
+             vid_, pid_, highSpeed_ ? 1 : 0, urbPackets_, ctlMsgDelayUs_);
+    }
 
     // 鈺愨晲锟?DISCONNECT kernel audio driver FIRST 鈺愨晲锟?
     // Android kernel already has the USB Audio Class driver (snd_usb_audio)
@@ -335,7 +393,15 @@ bool UsbAudioDriver::start(int sampleRate, int channels, int bitsPerSample) {
     }
 
     if (sampleRate_ != clockRate_ || targetAlt != currentAlt_) {
-        setInterfaceAlt(0);
+        // [2026-09-09 v2] Same-alt restart (endpoint still active after keep-claim
+        // stop) must NOT tear down the endpoint: Qudelix ES9219 loses lock on
+        // teardown+reactivate -> noise at song start. Only teardown when the alt
+        // really changes; same-alt just re-runs SET_CUR to re-lock the clock.
+        bool altChanged = (targetAlt != currentAlt_) || forceIfaceReset_;
+        if (altChanged) {
+            setInterfaceAlt(0);
+            if (ifaceDelayUs_ > 0) usleep(ifaceDelayUs_);  // [quirk] settle after teardown
+        }
         int scRet = clockRate_;
         if (sampleRate_ != clockRate_) {
             // [v6.0.14] Skip SET_CUR for known buggy DACs; rely on alt-switch implicit lock.
@@ -346,17 +412,21 @@ bool UsbAudioDriver::start(int sampleRate, int channels, int bitsPerSample) {
             // (ret=4) and TTGK Note (3302:201D) sends SET_CUR to clock=6 (ret=4). Both
             // were wrongly listed here as skipSetCur. Only HIFI_A001 (2D13:A001) truly
             // breaks on SET_CUR (locks clock at 384k).
-            bool buggyDac = (vid_ == 0x2D13 && pid_ == 0xA001);
+            bool buggyDac = (vid_ == 0x2D13 && pid_ == 0xA001) || skipSetCurQuirk_;
             scRet = buggyDac ? sampleRate_ : trySetSampleRate(sampleRate_);
             if (buggyDac) { LOGI("start: skipping SET_CUR for pid=%04X (implicit alt-switch lock)", pid_); clockRate_ = sampleRate_; }
             else if (scRet >= 0) clockRate_ = sampleRate_;
             else LOGW("start: SET_CUR(%d) failed, clock stays at %d", sampleRate_, clockRate_);
         }
-        bool altOk = setInterfaceAlt(targetAlt);
-        if (!altOk) {
-            // EBUSY 閲嶈瘯涓€娆★細缁欏唴鏍稿洖锟?URB 鐨勬椂闂寸獥锟?
-            usleep(20000);
+        bool altOk = true;
+        if (altChanged) {
+            if (ifaceDelayUs_ > 0) usleep(ifaceDelayUs_);  // [quirk] settle before reactivate
             altOk = setInterfaceAlt(targetAlt);
+            if (!altOk) {
+                // Retry once on EBUSY: give the kernel a window to reap URBs.
+                usleep(ifaceDelayUs_ > 0 ? ifaceDelayUs_ : 20000);
+                altOk = setInterfaceAlt(targetAlt);
+            }
         }
         if (altOk) {
             currentAlt_ = targetAlt;
@@ -411,6 +481,16 @@ bool UsbAudioDriver::start(int sampleRate, int channels, int bitsPerSample) {
     // call resetRingBuffer() explicitly before pushing fresh data.
     underrunCount_.store(0, std::memory_order_release);
 
+    // [2026-09-10 soft-start] Arm the fade-in ramp for this stream start. No-op (0 frames)
+    // when the user has not enabled it -> bit-perfect path is completely untouched.
+    softStartFrameBase_   = 0;
+    softStartTotalFrames_ = softStartEnabled_.load(std::memory_order_relaxed)
+        ? (int)((int64_t)sampleRate_ * kSoftStartFadeMs / 1000) : 0;
+    if (softStartTotalFrames_ > 0) {
+        LOGI("start: soft-start armed %dms (%d frames @%dHz)",
+             kSoftStartFadeMs, softStartTotalFrames_, sampleRate_);
+    }
+
     // Start stream thread
     streaming_.store(true, std::memory_order_release);
     streamThread_ = std::thread(streamThreadEntry, this);
@@ -452,7 +532,14 @@ void UsbAudioDriver::stopThreadOnly() {
     if (feedbackThread_.joinable()) {
         feedbackThread_.join();
     }
-    LOGI("stopThreadOnly: threads stopped, USB claim kept");
+    // [2026-09-09 Qudelix-5K fix v2] Stream stop drops the DAC-side sample clock,
+    // but the endpoint alt setting SURVIVES (setInterfaceAlt state persists after
+    // stream stop). v1 cleared currentAlt_ too, forcing setInterfaceAlt(0)+reactivate
+    // on every track switch -> Qudelix ES9219 loses lock -> 3-5s noise/static at
+    // song start. v2 only forgets clockRate_ (forces SET_CUR re-lock) and retains
+    // currentAlt_: same-alt restart skips endpoint teardown, no unlock glitch.
+    clockRate_ = 0;
+    LOGI("stopThreadOnly: threads stopped, USB claim kept (clock forgotten, alt=%d retained)", currentAlt_);
 }
 
 void UsbAudioDriver::resetRingBuffer() {
@@ -715,6 +802,14 @@ void UsbAudioDriver::setLoudnessOutGain(float gain) {
     loudness_.setOutGain(gain);
 }
 
+// 【V8.170】响度统一管理：dB -> 线性系数，交给 preGain 平滑施加。
+void UsbAudioDriver::setNormalizationGain(float db) {
+    float d = db < -24.0f ? -24.0f : (db > 24.0f ? 24.0f : db);
+    float lin = powf(10.0f, d / 20.0f);
+    normGainLin_.store(lin, std::memory_order_relaxed);
+    LOGI("DAC normGain %.2f dB (%.4f)", d, lin);
+}
+
 // 鈹€鈹€ pushPcm 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
 
 int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
@@ -750,10 +845,14 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
 
         // DAC-path EQ（AutoEQ 打底 + MSEB 叠加 / 5段图形），same Biquad algo as Oboe。
         // Disabled => pure pass-through (bit-perfect preserved)。
-        bool autoEqOn = autoEqEnabled_.load(std::memory_order_acquire);
-        bool msebOn = mseb10Enabled_.load(std::memory_order_acquire);
-        bool dspOn = dspEqEnabled_.load(std::memory_order_acquire);
-        float targetPreGain = 1.0f;
+        // [V8.119] 原声直通：DAC 链所有 DSP 模块强制关闭，ring 写原始 PCM。
+        const bool dacBypass = g_dacDirectPassthrough.load(std::memory_order_acquire);
+        bool autoEqOn = !dacBypass && autoEqEnabled_.load(std::memory_order_acquire);
+        bool msebOn = !dacBypass && mseb10Enabled_.load(std::memory_order_acquire);
+        bool dspOn = !dacBypass && dspEqEnabled_.load(std::memory_order_acquire);
+        // 【V8.170】归一化是源增益：先于所有 EQ/限幅，后面的模块看到的都是已归一化的电平。
+        // 原声直通（dacBypass）时整枚旁路，保持 bit-perfect。
+        float targetPreGain = dacBypass ? 1.0f : normGainLin_.load(std::memory_order_relaxed);
         if (autoEqOn || msebOn || dspOn) {
             // 【V8.2 hiby】blocking lock: setters hold dspEqMutex_ only for
             // microseconds of pure math, so the decode thread can safely wait for
@@ -761,7 +860,7 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
             // a processed<->pass-through timbre step = audible crackle).
             std::lock_guard<std::mutex> eqLock(dspEqMutex_);
             // 各开模块的 preGain 相乘（都是 ≤1 衰减系数，叠加后一起补偿）。
-            targetPreGain = 1.0f;
+            // 基准已由上面的归一化增益给出，这里只叠加 EQ 自身的补偿。
             if (autoEqOn) targetPreGain *= autoEqPreGain_;
             if (msebOn)   targetPreGain *= msebPreGain_;
             if (dspOn && !msebOn) targetPreGain *= dspEqPreGain_;
@@ -772,12 +871,18 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
         // output level instantly -> eliminates the crackle/hiss heard while adjusting live.
         const float PREGAIN_SMOOTH = 0.05f;
         float preGain = curDspPreGain_;
-        bool msOn = msEnabled_.load(std::memory_order_acquire);
+        bool msOn = !dacBypass && msEnabled_.load(std::memory_order_acquire);
         float msW = curMsWidth_, msC = curMsCenter_;
         float msTargetW = msWidth_.load(std::memory_order_acquire);
         float msTargetC = msCenter_.load(std::memory_order_acquire);
         // 【V8.3】等响补偿：实际输出增益 = 软件音量（立方 taper 后的 volume_，即真正送 DAC 的响度）。
-        if (loudness_.enabled_) loudness_.setOutGain(volume_);
+        if (!dacBypass && loudness_.enabled_) loudness_.setOutGain(volume_.load(std::memory_order_relaxed));
+        // [V8.118] any DSP module active? -> enable the safety shaper for this chunk.
+        bool dacAnyDsp = !dacBypass && (autoEqOn || msebOn || dspOn || msOn
+                       || transientEnabled_.load(std::memory_order_acquire)
+                       || compressorEnabled_.load(std::memory_order_acquire)
+                       || loudness_.enabled_);
+
         for (int f = 0; f < chunk; ++f) {
             preGain += (targetPreGain - preGain) * PREGAIN_SMOOTH;
             float sL = src[f * 2] * preGain;
@@ -804,7 +909,7 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
             }
 
             // 【V8.3】等响补偿（ISO 226）—— EQ 之后、M/S 之前，stereo-linked。
-            if (loudness_.enabled_) {
+            if (!dacBypass && loudness_.enabled_) {
                 loudness_.process(sL, sR);
             }
 
@@ -819,7 +924,7 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
             }
 
             // 【V8.3】瞬态整形（时域，双时间常数包络跟随器）——M/S 之后、写入 ring 之前。
-            if (transientEnabled_.load(std::memory_order_acquire)) {
+            if (!dacBypass && transientEnabled_.load(std::memory_order_acquire)) {
                 curTransientAmount_ += (transientAmount_.load(std::memory_order_acquire) - curTransientAmount_) * PREGAIN_SMOOTH;
                 float amt = curTransientAmount_;
                 if (fabsf(amt) > 0.001f) {
@@ -827,23 +932,27 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
                     tsFastEnvL_ += (aL - tsFastEnvL_) * (aL > tsFastEnvL_ ? tsAtkFast : tsRelFast);
                     tsSlowEnvL_ += (aL - tsSlowEnvL_) * (aL > tsSlowEnvL_ ? tsAtkSlow : tsRelSlow);
                     float transL = tsFastEnvL_ - tsSlowEnvL_;
-                    float gainL = 1.0f + amt * transL * 4.0f;
+                    // [V8.118] 4.0->1.5 + LF protection (1ms probe AM-modulated the bass)
+                    float tsDriveL = (tsSlowEnvL_ > 0.20f && transL < 0.12f) ? 0.0f : transL;
+                    float gainL = 1.0f + amt * tsDriveL * 1.5f;
                     if (gainL < 0.05f) gainL = 0.05f;
-                    if (gainL > 4.0f) gainL = 4.0f;
+                    if (gainL > 1.5f) gainL = 1.5f;
                     sL *= gainL;
                     float aR = fabsf(sR);
                     tsFastEnvR_ += (aR - tsFastEnvR_) * (aR > tsFastEnvR_ ? tsAtkFast : tsRelFast);
                     tsSlowEnvR_ += (aR - tsSlowEnvR_) * (aR > tsSlowEnvR_ ? tsAtkSlow : tsRelSlow);
                     float transR = tsFastEnvR_ - tsSlowEnvR_;
-                    float gainR = 1.0f + amt * transR * 4.0f;
+                    // [V8.118] 4.0->1.5 + LF protection (same as L)
+                    float tsDriveR = (tsSlowEnvR_ > 0.20f && transR < 0.12f) ? 0.0f : transR;
+                    float gainR = 1.0f + amt * tsDriveR * 1.5f;
                     if (gainR < 0.05f) gainR = 0.05f;
-                    if (gainR > 4.0f) gainR = 4.0f;
+                    if (gainR > 1.5f) gainR = 1.5f;
                     sR *= gainR;
                 }
             }
 
             // 【V8.3】动态压缩（master bus，stereo-linked）——瞬态整形之后、写 ring 之前。
-            if (compressorEnabled_.load(std::memory_order_acquire)) {
+            if (!dacBypass && compressorEnabled_.load(std::memory_order_acquire)) {
                 float peak = fmaxf(fabsf(sL), fabsf(sR));
                 float peakDb = 20.0f * log10f(peak + 1e-12f);
                 if (peakDb > compEnvDb_) {
@@ -863,6 +972,15 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
                 float g = powf(10.0f, -compGrDb_ / 20.0f) * compMakeupLinear_;
                 sL *= g;
                 sR *= g;
+            }
+
+            // [V8.118] Safety shaper: prevents the pack-time hard clamp from ever
+            // engaging on DSP-processed content (bit-perfect / no-DSP untouched).
+            if (dacAnyDsp) {
+                sL = dacSoftClip(sL);
+                sR = dacSoftClip(sR);
+                if (sL > 0.9999f || sL < -0.9999f || sR > 0.9999f || sR < -0.9999f)
+                    g_dacClipCount.fetch_add(1, std::memory_order_relaxed);
             }
 
             int base = (wp * 2) + f * 2;
@@ -932,6 +1050,12 @@ bool UsbAudioDriver::setInterfaceAlt(int alt) {
         LOGW("setInterfaceAlt(%d) failed: %s (errno=%d)", alt, strerror(errno), errno);
         return false;
     }
+    if (vid_ == 0x3302 && alt != 0) {
+        // [quirk TTGK IFACE_DELAY] kernel lists 3302:17c2 with FORCE_IFACE_RESET|IFACE_DELAY.
+        // After activating a non-zero alt, let the DAC firmware settle before any
+        // control transfer (SET_CUR) or URB submission.
+        usleep(5000);
+    }
     return true;
 }
 
@@ -947,7 +1071,7 @@ int UsbAudioDriver::trySetSampleRate(int rate) {
     struct usbdevfs_ctrltransfer ctrl = {};
     int ret = -1;
 
-    if (isUac2_) {
+    if (isUac2_ && !forceUac1_) {
         // [align Salt] Use the same full chain as findClockSourceId():
         // AS General bTerminalLink -> Input Terminal bTerminalID -> bCSourceID.
         int clockId = findClockSourceId();
@@ -970,6 +1094,23 @@ int UsbAudioDriver::trySetSampleRate(int rate) {
         ret = ioctl(fd_, USBDEVFS_CONTROL, &ctrl);
         LOGI("trySetSampleRate(UAC2): clockId=%d rate=%d wIndex=0x%04X ret=%d",
              clockId, rate, ctrl.wIndex, ret);
+        // [V8.124] SET_CUR 后 GET_CUR 读回校验（Aurora 移植），
+        // 防"SET_CUR 返回成功但 DAC 时钟实际没锁到目标率"导致的隐性爆音/变速。
+        if (ret >= 0) {
+            uint32_t readBack = 0;
+            struct usbdevfs_ctrltransfer rb = {};
+            rb.bRequestType = 0xA1; rb.bRequest = 0x01; // GET_CUR
+            rb.wValue = 0x0100;                          // CS_SAM_FREQ_CONTROL
+            rb.wIndex = (uint16_t)((clockId << 8) | 0x00);
+            rb.wLength = 4; rb.timeout = 200; rb.data = &readBack;
+            int rr = ioctl(fd_, USBDEVFS_CONTROL, &rb);
+            if (rr == 4 && readBack == (uint32_t)rate) {
+                LOGI("trySetSampleRate: GET_CUR readback OK rate=%u", readBack);
+            } else {
+                LOGW("trySetSampleRate: GET_CUR readback mismatch (ret=%d got=%u want=%d), clock may not be locked",
+                     rr, readBack, rate);
+            }
+        }
     } else {
         // UAC1: SET_CUR SAMPLING_FREQ_CONTROL on the ISO OUT endpoint.
         data[0] = (uint8_t)(rate & 0xFF);
@@ -989,6 +1130,9 @@ int UsbAudioDriver::trySetSampleRate(int rate) {
     if (ret < 0) {
         LOGW("trySetSampleRate(%d) failed: %s (errno=%d)", rate, strerror(errno), errno);
         return -1;
+    }
+    if (ctlMsgDelayUs_ > 0) {
+        usleep(ctlMsgDelayUs_);  // [quirk] let DAC PLL/clock settle after SET_CUR (TTGK/Qudelix)
     }
     sampleRate_ = rate;
     return rate;
@@ -1052,20 +1196,20 @@ void UsbAudioDriver::streamLoop() {
     setpriority(PRIO_PROCESS, 0, -19);
     const int pktMaxFrames = packetSizeFrames();
     const int pktMaxBytes  = pktMaxFrames * bytesPerFrame_;
-    const int urbBytes     = pktMaxBytes * kPacketsPerUrb;
+    const int urbBytes     = pktMaxBytes * urbPackets_;
     const double samplesPerMicroframe = sampleRate_ / (highSpeed_ ? 8000.0 : 1000.0);
 
     LOGI("streamLoop: maxFrames=%d urbBytes=%d pkts/urb=%d hs=%d rate/mf=%.4f",
-         pktMaxFrames, urbBytes, kPacketsPerUrb, highSpeed_ ? 1 : 0, samplesPerMicroframe);
+         pktMaxFrames, urbBytes, urbPackets_, highSpeed_ ? 1 : 0, samplesPerMicroframe);
 
     // 銆怴3.2.7銆慞re-queue 12 URBs锛堝師4锛夛細纭欢鍦ㄩ闃熷垪 32ms锟?6ms锟?
     // 鎶楄皟搴︽姈鍔ㄢ€斺€旈暱鎾伓鍙戝崱椤挎牴鍥狅細stream 绾跨▼琚锟?>32ms 鍗虫柇锟?
     constexpr int kPreQueue = 12;
     for (int s = 0; s < kPreQueue; s++) {
         memset(urbSlots_[s].buffer, 0, urbBytes);
-        urbSlots_[s].urb->number_of_packets = kPacketsPerUrb;
+        urbSlots_[s].urb->number_of_packets = urbPackets_;
         urbSlots_[s].urb->buffer_length = urbBytes;
-        for (int p = 0; p < kPacketsPerUrb; ++p) {
+        for (int p = 0; p < urbPackets_; ++p) {
             urbSlots_[s].urb->iso_frame_desc[p].length = pktMaxBytes;
         }
         if (!submitUrbRaw(s)) {
@@ -1076,7 +1220,7 @@ void UsbAudioDriver::streamLoop() {
     }
     int slot = kPreQueue;
 
-    size_t reapUrbSize = sizeof(usbdevfs_urb) + kPacketsPerUrb * sizeof(usbdevfs_iso_packet_desc);
+    size_t reapUrbSize = sizeof(usbdevfs_urb) + urbPackets_ * sizeof(usbdevfs_iso_packet_desc);
     auto* reapBuf = static_cast<uint8_t*>(calloc(1, reapUrbSize));
     if (!reapBuf) {
         LOGE("streamLoop: OOM for REAPURB buffer");
@@ -1085,6 +1229,7 @@ void UsbAudioDriver::streamLoop() {
     }
     int urbCompletions = 0;
     double phaseAccum = 0.0;
+    int64_t framesEmitted = 0;   // [2026-09-10 soft-start] frames placed into URBs this stream
 
     while (streaming_.load(std::memory_order_acquire)) {
         memset(reapBuf, 0, reapUrbSize);
@@ -1126,40 +1271,72 @@ void UsbAudioDriver::streamLoop() {
         int totalFramesNeeded = 0;
 
         // Phase accumulator: alternate 5/6 frames per microframe for exact 44100 Hz
-        for (int p = 0; p < kPacketsPerUrb; ++p) {
+        for (int p = 0; p < urbPackets_; ++p) {
             phaseAccum += samplesPerMicroframe;
             int nFrames = (int)phaseAccum;
             phaseAccum -= nFrames;
+            // [soft-start] this packet's fade base = frames already output + frames of prior packets
+            softStartFrameBase_ = framesEmitted + totalFramesNeeded;
             totalFramesNeeded += nFrames;
             int nBytes = nFrames * bytesPerFrame_;
             urbSlots_[slot].urb->iso_frame_desc[p].length = nBytes;
 
             if (availFrames >= totalFramesNeeded) {
                 int nSamples = nFrames * channels_;
-                float vol = volume_;
+                float vol = volume_.load(std::memory_order_relaxed);
                 switch (bitsPerSample_) {
                 case 16: {
                     auto* out = reinterpret_cast<int16_t*>(buf + sampleOffset);
                     const bool dither = ditherEnabled_.load(std::memory_order_relaxed);
+                    // [V8.124] noise-shaped dither (Aurora 移植): 一阶误差反馈 NTF=1-z^-1,
+                    // 44.1kHz+ 用噪声整形，低于回退 TPDF。每声道独立误差状态。
+                    const bool shaped = dither && sampleRate_ >= 44100;
+                    auto tpdf = [&]() -> float {
+                        uint32_t u = ditherState_;
+                        u = u * 1664525u + 1013904223u;   // Numerical Recipes LCG
+                        ditherState_ = u;
+                        uint32_t u2 = u * 1664525u + 1013904223u;
+                        float t1 = ((u  >> 8) & 0xFFFF) / 65535.0f - 0.5f;
+                        float t2 = ((u2 >> 8) & 0xFFFF) / 65535.0f - 0.5f;
+                        return t1 + t2;   // ±1 LSB TPDF
+                    };
+                    const float scale = 32767.0f;
                     for (int j = 0; j < nSamples; ++j) {
                         int idx = ((rp * 2) + sampleCursor + j) & ringMask;
-                        float s = ringBuffer_[idx] * vol;
+                        float s = ringBuffer_[idx] * vol * softStartGain(j);
                         if (s >  1.0f) s =  1.0f;
                         if (s < -1.0f) s = -1.0f;
-                        // TPDF dither: 两个独立均匀分布相减 = 三角分布,幅度 ±1 LSB,
-                        // 消除量化失真(谐波)并去相关噪声。仅在降位到 16bit 时启用。
-                        float dithered = s * 32767.0f;
-                        if (dither) {
-                            uint32_t u = ditherState_;
-                            u = u * 1664525u + 1013904223u;   // Numerical Recipes LCG
-                            ditherState_ = u;
-                            uint32_t u2 = u * 1664525u + 1013904223u;
-                            // two uniforms in [-0.5, 0.5], 叠加为三角分布
-                            float t1 = ((u  >> 8) & 0xFFFF) / 65535.0f - 0.5f;
-                            float t2 = ((u2 >> 8) & 0xFFFF) / 65535.0f - 0.5f;
-                            dithered += (t1 + t2);   // ±1 LSB TPDF
+                        if (shaped) {
+                            float& err = (j & 1) ? nsErrorR_ : nsErrorL_;
+                            float source = s * scale;
+                            if (source <= -scale || source >= scale - 1.0f) {
+                                err = 0.0f;   // 硬削波边界清误差
+                                out[j] = static_cast<int16_t>(std::lrintf(source));
+                            } else {
+                                float input = source - err;
+                                float rounded = std::floor(input + tpdf() + 0.5f);
+                                float limited = rounded < -scale ? -scale
+                                              : (rounded > scale - 1.0f ? scale - 1.0f : rounded);
+                                err = (rounded == limited)
+                                      ? std::max(-1.5f, std::min(1.5f, rounded - input)) : 0.0f;
+                                out[j] = static_cast<int16_t>(limited);
+                            }
+                        } else {
+                            // [V8.131] round-half-even instead of truncation: the plain
+                            // C cast truncates toward zero, which turns quantization
+                            // error into signal-correlated distortion (audible as sand /
+                            // grain on tails and fades = the "electronic hiss"). 24-bit
+                            // and 32-bit paths already use std::lrintf (V8.123); 16-bit
+                            // was the only one left truncating.
+                            float dithered = s * scale;
+                            if (dither) dithered += tpdf();
+                            // s is pre-clamped to [-1,1], so dithered fits int16 except
+                            // for the ±1 LSB dither excursion at the rails; clamp exactly.
+                            float rounded = std::lrintf(dithered);
+                            if (rounded >  32767.0f) rounded =  32767.0f;
+                            if (rounded < -32768.0f) rounded = -32768.0f;
+                            out[j] = static_cast<int16_t>(rounded);
                         }
-                        out[j] = static_cast<int16_t>(dithered);
                     }
                     break;
                 }
@@ -1168,7 +1345,7 @@ void UsbAudioDriver::streamLoop() {
                     uint8_t* out = buf + sampleOffset;
                     for (int j = 0; j < nSamples; ++j) {
                         int idx = ((rp * 2) + sampleCursor + j) & ringMask;
-                        float s = ringBuffer_[idx] * vol;
+                        float s = ringBuffer_[idx] * vol * softStartGain(j);
                         if (s >  1.0f) s =  1.0f;
                         if (s < -1.0f) s = -1.0f;
                         int32_t v = std::lrintf(s * 8388607.0f);  // 无偏舍入(round-half-to-even)替代截断，消除负样本朝零截断的 -0.5LSB 直流偏置
@@ -1182,7 +1359,7 @@ void UsbAudioDriver::streamLoop() {
                     auto* out = reinterpret_cast<int32_t*>(buf + sampleOffset);
                     for (int j = 0; j < nSamples; ++j) {
                         int idx = ((rp * 2) + sampleCursor + j) & ringMask;
-                        double s = static_cast<double>(ringBuffer_[idx]) * vol;
+                        double s = static_cast<double>(ringBuffer_[idx]) * vol * softStartGain(j);
                         if (s >  1.0) s =  1.0;
                         if (s < -1.0) s = -1.0;
                         out[j] = static_cast<int32_t>(s * 2147483647.0);
@@ -1201,6 +1378,7 @@ void UsbAudioDriver::streamLoop() {
             sampleCursor += nFrames * channels_;
         }
 
+        framesEmitted += totalFramesNeeded;   // [2026-09-10 soft-start]
         if (availFrames >= totalFramesNeeded) {
             readPos_.store((rp + totalFramesNeeded) % kRingFrames, std::memory_order_release);
             totalSamplesOut_.fetch_add(totalFramesNeeded, std::memory_order_relaxed);
@@ -2038,6 +2216,27 @@ void UsbAudioDriver::setFeatureUnitOverride(int unitId, int channel, int channel
          featureUnitMinDb_, featureUnitMaxDb_);
 }
 
+// [2026-09-10 multi-DAC quirk] Kotlin DacProfile overrides (single source of truth).
+// Called right after nativeClaim succeeds. Only non-default values are pushed;
+// open() built-in quirk init has already run, so this *overrides* the built-in
+// defaults for known devices. Zero urbPackets/ctlMsg/ifaceDelay means "keep native default".
+void UsbAudioDriver::setQuirkOverride(int urbPackets, int ctlMsgDelayUs, int ifaceDelayUs,
+                                      bool forceIfaceReset, bool forceUac1, bool skipSetCur) {
+    if (urbPackets > 0 && urbPackets <= kPacketsPerUrb) {
+        urbPackets_ = urbPackets;
+    }
+    if (ctlMsgDelayUs > 0) ctlMsgDelayUs_ = ctlMsgDelayUs;
+    if (ifaceDelayUs > 0)  ifaceDelayUs_  = ifaceDelayUs;
+    forceIfaceReset_ = forceIfaceReset;
+    forceUac1_       = forceUac1;
+    skipSetCurQuirk_ = skipSetCur;
+    quirkOverrideApplied_ = true;
+    LOGI("quirk override: urbPackets_=%d ctlDelay=%d ifaceDelay=%d forceReset=%d forceUac1=%d skipSetCur=%d",
+         urbPackets_, ctlMsgDelayUs_, ifaceDelayUs_,
+         forceIfaceReset ? 1 : 0, forceUac1 ? 1 : 0, skipSetCur ? 1 : 0);
+}
+
+
 bool UsbAudioDriver::setHardwareVolume(float pct) {
     if (!hardwareVolumeReady_ || featureUnitId_ <= 0 || fd_ < 0) return false;
     // [通用化] pct 是 cubic 后的值（pct^3）。软件 cubic taper 的等效 dB =
@@ -2100,7 +2299,7 @@ bool UsbAudioDriver::submitUrbRaw(int slot) {
     urb->buffer          = urbSlots_[slot].buffer;
     urb->status          = 0;
     urb->flags           = USBDEVFS_URB_ISO_ASAP;
-    urb->number_of_packets = kPacketsPerUrb;
+    urb->number_of_packets = urbPackets_;
 
     int ret = ioctl(fd_, USBDEVFS_SUBMITURB, urb);
     if (ret < 0 && errno != EAGAIN) {

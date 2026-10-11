@@ -1,24 +1,34 @@
 package com.sdw.music.player.ui.screens
 
-import android.app.Activity
-import androidx.activity.compose.BackHandler
+import android.content.Intent
+import com.sdw.music.player.ui.theme.sectionTitleStyle
+import android.net.Uri
 import android.os.Build
+import android.os.Environment
 import android.provider.MediaStore
+import android.provider.Settings
 import android.util.Log
-import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
 import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.Save
@@ -29,9 +39,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import coil.compose.AsyncImagePainter
@@ -39,16 +49,22 @@ import coil.compose.rememberAsyncImagePainter
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 import com.sdw.music.player.LrcParser
 import com.sdw.music.player.R
 import com.sdw.music.player.LyricLine
 import com.sdw.music.player.ui.components.LyricViewCompose
+import com.sdw.music.player.ui.components.SheetImmersiveStatusBar
+import com.sdw.music.player.ui.components.ImmersiveSystemBars
+import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.Song
 import com.sdw.music.player.SongRepository
 import com.sdw.music.player.lyric.LyricRepository
 import com.sdw.music.player.ui.theme.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -61,14 +77,27 @@ fun LyricFullscreenScreen(
     albumArt: String?,
     accentColor: Long,
     positionMs: Long,
+    isPlaying: Boolean = true,
     onSeekTo: (Long) -> Unit,
     onNavigateBack: () -> Unit,
+    onPrevious: () -> Unit = {},
+    onNext: () -> Unit = {},
     onLyricsSaved: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val accent = Color(accentColor)
-    val coverUri = remember(albumArt) { albumArt?.takeIf { it.isNotBlank() } }
+    // V8.92 accentColor = 0L 表示「无封面色，走主题色」。直接 Color(0L) 会得到全透明，
+    // 歌词高亮/开关/按钮全部看不见 —— 必须与 PlayerScreen/SongListScreen 一样回退 primary。
+    // 【V8.205】同上：封面取色降饱和，色相原样保留。
+    val accent = CoverTone.calm(
+        if (accentColor != 0L) Color(accentColor) else MaterialTheme.colorScheme.primary
+    )
+    // LyricViewCompose 收的是 ARGB Int，不能用 Color.value（那是打包后的 ULong）
+    val accentArgb = accent.toArgb()
+    // [V8.94] 判据改用 hasRealCover：扫描器给每行都写非空 albumArtUri（无封面时是 albumart
+    // 虚拟表死链接），isNotBlank() 恒真 → 「无封面」兜底的 accent 渐变背景永远走不到，
+    // 且小封面位拿死链接去解码 → 空白。
+    val coverUri = remember(albumArt) { albumArt?.takeIf { SongRepository.hasRealCover(it) } }
 
     var lyricLines by remember { mutableStateOf<List<LyricLine>>(emptyList()) }
     var rawLrcContent by remember { mutableStateOf("") }
@@ -85,6 +114,9 @@ fun LyricFullscreenScreen(
     var showEditDialog by remember { mutableStateOf(false) }
     var editingLrcText by remember { mutableStateOf("") }
     var isSaving by remember { mutableStateOf(false) }
+    var showClearConfirm by remember { mutableStateOf(false) }
+    // [V8.129] 内嵌写标签需要「所有文件访问」；未授权时给出引导（历史上是静默失败）
+    var showStorageGuide by remember { mutableStateOf(false) }
 
     val effectiveSource = if (isManualSource) selectedSource else "auto"
 
@@ -92,50 +124,16 @@ fun LyricFullscreenScreen(
     val lyricPrefs = remember { context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE) }
     val lyricFontSize = lyricPrefs.getInt("lyric_font_size", 28)
     val lyricVisibleLines = lyricPrefs.getInt("lyric_visible_lines", 7)
+    // [V8.121] 逐字显示开关（增强型 LRC 行内 <mm:ss.xx> 逐字时间戳才生效）
+    var wordByWord by remember { mutableStateOf(lyricPrefs.getBoolean("lyric_word_by_word", false)) }
 
-    // === 沉浸式：隐藏状态栏 + 导航栏 ===
-    val view = LocalView.current
-    DisposableEffect(Unit) {
-        val activity = (view.context as? Activity) ?: return@DisposableEffect onDispose {}
-        val window = activity.window ?: return@DisposableEffect onDispose {}
-
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            window.setDecorFitsSystemWindows(false)
-            // 状态栏/导航栏透明：transient 显示时背景透上来，避免黑色条与卡片黑底重叠
-            window.statusBarColor = android.graphics.Color.TRANSPARENT
-            window.navigationBarColor = android.graphics.Color.TRANSPARENT
-            window.isStatusBarContrastEnforced = false
-            window.isNavigationBarContrastEnforced = false
-            window.insetsController?.let {
-                it.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            }
-        } else {
-            window.statusBarColor = android.graphics.Color.TRANSPARENT
-            window.navigationBarColor = android.graphics.Color.TRANSPARENT
-            @Suppress("DEPRECATION")
-            window.decorView.systemUiVisibility = (
-                View.SYSTEM_UI_FLAG_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    or View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                    or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                    or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                    or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-            )
-        }
-
-        onDispose {
-            try {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    window.insetsController?.show(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-                    window.setDecorFitsSystemWindows(true)
-                } else {
-                    @Suppress("DEPRECATION")
-                    window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-                }
-            } catch (_: Exception) {}
-        }
-    }
+    // [V8.126] 沉浸：隐藏状态栏 + 导航栏。
+    // 旧实现用 `view.context as? Activity` 裸 cast 找窗口——本页在主窗口里，view.context
+    // 是 ContextThemeWrapper，cast 直接失败 -> 整个 DisposableEffect 静默 no-op，
+    // 状态栏永远不隐藏（不崩不报错，与播放页 V8.125 同源 bug）。
+    // 统一改用 ImmersiveSystemBars：从 window.decorView 取 controller + ContextWrapper
+    // 链找 Activity + 窗口获焦时重新 hide（弹层关闭也压得住）。
+    ImmersiveSystemBars(hideNavigationBar = true)
 
     // 加载Lyrics
     LaunchedEffect(songId, effectiveSource) {
@@ -173,20 +171,70 @@ fun LyricFullscreenScreen(
     }
 
     // 背景：MD3 Surface
-    // 系统返回键
-    BackHandler(onBack = onNavigateBack)
+    // [V8.97] 普通 BackHandler 已移除：它会把返回回调吃掉，使本页在预测返回手势下
+    // 完全不跟手（普通 BackHandler 不参与 seek）。交给 NavHost 内建预测返回，
+    // 返回行为仍由 NavHost 的 popBackStack 完成；顶部返回按钮走 onNavigateBack 不受影响。
 
     // 全屏歌词固定深色配色：歌词文字/开关都是白色设计，浅色模式下必须锁深色
     MaterialTheme(colorScheme = SDWDarkColorScheme) {
+    // === 【V8.428】3 秒无操作后隐藏顶部操作栏 + 底部切歌按钮，只留歌词 ===
+    // 设置开关（sdw_music_prefs，与设置页"歌词显示"分组同一份）：
+    // 关掉后控件常驻，行为回到 V8.427 及之前。
+    val uiPrefs = remember(context) {
+        context.getSharedPreferences("sdw_music_prefs", android.content.Context.MODE_PRIVATE)
+    }
+    val autoHideEnabled = uiPrefs.getBoolean("lyric_controls_auto_hide", true)
+    // interaction 每次"用户碰了一下屏幕"就 +1，作为 3 秒定时器的重启信号；
+    // 用它当 LaunchedEffect 的 key，天然实现"重新出现 → 重新计时"。
+    var interaction by remember { mutableIntStateOf(0) }
+    var controlsVisible by remember { mutableStateOf(true) }
+    LaunchedEffect(interaction, autoHideEnabled) {
+        controlsVisible = true
+        if (!autoHideEnabled) return@LaunchedEffect   // 关了开关就一直显示
+        delay(3_000)
+        controlsVisible = false
+    }
+    // 歌词的上下留白跟着一起收：原本 76dp/136dp 是专门给操作栏和底部按钮留的位，
+    // 控件藏起来还留着空位，歌词会显得偏小偏上。
+    val lyricTopPad by animateDpAsState(
+        if (controlsVisible) 76.dp else 12.dp, tween(220)
+    )
+    val lyricBottomPad by animateDpAsState(
+        if (controlsVisible) 136.dp else 24.dp, tween(220)
+    )
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surface)
+            // 任意点击都算"操作" → 控件立刻回来。
+            // requireUnconsumed = false：歌词行的点击跳转、顶部按钮的点击都照常生效，
+            // 这里只在事件被子节点消费前"偷听"一下按下，不抢。
+            //写法照抄 PlayerComponents 的滑动手势（awaitEachGesture + awaitFirstDown）。
+            .pointerInput(Unit) {
+                awaitEachGesture {
+                    awaitFirstDown(requireUnconsumed = false)
+                    interaction++
+                }
+            }
     ) {
         // === 背景层：封面模糊 + 渐变压暗，无封面时用 accent 渐变兜底 ===
         if (coverUri != null) {
+            // V8.69 - this was the worst unbounded decode in the app: a full-screen
+            // (1200x2670 = 12.8MB) bitmap decoded raw and then thrown under a 42dp blur,
+            // which destroys that detail anyway. Decode to a third of the width instead.
+            val lyricBgPx = remember(context) {
+                (context.resources.displayMetrics.widthPixels / 3).coerceAtLeast(320)
+            }
             Image(
-                painter = rememberAsyncImagePainter(coverUri),
+                painter = rememberAsyncImagePainter(
+                    model = coil.request.ImageRequest.Builder(context)
+                        .data(coverUri)
+                        .size(lyricBgPx)
+                        .allowHardware(false)
+                        .crossfade(false)
+                        .build()
+                ),
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize().blur(42.dp),
                 contentScale = ContentScale.Crop,
@@ -248,38 +296,52 @@ fun LyricFullscreenScreen(
                 LyricViewCompose(
                     lyrics = lyricLines,
                     positionMs = positionMs,
-                    themeColor = accentColor.toInt(),
+                    themeColor = accentArgb,
                     onLineClick = { line -> onSeekTo(line.timeMs) },
                     showProgressBar = true,
                     fontSize = lyricFontSize,
                     visibleLines = lyricVisibleLines,
+                    wordByWord = wordByWord,
+                    isPlaying = isPlaying,
                     fadeColor = Color.Black,
                     showTopFade = false,
                     showBottomFade = false,
                     modifier = Modifier
                         .fillMaxSize()
                         .statusBarsPadding()  // 顶部避开状态栏
-                        .let { mod ->
-                            if (isManualSource)
-                                mod.padding(bottom = 80.dp)  // 给底部标签留出空间（标签高约28dp+padding）
-                            else mod
-                        }
+                        // [V8.130] 本页 V8.126 起沉浸（statusBars 被 hide -> statusBarsPadding() 归 0），
+                        // 顶部内容会顶进摄像头挖孔。displayCutout 是独立物理 inset，隐藏状态栏
+                        // 后依然有效，必须单独避让（与 PlayerScreen/SongListScreen 同写法）。
+                        .windowInsetsPadding(WindowInsets.displayCutout)
+                        // 【V8.39】顶部留白：顶部操作栏（返回+封面36dp+歌名/歌手+开关）是半透明叠加层，
+                        // 歌词若不预留会顶进歌名区域造成叠加。预留 76dp 让首行歌词落在操作栏下方。
+                        .padding(top = lyricTopPad)   // 【V8.428】随控件显隐动画切换（76↔12dp）
+                        .padding(bottom = lyricBottomPad)  // 同上（136↔24dp）
                 )
             }
         }
 
         // === 顶部操作栏（半透明叠加，不保留空白）===
         // 不使用渐变背景，直接半透明Row覆盖在Lyrics上方
+        // 【V8.428】AnimatedVisibility：淡出后节点被真正移除，不会"隐形但照样吃点击"。
+        AnimatedVisibility(
+            visible = controlsVisible,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(220)),
+            modifier = Modifier.align(Alignment.TopCenter)
+        ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
                 .statusBarsPadding()
+                    .windowInsetsPadding(WindowInsets.displayCutout)  // [V8.130] 顶部操作栏同样避开挖孔
+                .glassSurface(shape = SDWShapes.Panel, accent = accent)
                 .padding(horizontal = 4.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             IconButton(onClick = onNavigateBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = MaterialTheme.colorScheme.onBackground)
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
             }
 
             Spacer(Modifier.width(4.dp))
@@ -287,31 +349,32 @@ fun LyricFullscreenScreen(
             // 歌曲信息卡（封面 + 歌名 + 歌手），内嵌在操作栏中避免与返回键重叠
             Row(
                 modifier = Modifier
+                    .weight(1f)  // [V8.121] 歌曲信息块吸收剩余宽度并优先收缩，避免歌名长时挤扁右侧开关
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(modifier = Modifier.size(36.dp), contentAlignment = Alignment.Center) {
+                    // [V8.94] 规则：有封面显示封面，没封面显示 logo。
+                    // 原先 if/else 二选一（无封面走 accent 色块 + MusicNote）不符合规则。
+                    // 改为 logo 打底 + 封面无条件叠放，取不到图自然露出 logo。
+                    DefaultCoverImage(
+                        songTitle = songTitle,
+                        songArtist = songArtist,
+                        modifier = Modifier.fillMaxSize(),
+                        shape = SDWShapes.Thumb,
+                        tintColor = accent
+                    )
                     if (coverUri != null) {
                         Image(
                             painter = rememberAsyncImagePainter(coverUri),
                             contentDescription = null,
-                            modifier = Modifier.size(36.dp).clip(RoundedCornerShape(8.dp)),
+                            modifier = Modifier.size(36.dp).clip(SDWShapes.Thumb),
                             contentScale = ContentScale.Crop
                         )
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .size(36.dp)
-                                .clip(RoundedCornerShape(8.dp))
-                                .background(accent.copy(alpha = 0.35f)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(Icons.Default.MusicNote, null, tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(18.dp))
-                        }
                     }
                 }
                 Spacer(Modifier.width(10.dp))
-                Column(modifier = Modifier.widthIn(max = 110.dp)) {
+                Column(modifier = Modifier.weight(1f, fill = false)) {
                     Text(
                         text = songTitle.ifEmpty { stringResource(R.string.title_fullscreen_lyrics) },
                         color = Color.White,
@@ -345,7 +408,6 @@ fun LyricFullscreenScreen(
             }
 
             Spacer(Modifier.width(4.dp))
-            Spacer(Modifier.weight(1f))
 
             // 手动/自动切换
             Text(
@@ -374,6 +436,30 @@ fun LyricFullscreenScreen(
 
             Spacer(Modifier.width(4.dp))
 
+            // [V8.121] 逐字显示开关
+            Text(
+                text = stringResource(R.string.lyrics_word_by_word),
+                color = if (wordByWord) accent else Color.White.copy(alpha = 0.55f),
+                fontSize = 10.sp,
+                fontWeight = if (wordByWord) FontWeight.SemiBold else FontWeight.Normal
+            )
+            Switch(
+                checked = wordByWord,
+                onCheckedChange = {
+                    wordByWord = it
+                    lyricPrefs.edit().putBoolean("lyric_word_by_word", it).apply()
+                },
+                colors = SwitchDefaults.colors(
+                    checkedThumbColor = accent,
+                    checkedTrackColor = accent.copy(alpha = 0.3f),
+                    uncheckedThumbColor = Color.White.copy(alpha = 0.6f),
+                    uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
+                ),
+                modifier = Modifier.padding(horizontal = 2.dp)
+            )
+
+            Spacer(Modifier.width(4.dp))
+
             // 编辑按钮
             FilledTonalIconButton(
                 onClick = {
@@ -396,9 +482,8 @@ fun LyricFullscreenScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .navigationBarsPadding()
-                    .padding(bottom = 16.dp)
-                    .clip(RoundedCornerShape(16.dp))
-                    .background(Color.Black.copy(alpha = 0.25f))
+                    .padding(bottom = 108.dp)  // 上移避开底部切歌按钮
+                    .glassSurface(shape = SDWShapes.Row, accent = accent)
                     .clickable { showSourceSheet = true }
                     .padding(horizontal = 14.dp, vertical = 6.dp)
             ) {
@@ -417,6 +502,60 @@ fun LyricFullscreenScreen(
                 )
             }
         }
+        }   // 【V8.428】AnimatedVisibility（顶部操作栏）结束
+
+        // === 底部切歌按钮（上一曲/下一曲，小尺寸左右分居，与顶部操作栏风格统一）===
+        // 【V8.428】两个切歌按钮一起淡出：3 秒的意义就是画面只剩歌词。
+        // 左：上一曲
+        AnimatedVisibility(
+            visible = controlsVisible,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(220)),
+            modifier = Modifier.align(Alignment.BottomStart)
+        ) {
+        FilledTonalIconButton(
+            onClick = onPrevious,
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = Color.White.copy(alpha = 0.14f),
+                contentColor = Color.White
+            ),
+            modifier = Modifier
+                .navigationBarsPadding()
+                .padding(start = 24.dp, bottom = 20.dp)
+                .size(38.dp)
+        ) {
+            Icon(
+                Icons.Default.SkipPrevious, stringResource(R.string.player_previous),
+                modifier = Modifier.size(20.dp),
+                tint = Color.White.copy(alpha = 0.85f)
+            )
+        }
+        }   // 【V8.428】AnimatedVisibility（左）结束
+        // 右：下一曲
+        AnimatedVisibility(
+            visible = controlsVisible,
+            enter = fadeIn(tween(220)),
+            exit = fadeOut(tween(220)),
+            modifier = Modifier.align(Alignment.BottomEnd)
+        ) {
+        FilledTonalIconButton(
+            onClick = onNext,
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = Color.White.copy(alpha = 0.14f),
+                contentColor = Color.White
+            ),
+            modifier = Modifier
+                .navigationBarsPadding()
+                .padding(end = 24.dp, bottom = 20.dp)
+                .size(38.dp)
+        ) {
+            Icon(
+                Icons.Default.SkipNext, stringResource(R.string.player_next),
+                modifier = Modifier.size(20.dp),
+                tint = Color.White.copy(alpha = 0.85f)
+            )
+        }
+        }   // 【V8.428】AnimatedVisibility（右）结束
     }
 
     // === Lyrics来源选择 BottomSheet ===
@@ -425,22 +564,16 @@ fun LyricFullscreenScreen(
             onDismissRequest = { showSourceSheet = false },
             containerColor = Color(0xFF141414),
             tonalElevation = 0.dp,
-            dragHandle = {
-                Box(
-                    modifier = Modifier
-                        .padding(top = 10.dp, bottom = 6.dp)
-                        .width(36.dp)
-                        .height(4.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(accent.copy(alpha = 0.5f))
-                )
-            }
+            // [V8.117] 去掉顶部拖拽小短条；下滑关闭不受影响。
+            dragHandle = null
         ) {
+            // [V8.117] 独立 Dialog 窗口需自行隐藏状态栏。
+            SheetImmersiveStatusBar()
             Spacer(Modifier.height(8.dp))
             Text(
                 text = stringResource(R.string.lyrics_select_source),
                 color = Color.White,
-                style = MaterialTheme.typography.titleMedium,
+                style = sectionTitleStyle(),
                 modifier = Modifier.padding(horizontal = 24.dp, vertical = 8.dp)
             )
             Spacer(Modifier.height(4.dp))
@@ -483,7 +616,7 @@ fun LyricFullscreenScreen(
             containerColor = MaterialTheme.colorScheme.surfaceVariant,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(stringResource(R.string.title_edit_lyrics), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium)
+                    Text(stringResource(R.string.title_edit_lyrics), color = MaterialTheme.colorScheme.onBackground)
                     Spacer(Modifier.weight(1f))
                     Text(
                         text = sourceLabel,
@@ -568,6 +701,9 @@ fun LyricFullscreenScreen(
                                 val repo = LyricRepository.getInstance(context)
                                 val saved = repo.saveLyricsDirectly(song!!, editingLrcText)
                                 if (saved != null) {
+                                    // [V8.129] .lrc 已保存成功；若音频内嵌标签因缺「所有文件访问」写不进去，
+                                    // 明确提示并引导授权（否则用户只看到「没写入内嵌」，不知原因）。
+                                    val blocked = withContext(Dispatchers.IO) { needsAllFilesAccess(song!!) }
                                     // 重新解析并显示
                                     withContext(Dispatchers.Main) {
                                         rawLrcContent = editingLrcText
@@ -575,6 +711,7 @@ fun LyricFullscreenScreen(
                                         sourceLabel = context.getString(R.string.lyrics_local_edit)
                                         onLyricsSaved?.invoke(editingLrcText)
                                         Toast.makeText(context, R.string.lyrics_saved, Toast.LENGTH_SHORT).show()
+                                        if (blocked) showStorageGuide = true
                                     }
                                 } else {
                                     withContext(Dispatchers.Main) {
@@ -601,9 +738,119 @@ fun LyricFullscreenScreen(
                 }
             },
             dismissButton = {
+                Row {
+                    // [V8.117] 清除歌词：删除内嵌标签 + 本地 .lrc，并忽略内嵌（错歌词删得掉了）
+                    TextButton(
+                        onClick = { showClearConfirm = true },
+                        enabled = !isSaving,
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    ) {
+                        Text(stringResource(R.string.action_clear))
+                    }
+                    TextButton(
+                        onClick = { showEditDialog = false },
+                        enabled = !isSaving,
+                        colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))
+                    ) {
+                        Text(stringResource(R.string.action_cancel))
+                    }
+                }
+            }
+        )
+    }
+
+    // === [V8.117] 清除歌词二次确认 ===
+    if (showClearConfirm) {
+        AlertDialog(
+            onDismissRequest = { if (!isSaving) showClearConfirm = false },
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            title = {
+                Text(
+                    stringResource(R.string.lyrics_clear_confirm_title),
+                    color = MaterialTheme.colorScheme.onBackground
+                )
+            },
+            text = {
+                Text(
+                    stringResource(R.string.lyrics_clear_confirm_message),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.9f)
+                )
+            },
+            confirmButton = {
                 TextButton(
-                    onClick = { showEditDialog = false },
-                    enabled = !isSaving,
+                    onClick = {
+                        if (isSaving) return@TextButton
+                        isSaving = true
+                        scope.launch {
+                            val s = SongRepository.getSongs().find { it.id == songId }
+                            val ok = if (s != null) {
+                                LyricRepository.getInstance(context).deleteLyrics(s)
+                            } else false
+                            withContext(Dispatchers.Main) {
+                                if (ok) {
+                                    rawLrcContent = ""
+                                    lyricLines = emptyList()
+                                    sourceLabel = ""
+                                    onLyricsSaved?.invoke("")
+                                    Toast.makeText(context, R.string.lyrics_cleared, Toast.LENGTH_SHORT).show()
+                                } else {
+                                    Toast.makeText(context, R.string.lyrics_save_failed, Toast.LENGTH_SHORT).show()
+                                }
+                                isSaving = false
+                                showClearConfirm = false
+                                showEditDialog = false
+                            }
+                        }
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text(stringResource(R.string.action_clear))
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showClearConfirm = false },
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))
+                ) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            }
+        )
+    }
+
+    // === [V8.129] 内嵌写入需要「所有文件访问」授权 ===
+    if (showStorageGuide) {
+        AlertDialog(
+            onDismissRequest = { showStorageGuide = false },
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
+            title = { Text(stringResource(R.string.lyric_write_tag_need_permission), color = MaterialTheme.colorScheme.onBackground) },
+            text = {
+                Text(
+                    stringResource(R.string.lyric_write_tag_explain),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.9f)
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showStorageGuide = false
+                        try {
+                            @Suppress("DEPRECATION")
+                            context.startActivity(
+                                Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                                    data = Uri.parse("package:${context.packageName}")
+                                }
+                            )
+                        } catch (_: Exception) {}
+                    },
+                    colors = ButtonDefaults.textButtonColors(contentColor = accent)
+                ) {
+                    Text(stringResource(R.string.action_grant_all_files))
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = { showStorageGuide = false },
                     colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))
                 ) {
                     Text(stringResource(R.string.action_cancel))
@@ -612,5 +859,16 @@ fun LyricFullscreenScreen(
         )
     }
     }
+}
+
+// [V8.129] 该歌曲的内嵌标签写入是否被「所有文件访问」权限挡住。
+// 只有 LyricsEmbedder 支持的格式（flac/mp3/wav）才有意义；.lrc 不受此限制。
+private fun needsAllFilesAccess(song: Song): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+    if (Environment.isExternalStorageManager()) return false
+    val path = song.filePath.ifBlank { song.path }
+    if (path.isBlank() || path.startsWith("content://")) return false
+    val ext = path.substringAfterLast('.', "").lowercase()
+    return ext == "flac" || ext == "mp3" || ext == "wav"
 }
 

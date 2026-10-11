@@ -212,6 +212,18 @@ object UsbDacManager {
                     profile.featureUnitMinDb, profile.featureUnitMaxDb, profile.featureUnitResDb
                 )
             }
+            // 【2026-09-10 multi-DAC quirk】Kotlin DacProfile = single source of truth.
+            // Push per-device quirk overrides to native (non-default values only);
+            // native keeps built-in table as fallback for unknown DACs.
+            if (profile.urbPacketsOverride > 0 || profile.ctlMsgDelayUs > 0 ||
+                profile.ifaceDelayUs > 0 || profile.forceIfaceReset || profile.forceUac1 ||
+                profile.skipSetCurQuirk) {
+                nativeSetQuirkOverride(
+                    profile.urbPacketsOverride, profile.ctlMsgDelayUs, profile.ifaceDelayUs,
+                    profile.forceIfaceReset, profile.forceUac1, profile.skipSetCurQuirk
+                )
+                DebugLog.add(TAG, "claim: quirk override vid=${device.vendorId.toString(16)} pid=${device.productId.toString(16)} urbPkts=${profile.urbPacketsOverride} ctlDelay=${profile.ctlMsgDelayUs} ifaceDelay=${profile.ifaceDelayUs} forceReset=${profile.forceIfaceReset} uac1=${profile.forceUac1} skipSetCur=${profile.skipSetCurQuirk}")
+            }
         }
         if (!result) conn.close()
         return result
@@ -477,6 +489,19 @@ object UsbDacManager {
     }
     fun getVolume(): Float = currentVolume
     fun setDitherEnabled(enabled: Boolean) { if (isNativeLoaded) nativeSetDitherEnabled(enabled) }
+    // [V8.119] true=宽裕余量（knee 0.92），false=传统（knee 2/3）
+    fun setWideHeadroom(enabled: Boolean) { if (isNativeLoaded) try { nativeSetWideHeadroom(enabled) } catch (_: Throwable) {} }
+    // [V8.119] true=原声直通（DAC 链整条 DSP 旁路）
+    fun setDirectPassthrough(enabled: Boolean) { if (isNativeLoaded) try { nativeSetDirectPassthrough(enabled) } catch (_: Throwable) {} }
+
+    /**
+     * [2026-09-10 soft-start] Mask DAC PLL re-lock pops on stream start with a 150ms fade-in.
+     * Default OFF - the gain ramp modifies samples, so bit-perfect output is only traded
+     * away when the user explicitly turns this on in Settings.
+     */
+    fun setSoftStartEnabled(enabled: Boolean) {
+        if (isNativeLoaded) nativeSetSoftStartEnabled(enabled)
+    }
 
     // ── DAC 链路 MSEB / 图形 EQ（与 Oboe 共用同一套 Biquad）──
     fun setDspEnabled(enabled: Boolean) { if (isNativeLoaded) nativeSetDspEnabled(enabled) }
@@ -517,6 +542,9 @@ object UsbDacManager {
     fun setLoudnessIntensity(intensity: Float) { if (isNativeLoaded) try { nativeSetLoudnessIntensity(intensity) } catch (_: Throwable) {} }
     fun setLoudnessOutGain(gain: Float) { if (isNativeLoaded) try { nativeSetLoudnessOutGain(gain) } catch (_: Throwable) {} }
 
+    /** 【V8.170】响度统一管理（DAC 独占路径）。 */
+    fun setNormalizationGain(db: Float) { if (isNativeLoaded) try { nativeSetNormalizationGain(db) } catch (_: Throwable) {} }
+
     @Volatile private var currentVolume = 0.7f
     fun getSafeDacInfo(): String {
         if (!isNativeLoaded) return "Native driver not loaded"
@@ -535,17 +563,23 @@ object UsbDacManager {
     fun getSourceSampleRate(song: Song): Int {
         val path = song.filePath.ifEmpty { song.path }
         if (path.isBlank()) return 48000
-        val ex = android.media.MediaExtractor()
+        // 【V8.429】收敛到单线程闸门（切歌时本函数被高频调用，是最易与其它探测
+        // 并发拆卸内部 codec 的地方；native abort 详见 MediaProbe 类注释）。
         return try {
-            ex.setDataSource(path)
-            for (i in 0 until ex.trackCount) {
-                val fmt = ex.getTrackFormat(i)
-                if (fmt.getString(android.media.MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
-                    return fmt.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
-                }
+            MediaProbe.onProbeThread {
+                val ex = android.media.MediaExtractor()
+                try {
+                    ex.setDataSource(path)
+                    for (i in 0 until ex.trackCount) {
+                        val fmt = ex.getTrackFormat(i)
+                        if (fmt.getString(android.media.MediaFormat.KEY_MIME)?.startsWith("audio/") == true) {
+                            return@onProbeThread fmt.getInteger(android.media.MediaFormat.KEY_SAMPLE_RATE)
+                        }
+                    }
+                    48000
+                } finally { ex.release() }
             }
-            48000
-        } finally { ex.release() }
+        } catch (_: Throwable) { 48000 }
     }
 
     // ============================================================
@@ -767,7 +801,13 @@ object UsbDacManager {
     private external fun nativeClearDebugLog()
     private external fun nativeSetVolume(volume: Float)
     private external fun nativeSetDitherEnabled(enabled: Boolean)
+    // [V8.119] 宽裕余量档（USB DAC 链，无 limiter，仅 dacSoftClip 兜底）
+    private external fun nativeSetWideHeadroom(enabled: Boolean)
+    // [V8.119] 原声直通（USB DAC 链整条 DSP 旁路）
+    private external fun nativeSetDirectPassthrough(enabled: Boolean)
+    private external fun nativeSetSoftStartEnabled(enabled: Boolean)
     private external fun nativeSetFeatureUnitOverride(unitId: Int, channel: Int, channels: Int, minDb: Float, maxDb: Float, resDb: Float)
+    private external fun nativeSetQuirkOverride(urbPackets: Int, ctlMsgDelayUs: Int, ifaceDelayUs: Int, forceIfaceReset: Boolean, forceUac1: Boolean, skipSetCur: Boolean)
     private external fun nativeSetDspEnabled(enabled: Boolean)
     private external fun nativeSetDspEq5Band(gainsDb: FloatArray, freqsHz: FloatArray?)
     private external fun nativeResetDspEq5Band()
@@ -784,6 +824,7 @@ object UsbDacManager {
     private external fun nativeSetLoudnessEnabled(enabled: Boolean)
     private external fun nativeSetLoudnessIntensity(intensity: Float)
     private external fun nativeSetLoudnessOutGain(gain: Float)
+    private external fun nativeSetNormalizationGain(db: Float)
     private external fun nativeForceReset()
     fun forceReset() { if (isNativeLoaded) nativeForceReset() }
 

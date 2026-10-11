@@ -35,6 +35,11 @@ class PlayerConnection(private val context: Context) {
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
     private var connected = false
     private var pendingPlayIndex: Int = -1
+    // 【V8.337】MediaController 连接失败计数与重连句柄。
+    // 原来连接失败后 connected 永远 false，playSong 静默把 index 存进 pending 就返回
+    // —— 用户点歌单「完全没反应」，且日志无任何记录。现在失败会重试。
+    private var connectFailCount = 0
+    private var reconnectRunnable: Runnable? = null
 
     // 播放状态监听：订阅 MusicService.notifyPlayStateChanged 单一权威源
     // 通知栏/锁屏/切歌等任意来源的状态变更，都会反向同步到 UI 的 _isPlaying
@@ -95,7 +100,9 @@ class PlayerConnection(private val context: Context) {
                 val size = _songList.value.size
                 if (size > 0) {
                     val nextIndex = (_currentSongIndex.value + 1) % size
-                    if (nextIndex > 0) playSong(nextIndex)
+                    // 【V8.180】原判断写成 nextIndex > 0：播到列表最后一首时 nextIndex==0 被挡掉
+                    // → 最后一首播完不再自动续播（只有 size==1 那种情况才该拦）。
+                    playSong(nextIndex)
                 }
             }
         }
@@ -128,24 +135,56 @@ class PlayerConnection(private val context: Context) {
      */
     fun connect() {
         if (connected && controller != null) return
+        // 【V8.337】先置 true 再 disconnect()：这次是「换一条新连接」，
+        // 待播请求要清干净（真正的重连重试走 scheduleReconnect → connect，
+        // 那里连不上不会走到这里，所以不会误清用户刚点的歌）。
+        preservePendingOnDisconnect = true
+        disconnect()
+        preservePendingOnDisconnect = false
         // 鍏堟柇On鏃ц繛鎺ワ紝闃叉澶氬疄渚嬫畫鐣?
         disconnect()
         val sessionToken = SessionToken(context, ComponentName(context, MusicService::class.java))
         controllerFuture = MediaController.Builder(context, sessionToken).buildAsync()
+        // 【V8.337·关键修复·用户报"歌单无法点其他歌曲、像卡住了"】
+        // buildAsync().addListener(Runnable) 只在**成功**时跑。原实现没有失败分支：
+        // Service 起不来/被杀/绑定失败时，Runnable 永不执行 → connected 永远 false →
+        // playSong 每次都只把 index 存进 pendingPlayIndex 就 return（静默失灵），
+        // 而日志里一条记录都没有，完全无法定位。
+        // 修：① 失败明确打日志 + 计数；② 2s 后自动重试（最多 3 次，之后靠页面重建再触发）。
+        // MediaBrowser 无 ServiceConnection 回调可用（不是 bindService 那套），
+        // 所以只能用 buildAsync 的 Runnable 本身判断成败。
         controllerFuture?.addListener({
-            controller = controllerFuture?.get()
-            controller?.addListener(playerListener)
+            runCatching {
+                controller = controllerFuture?.get()
+                controller?.addListener(playerListener)
+            }.onFailure {
+                android.util.Log.w("PlayerConnection",
+                    "connect: MediaController build FAILED (${it.message}) -> will retry")
+                connectFailCount++
+                scheduleReconnect()
+                return@addListener
+            }
             connected = true
+            connectFailCount = 0
+            android.util.Log.i("PlayerConnection", "connect: MediaController connected")
             MusicService.addPlayStateChangedListener(playStateChangedListener)
             // Oboe 模式兜底：MediaController.onMediaItemTransition 不触发
             // 直接收集 MusicService.StateFlow 同步元数据（不用接口，防 R8 擦除）
             startOboeSongSync()
             // [Phase 1] 反向同步 shuffle/repeat
             startShuffleRepeatSync()
+            // [2026-09-10 fix] 元数据收敛守护：DAC/Oboe 独占模式下每 2s 用 MusicService 权威
+            // currentSong 校正 UI，兜住任何漏发 notifySongChanged 的切歌路径
+            startMetaReconcile()
             // 如果有待播请求，执行
             if (pendingPlayIndex >= 0) {
-                playSong(pendingPlayIndex)
+                // 【V8.337 诊断】记录补切是否真的发生（原来无日志，
+                // 无法区分「没连上」与「连上了但 pending 被清掉」）。
+                android.util.Log.i("PlayerConnection",
+                    "onServiceConnected: flushing pendingPlayIndex=$pendingPlayIndex")
+                val pi = pendingPlayIndex
                 pendingPlayIndex = -1
+                playSong(pi)
             }
             // 鍚屾鍒濆鐘舵€?
             controller?.let {
@@ -183,6 +222,17 @@ class PlayerConnection(private val context: Context) {
                 }
                 _shuffleEnabled.value = it.shuffleModeEnabled
                 _repeatMode.value = it.repeatMode
+                // [2026-09-10 fix] In DAC/Oboe exclusive mode the MediaController carries no real media
+                // item, so the restoredIdx branch above is skipped and a freshly recreated UI would
+                // stay empty/stale. Seed from the MusicService authoritative fields so the UI always
+                // matches the song that is actually playing.
+                val authSong = MusicService.currentSong
+                if (authSong != null) {
+                    _currentSong.value = authSong
+                    val authIdx = MusicService.currentIndex
+                    if (authIdx >= 0) _currentSongIndex.value = authIdx
+                    FileLog.log("CONN", "connect(): seeded from service: ${authSong.title} idx=$authIdx")
+                }
                 if (it.isPlaying) startPositionUpdates()
                 // 銆恦7.XX銆戦噸杩炴椂灏濊瘯鎭㈠Playlists
                 if (_songList.value.isEmpty() && it.mediaItemCount > 0) {
@@ -234,6 +284,8 @@ class PlayerConnection(private val context: Context) {
         shuffleSyncJob = null
         repeatSyncJob?.cancel()
         repeatSyncJob = null
+        metaReconcileJob?.cancel()
+        metaReconcileJob = null
         try {
             controller?.removeListener(playerListener)
         } catch (e: Exception) {
@@ -243,7 +295,29 @@ class PlayerConnection(private val context: Context) {
         controllerFuture = null
         connected = false
         MusicService.removePlayStateChangedListener(playStateChangedListener)
-        pendingPlayIndex = -1
+        // 【V8.337·关键修复】原来这里无条件 pendingPlayIndex = -1，
+        // 而 connect() 开头**第一件事就是 disconnect()** —— 于是每次重连都会
+        // 把用户「已点击但还没播放」的那首歌**丢掉**。表现正是"点歌单没反应"。
+        // 用参数区分：connect() 内部换连接传 true（要清空），外部触发按原语义清。
+        if (!preservePendingOnDisconnect) pendingPlayIndex = -1
+    }
+
+    /** 【V8.337】disconnect() 是否保留待播请求。connect() 内部换连接传 true。 */
+    private var preservePendingOnDisconnect = false
+
+    /** 【V8.337】连接失败后的重连调度：最多 3 次，间隔按次数退避，避免空转刷日志。 */
+    private fun scheduleReconnect() {
+        if (connectFailCount > 3) {
+            android.util.Log.w("PlayerConnection",
+                "connect: give up after $connectFailCount attempts, pending kept=$pendingPlayIndex")
+            return
+        }
+        val delayMs = 2000L * connectFailCount
+        reconnectRunnable = Runnable {
+            android.util.Log.i("PlayerConnection", "connect: retry #$connectFailCount (${delayMs}ms)")
+            connect()
+        }
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(reconnectRunnable!!, delayMs)
         // 涓嶅啀 releaseFuture 鈥?淇濇寔搴曞眰 MediaController 涓?Service 鐨勮繛鎺?
         // 閲嶈繛鏃?connect() 浼氬垱寤烘柊鐨?MediaController锛屾棫鐨勪細闅忚繘绋嬬敓鍛藉懆鏈熻嚜鐒堕噴鏀?
     }
@@ -273,6 +347,37 @@ class PlayerConnection(private val context: Context) {
         repeatSyncJob = scope.launch {
             MusicService.repeatModeFlow.collect { mode ->
                 _repeatMode.value = mode
+            }
+        }
+    }
+
+    // [2026-09-10 fix] 元数据收敛守护 job
+    private var metaReconcileJob: Job? = null
+
+    /**
+     * [2026-09-10 fix] 熄屏长时间播放后打开应用时, UI 封面/歌名可能与正在播放的歌不一致。
+     * 根因是服务端某些切歌路径(crossfade 轮询超时等)未发出元数据事件。
+     * 本守护仅在 DAC/Oboe 独占模式生效(该模式服务端 currentSong 是权威值),
+     * 用权威值纠正 UI 状态; ExoPlayer 模式不介入以免反向覆盖。
+     */
+    private fun startMetaReconcile() {
+        metaReconcileJob?.cancel()
+        metaReconcileJob = scope.launch {
+            while (isActive) {
+                kotlinx.coroutines.delay(2000)
+                try {
+                    val svc = MusicService.instance ?: continue
+                    if (!(svc.isOboeDirectMode() || svc.isUsbExclusiveMode())) continue
+                    val auth = MusicService.currentSong ?: continue
+                    if (_currentSong.value?.id != auth.id) {
+                        FileLog.log("META", "reconcile: UI='${_currentSong.value?.title}' -> svc='${auth.title}' id=${auth.id}")
+                        _currentSong.value = auth
+                        val ai = MusicService.currentIndex
+                        if (ai >= 0) _currentSongIndex.value = ai
+                    }
+                } catch (e: Throwable) {
+                    android.util.Log.w("PlayerConnection", "metaReconcile: ${e.message}")
+                }
             }
         }
     }
@@ -308,6 +413,13 @@ class PlayerConnection(private val context: Context) {
         val songs = _songList.value
         if (index !in songs.indices) return
         if (!connected) {
+            //【V8.337 诊断】这里原来只存 pendingPlayIndex 就 return，且**无任何日志**。
+            //后果：connected 一直是 false（Service 没连上/重连失败）时，
+            // 用户点歌单是"点了完全没反应"，而日志里什么都看不到 —— 无法定位。
+            // 现在补日志：connected=false 时把每次点击都记下来并计数，
+            // 下次复现时可直接看出是「服务没连上」还是「点了没进 playSong」。
+            android.util.Log.w("PlayerConnection",
+                "playSong: NOT connected, queuing index=$index (pending was $pendingPlayIndex)")
             pendingPlayIndex = index
             return
         }
@@ -451,7 +563,7 @@ class PlayerConnection(private val context: Context) {
      */
     fun skipToPrevious() {
         if (MusicService.instance?.isUsbExclusiveMode() == true) {
-            MusicService.instance?.playPrevious()
+            MusicService.instance?.playPrevious(fromUser = true)
             val svc = MusicService.instance!!
             val newIdx = MusicService.currentIndex
             val songs = _songList.value
@@ -464,7 +576,7 @@ class PlayerConnection(private val context: Context) {
             return
         }
         if (MusicService.instance?.isOboeDirectMode() == true) {
-            MusicService.instance?.playPrevious()
+            MusicService.instance?.playPrevious(fromUser = true)
             // 銆怴7.xx銆慜boe鍒囨瓕鍚庢墜鍔ㄥ惎鍔ㄨ繘搴︽洿鏂?
             // 鍚屾鏇存柊 Connection 渚х殑姝屾洸绱㈠紩锛堝惁鍒橴I鏄剧ず鏃ф洸鐩俊鎭紝duration涓嶅锛?
             val svc = MusicService.instance!!
@@ -487,7 +599,7 @@ class PlayerConnection(private val context: Context) {
      */
     fun skipToNext() {
         if (MusicService.instance?.isUsbExclusiveMode() == true) {
-            MusicService.instance?.playNext()
+            MusicService.instance?.playNext(fromUser = true)
             val svc = MusicService.instance!!
             val newIdx = MusicService.currentIndex
             val songs = _songList.value
@@ -500,7 +612,7 @@ class PlayerConnection(private val context: Context) {
             return
         }
         if (MusicService.instance?.isOboeDirectMode() == true) {
-            MusicService.instance?.playNext()
+            MusicService.instance?.playNext(fromUser = true)
             // 銆怴7.xx銆慜boe鍒囨瓕鍚庢墜鍔ㄥ惎鍔ㄨ繘搴︽洿鏂?
             // 鍚屾鏇存柊 Connection 渚х殑姝屾洸绱㈠紩锛堝惁鍒橴I鏄剧ず鏃ф洸鐩俊鎭紝duration涓嶅锛?
             val svc = MusicService.instance!!
@@ -522,13 +634,25 @@ class PlayerConnection(private val context: Context) {
      * 璺宠浆鍒版寚瀹氫綅缃紙姣锛?
      */
     fun seekTo(positionMs: Long) {
-        if (MusicService.instance?.isOboeDirectMode() == true) {
-            MusicService.instance?.seekTo(positionMs)
+        // 【V8.339 诊断·用户报"进度条也无法拖动"】
+        // 原实现在 MusicService.instance == null 时**两个分支都静默失败**：
+        //   Oboe 分支 `?.` 短路、非 Oboe 分支也是 `?.`，一路 return，连日志都没有。
+        // 服务未连接（Service 被杀/连接失败）时用户拖进度条就是"完全没反应"，
+        // 与 8.338 修的"点歌单没反应"是同一个根源（connected 拿不到 controller）。
+        // 现在把「没连上」显式记出来，下次复现可直接判定是连接问题还是 seek 本身问题。
+        val svc = MusicService.instance
+        if (svc == null) {
+            android.util.Log.w("PlayerConnection",
+                "seekTo($positionMs) IGNORED: MusicService.instance == null (service not connected)")
+            return
+        }
+        if (svc.isOboeDirectMode()) {
+            svc.seekTo(positionMs)
             _currentPositionMs.value = positionMs
             return
         }
         // bypass MediaController (may be null or disconnected) — go straight to ExoPlayer
-        MusicService.instance?.seekTo(positionMs)
+        svc.seekTo(positionMs)
         _currentPositionMs.value = positionMs
     }
 
@@ -547,6 +671,20 @@ class PlayerConnection(private val context: Context) {
         _repeatMode.value = mode
         MusicService.instance?.setRepeatMode(mode)
     }
+
+    /**
+     * 【V8.244】自动流程排序：把当前播放队列按能量/调性重排（以当前曲为锚），并同步本地副本。
+     */
+    fun reorderQueueByFlow() {
+        val svc = MusicService.instance ?: return
+        svc.reorderQueueByFlow()
+        val updated = svc.getServicePlaylist()
+        if (updated.isNotEmpty()) _songList.value = updated
+    }
+
+    /** 【V8.250】Automix 预览：接下来 count 首怎么接（只读，零副作用）。 */
+    fun previewUpNext(count: Int = 3): List<Pair<Song, String>> =
+        MusicService.instance?.previewUpNext(count) ?: emptyList()
 
     private var lastSaveTimeMs = 0L
 

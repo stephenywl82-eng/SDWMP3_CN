@@ -255,6 +255,54 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDitherEnabled(JNIEnv
     if (driver) driver->setDitherEnabled(enabled == JNI_TRUE);
 }
 
+// ── nativeSetWideHeadroom [V8.119] ──────────────────────────────────────
+// USB DAC chain has no look-ahead limiter; the only safety net is dacSoftClip,
+// whose knee was 2/3 (-3.5 dBFS) and therefore shaped every loud peak. The
+// WIDE profile raises it to 0.92 so the chain stays linear up to -0.7 dBFS.
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetWideHeadroom(JNIEnv*, jobject, jboolean enabled) {
+    auto* driver = getDriver();
+    if (driver) driver->setWideHeadroom(enabled == JNI_TRUE);
+    LOGI("nativeSetWideHeadroom: %s", enabled ? "ON (knee 0.92)" : "OFF (knee 2/3)");
+}
+
+// -- nativeSetDirectPassthrough [V8.119] ----------------------------------
+// 原声直通：DAC 链整条 DSP 旁路，ring 写原始解码 PCM。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDirectPassthrough(JNIEnv*, jobject, jboolean enabled) {
+    auto* driver = getDriver();
+    if (driver) driver->setDirectPassthrough(enabled == JNI_TRUE);
+    LOGI("nativeSetDirectPassthrough: %s", enabled ? "ON (raw PCM)" : "OFF");
+}
+
+// -- nativeSetSoftStartEnabled -------------------------------------------------
+// [2026-09-10 soft-start] Mask DAC PLL re-lock transient on stream start.
+// Default OFF: a per-sample gain ramp modifies the samples, so bit-perfect output
+// is only given up when the user explicitly enables it.
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetSoftStartEnabled(JNIEnv*, jobject, jboolean enabled) {
+    UsbAudioDriver* d = getDriver();
+    if (!d) return;
+    d->setSoftStartEnabled(enabled == JNI_TRUE);
+    LOGI("nativeSetSoftStartEnabled: %s", enabled ? "ON (150ms fade-in)" : "OFF (bit-perfect)");
+}
+
+// ── nativeSetQuirkOverride ────────────────────────────────────────────────
+// [2026-09-10 multi-DAC quirk] Kotlin DacProfile pushes per-device overrides
+// after nativeClaim succeeds. Native built-in open() quirk init already ran;
+// this *overrides* it for known DACs (single source of truth = DacProfile.kt).
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetQuirkOverride(
+    JNIEnv*, jobject, jint urbPackets, jint ctlMsgDelayUs, jint ifaceDelayUs,
+    jboolean forceIfaceReset, jboolean forceUac1, jboolean skipSetCur) {
+    auto* driver = getDriver();
+    if (driver) driver->setQuirkOverride(
+        urbPackets, ctlMsgDelayUs, ifaceDelayUs,
+        forceIfaceReset == JNI_TRUE, forceUac1 == JNI_TRUE, skipSetCur == JNI_TRUE);
+}
+
 // ── nativeSetFeatureUnitOverride ─────────────────────────────────────────
 
 JNIEXPORT void JNICALL
@@ -421,6 +469,14 @@ JNIEXPORT void JNICALL
 Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessOutGain(JNIEnv*, jobject, jfloat gain) {
     auto* driver = getDriver();
     if (driver) driver->setLoudnessOutGain(gain);
+}
+
+// ── 【V8.170】nativeSetNormalizationGain：响度统一管理 ────────────────
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetNormalizationGain(JNIEnv*, jobject, jfloat db) {
+    auto* driver = getDriver();
+    if (driver) driver->setNormalizationGain(db);
 }
 
 // ── nativeGetDebugLog ────────────────────────────────────────────────────

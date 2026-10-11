@@ -31,6 +31,13 @@ class SharedCoverState {
     /** 是否正在拖拽中 */
     var isDragging by mutableStateOf(false)
 
+    /**
+     * V8.84 非空时表示「列表行」这一端占用共享元素 key（迷你条自动让位）。
+     * 只有用户点中的那一行会挂 sharedCoverArt，因此「迷你条」与「列表行」
+     * 永远不可能同时成为同一个 key 的源端 —— 这是 Compose 共享元素配对的硬约束。
+     */
+    var rowFlightSongId by mutableStateOf<Long?>(null)
+
     /** 动画完成后回调 */
     var onAnimationEnd: (() -> Unit)? = null
 

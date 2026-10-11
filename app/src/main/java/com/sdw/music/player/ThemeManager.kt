@@ -16,16 +16,24 @@ object ThemeManager {
 
     private const val PREFS = "theme_prefs"
     private const val KEY_LIGHT = "light_mode"
+    private const val KEY_FOLLOW = "follow_system"
 
     private val _lightMode = mutableStateOf(false)
+
+    /** 【V8.111】 是否跟随系统深/浅色。开启后 lightMode 被忽略，改读系统 uiMode。 */
+    private val _followSystem = mutableStateOf(false)
 
     /** 当前是否为浅色模式（Compose State，读取会自动订阅重组） */
     val lightMode: State<Boolean> = _lightMode
 
+    /** 【V8.111】 是否跟随系统主题（Compose State） */
+    val followSystem: State<Boolean> = _followSystem
+
     /** 在 Application.onCreate 调用，恢复持久化的主题选择 */
     fun init(context: Context) {
-        _lightMode.value = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getBoolean(KEY_LIGHT, false)
+        val p = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        _lightMode.value = p.getBoolean(KEY_LIGHT, false)
+        _followSystem.value = p.getBoolean(KEY_FOLLOW, false)
     }
 
     /** 切换浅色/深色模式并持久化，立即触发全局重组 */
@@ -33,5 +41,12 @@ object ThemeManager {
         _lightMode.value = enabled
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .edit().putBoolean(KEY_LIGHT, enabled).apply()
+    }
+
+    /** 【V8.111】 切换「跟随系统主题」并持久化，立即触发全局重组 */
+    fun setFollowSystem(context: Context, enabled: Boolean) {
+        _followSystem.value = enabled
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putBoolean(KEY_FOLLOW, enabled).apply()
     }
 }

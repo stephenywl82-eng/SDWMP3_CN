@@ -61,9 +61,13 @@ fun DefaultCoverImage(
     modifier: Modifier = Modifier,
     shape: Shape = CircleShape,
     contentScale: ContentScale = ContentScale.Crop,
-    overlayAlpha: Float = 0.25f
+    overlayAlpha: Float = 0.25f,
+    // V8.92 占位图氛围色可由调用方指定。默认仍是 MaterialTheme.colorScheme.primary，
+    // 所以列表/专辑等既有调用点行为完全不变；只有播放器页需要显式传入，因为
+    // PlayerScreen 把 MaterialTheme 覆写成 SDWDarkColorScheme（primary 恒为 AccentBlue 常量），
+    // 硬取 MaterialTheme 会导致占位色不跟随主题。
+    tintColor: Color = MaterialTheme.colorScheme.primary
 ) {
-    val tintColor = MaterialTheme.colorScheme.primary
 
     Box(modifier = modifier) {
         // Dark background so lines are legible against light overlays

@@ -11,6 +11,10 @@
 #include "biquad_filter.h"
 #include "loudness_comp.h"
 
+// [V8.119] Defined in usb_audio_driver.cpp (non-static so the inline setters below link).
+extern std::atomic<bool> g_dacWideHeadroom;
+extern std::atomic<bool> g_dacDirectPassthrough;
+
 /**
  * Native USB Audio Class driver for direct DAC streaming.
  *
@@ -75,7 +79,8 @@ class UsbAudioDriver {
 public:
     static constexpr int kRingFrames    = 32768;       // ~740ms buffer at 44.1kHz (was 131072/3s, cut gap between songs)
     static constexpr int kMaxUrbCount   = 16;          // in-flight URBs
-    static constexpr int kPacketsPerUrb = 64;          // Salt-style: 64 ISO packets per URB
+    static constexpr int kPacketsPerUrbMax = 64;       // max ISO packets per URB (buffer capacity)
+    static constexpr int kPacketsPerUrb = 64;          // Salt-style: 64 ISO packets per URB (default; FS 96k drops to 16)
     static constexpr int kMaxPacketSize = 576;         // max bytes per ISO packet (384 mps + headroom)
     static constexpr int kMaxUrbBuffer  = kPacketsPerUrb * kMaxPacketSize;
     static constexpr int kFeedbackIntervalUs = 200000;
@@ -115,14 +120,28 @@ public:
         if (hardwareVolumeReady_) {
             // 硬件 Feature Unit 负责音量 → 软件乘因子固定 1.0,避免双重衰减,
             // 并保留 bit-depth 动态范围(不在 PCM 域做数字增益)
-            volume_ = 1.0f;
+            volume_.store(1.0f, std::memory_order_relaxed);
             setHardwareVolume(v);
         } else {
-            volume_ = v;
+            // [V8.131] atomic store: written from the UI/JNI thread, read by the
+            // real-time streamLoop packer. A plain float made the packer's read
+            // racy (no visibility guarantee) — volume jumps could take a URB or two
+            // to land and step the level audibly.
+            volume_.store(v, std::memory_order_relaxed);
         }
     }
-    float getVolume() const      { return volume_; }
+    float getVolume() const      { return volume_.load(std::memory_order_relaxed); }
     void setDitherEnabled(bool en) { ditherEnabled_.store(en, std::memory_order_release); }
+    // [V8.119] Headroom profile: true = WIDE (0.92 knee), false = LEGACY (2/3)
+    void setWideHeadroom(bool en) { g_dacWideHeadroom.store(en, std::memory_order_release); }
+    // [V8.119] 原声直通：true = DAC 链整条 DSP 旁路
+    void setDirectPassthrough(bool en) { g_dacDirectPassthrough.store(en, std::memory_order_release); }
+    // [2026-09-10 soft-start] Mask DAC PLL re-lock transient on (cross-rate) stream start.
+    // OFF by default: a per-sample gain ramp is a mathematical intervention on the samples,
+    // so bit-perfect output is preserved unless the user explicitly opts in.
+    static constexpr int kSoftStartFadeMs = 150;
+    void setSoftStartEnabled(bool en) { softStartEnabled_.store(en, std::memory_order_release); }
+    bool isSoftStartEnabled() const   { return softStartEnabled_.load(std::memory_order_acquire); }
     bool isDitherEnabled() const { return ditherEnabled_.load(std::memory_order_acquire); }
 
     // ── DAC 链路 MSEB / 图形 EQ（5 段 Biquad，与 Oboe 共用同一套算法）──
@@ -158,9 +177,14 @@ public:
     void setLoudnessEnabled(bool en);
     void setLoudnessIntensity(float intensity);
     void setLoudnessOutGain(float gain);
+    // 【V8.170】响度统一管理：元数据（ReplayGain / LUFS）折算出的整枚增益，dB
+    void setNormalizationGain(float db);
     // Kotlin 层注入 Salt-verified 的 FU 参数（通用探测失败时兜底，quirk 表已上移到 DacProfile.kt）
     void setFeatureUnitOverride(int unitId, int channel, int channels,
                                 float minDb, float maxDb, float resDb);
+    // [2026-09-10 multi-DAC quirk] Kotlin pushes per-device overrides post-claim.
+    void setQuirkOverride(int urbPackets, int ctlMsgDelayUs, int ifaceDelayUs,
+                          bool forceIfaceReset, bool forceUac1, bool skipSetCur);
     const char* getDacName() const   { return dacName_.c_str(); }
     const char* getDetailedInfo() const { return detailedInfo_.c_str(); }
     void getStats(UsbDacStats& out) const;
@@ -196,6 +220,16 @@ private:
         uint8_t buffer[kMaxUrbBuffer];
     };
     UrbSlot urbSlots_[kMaxUrbCount];
+    // [2026-09-10 soft-start] Linear fade-in gain for a sample index inside the current URB.
+    // Returns 1.0f immediately when the feature is off (zero cost / bit-perfect path).
+    inline float softStartGain(int sampleIdxInUrb) const {
+        if (!softStartEnabled_.load(std::memory_order_relaxed)) return 1.0f;
+        if (softStartFrameBase_ >= softStartTotalFrames_) return 1.0f;
+        const int64_t frame = softStartFrameBase_ + (sampleIdxInUrb / channels_);
+        if (frame >= softStartTotalFrames_) return 1.0f;
+        return (float)frame / (float)softStartTotalFrames_;
+    }
+
     bool submitUrb(int slot, int numBytes);
     bool submitUrbRaw(int slot);
     void reapCompletedUrbs();
@@ -217,6 +251,20 @@ private:
     int vid_ = 0;
     int pid_ = 0;
     int ifaceNum_ = 0;
+    int urbPackets_ = kPacketsPerUrb;   // [2026-09-10 quirk] actual pkts/URB; full-speed (Qudelix 96k) drops to 16 to stay under usbfs memory limits
+    int ctlMsgDelayUs_ = 0;              // [2026-09-10 quirk] delay after SET_CUR (us). Linux CTL_MSG_DELAY: MOONDROP/iBasso DC use 1000-5000us. Default 0 = unchanged behavior.
+    // [2026-09-10 multi-DAC quirk] Kotlin DacProfile overrides (JNI push after claim).
+    // Non-default only; built-in open() quirk init stays as fallback for unknown DACs.
+    bool forceIfaceReset_ = false;      // teardown+reactivate endpoint even same-alt
+    bool forceUac1_ = false;            // parse descriptors as UAC1 (firmware lies about UAC2)
+    bool skipSetCurQuirk_ = false;      // never send SET_CUR (HIFI_A001 locks at 384k)
+    int ifaceDelayUs_ = 0;              // delay between setInterfaceAlt ops
+    bool quirkOverrideApplied_ = false; // true after Kotlin pushed overrides
+    // [2026-09-10 soft-start] armed per stream start in start(); advanced by streamLoop only.
+    std::atomic<bool> softStartEnabled_{false};
+    int     softStartTotalFrames_ = 0;   // 0 = no ramp (feature off / already done)
+    int64_t softStartFrameBase_   = 0;   // frames output since this stream start
+
 
     int sampleRate_  = 48000;
     int channels_    = 2;
@@ -233,13 +281,25 @@ private:
     mutable std::atomic<int32_t>  bufferWatermarkMs_{0};
 
     float* ringBuffer_ = nullptr;
-    float volume_ = 1.0f;
-    std::atomic<bool> ditherEnabled_{false};  // TPDF dither (default OFF: 24-bit out has no 16-bit quantization; at low volume 16-bit dither = audible hiss)
+    std::atomic<float> volume_{1.0f};   // [V8.131] was plain float (UI-write / RT-read race)
+    std::atomic<bool> ditherEnabled_{false};  // Reverted to OFF (original default). With the
+                                              // V8.131 rounding fix the 16-bit packer no longer
+                                              // truncates, so the signal-correlated grit is gone;
+                                              // keeping dither off avoids ADDING TPDF noise to a
+                                              // 16-bit source played to a 16-bit DAC. Available as a
+                                              // manual toggle (Settings) for 24-bit-source -> 16-bit
+                                              // DAC downconversion, where dither does help.
     uint32_t ditherState_ = 0x12345678u;       // LCG state for TPDF dither
+
+    // [V8.124] noise-shaped dither 一阶误差反馈状态（每声道独立，Aurora 移植）
+    float nsErrorL_ = 0.0f;
+    float nsErrorR_ = 0.0f;
 
     // ── DAC 链路 5 段 EQ（在 pushPcm 内做处理，独立于 Oboe 的实例，但算法/系数/Q 完全一致）──
     std::atomic<bool> dspEqEnabled_{false};
     std::mutex dspEqMutex_;          // 保护系数设置与 process 的并发（process 用 try_lock 不阻塞）
+    // 【V8.170】响度归一化线性增益（1.0 = 旁路）。乘进 preGain，天然带平滑，不会咔哒。
+    std::atomic<float> normGainLin_{1.0f};
     float dspEqPreGain_ = 1.0f;      // headroom 衰减系数（与 Oboe g_dspEqPreGain 对齐）
     float curDspPreGain_ = 1.0f;     // smoothed pre-gain (fades toward dspEqPreGain_ to kill zipper noise)
     BiquadFilter dspEqBand1L_, dspEqBand1R_;

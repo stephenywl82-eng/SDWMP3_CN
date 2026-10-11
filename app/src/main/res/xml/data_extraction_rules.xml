@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  【V8.216】Android 12+ 备份/换机规则（由 android:dataExtractionRules 引用）
+
+  与 res/xml/backup_rules.xml 同一目标：自动备份只带走「设置开关 + MSEB 调节」，
+  歌库缓存、歌曲目录、歌词这类本机数据一律不备份、不换机迁移。
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <!-- 只备份「设置开关 + MSEB 调节」这两类配置 -->
+        <include domain="sharedpref" path="settings.xml" />
+        <include domain="sharedpref" path="mseb.xml" />
+        <include domain="sharedpref" path="mseb_presets.xml" />
+        <include domain="sharedpref" path="compressor.xml" />
+        <include domain="sharedpref" path="crossfeed.xml" />
+        <include domain="sharedpref" path="loudness.xml" />
+        <include domain="sharedpref" path="loudness_norm.xml" />
+        <include domain="sharedpref" path="equalizer_prefs.xml" />
+        <include domain="sharedpref" path="sdw_music_prefs.xml" />
+        <include domain="sharedpref" path="app_language_prefs.xml" />
+        <include domain="sharedpref" path="widget_prefs.xml" />
+
+        <!-- 其余全部不进备份 -->
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="root" path="." />
+        <exclude domain="sharedpref" path="lyric_prefs.xml" />
+        <exclude domain="sharedpref" path="folder_list_cache.xml" />
+        <exclude domain="sharedpref" path="bpm_key_cache.xml" />
+        <exclude domain="sharedpref" path="palette_cache.xml" />
+        <exclude domain="sharedpref" path="playback_state.xml" />
+        <exclude domain="sharedpref" path="permission_flags.xml" />
+        <exclude domain="sharedpref" path="MusicPlayer.xml" />
+        <exclude domain="sharedpref" path="sdw_favorites.xml" />
+        <exclude domain="sharedpref" path="sdw_playlists.xml" />
+    </cloud-backup>
+
+    <device-transfer>
+        <!-- 换机迁移同样只带配置，不带歌库/目录/歌词 -->
+        <include domain="sharedpref" path="settings.xml" />
+        <include domain="sharedpref" path="mseb.xml" />
+        <include domain="sharedpref" path="mseb_presets.xml" />
+        <include domain="sharedpref" path="compressor.xml" />
+        <include domain="sharedpref" path="crossfeed.xml" />
+        <include domain="sharedpref" path="loudness.xml" />
+        <include domain="sharedpref" path="loudness_norm.xml" />
+        <include domain="sharedpref" path="equalizer_prefs.xml" />
+        <include domain="sharedpref" path="sdw_music_prefs.xml" />
+        <include domain="sharedpref" path="app_language_prefs.xml" />
+        <include domain="sharedpref" path="widget_prefs.xml" />
+
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="external" path="." />
+        <exclude domain="root" path="." />
+        <exclude domain="sharedpref" path="lyric_prefs.xml" />
+        <exclude domain="sharedpref" path="folder_list_cache.xml" />
+        <exclude domain="sharedpref" path="bpm_key_cache.xml" />
+        <exclude domain="sharedpref" path="palette_cache.xml" />
+        <exclude domain="sharedpref" path="playback_state.xml" />
+        <exclude domain="sharedpref" path="permission_flags.xml" />
+        <exclude domain="sharedpref" path="MusicPlayer.xml" />
+        <exclude domain="sharedpref" path="sdw_favorites.xml" />
+        <exclude domain="sharedpref" path="sdw_playlists.xml" />
+    </device-transfer>
+</data-extraction-rules>

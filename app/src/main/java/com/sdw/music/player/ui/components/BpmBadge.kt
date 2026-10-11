@@ -11,6 +11,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 
 /**
@@ -24,7 +25,7 @@ fun BpmBadge(bpm: Int, modifier: Modifier = Modifier) {
         fontSize = 10.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = modifier
-            .clip(RoundedCornerShape(6.dp))
+            .clip(SDWShapes.Thumb)
             .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f))
             .padding(horizontal = 5.dp, vertical = 2.dp)
     )

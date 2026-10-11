@@ -92,6 +92,15 @@ public:
         double a2 = 1.0 - alpha;
         commit(b0, b1, b2, a0, a1, a2, cutoffHz);
     }
+    // 【V8.170】一阶 Butterworth 高通（因果形式），给多频段限幅/动态 EQ 做分频。
+    // 不用 RBJ high-pass：分频点只做幅度切分，不需要相位精确，因果形式零状态开销。
+    void setHighPass(float sampleRate, float cutoffHz) {
+        double w = 2.0 * M_PI * cutoffHz / sampleRate;
+        double alpha = tan(w) * 0.5;               // tan(w/2)
+        double b0 = alpha / (1.0 + alpha);
+        double b1 = -b0;
+        commit(b0, b1, 0.0, 1.0, 1.0, -(1.0 - alpha) / (1.0 + alpha), (float)cutoffHz);
+    }
     // 软 flat：目标 unity，process() 系数 SMOOTH ramp 过去（IIR 状态连续，无 click）。
     void setFlat() {
         norm_b0_ = 1.0; norm_b1_ = 0.0; norm_b2_ = 0.0;

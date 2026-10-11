@@ -2,6 +2,10 @@ package com.sdw.audio.analyzer
 
 /**
  * Runs quality analysis on decoded PCM data using native FFT + metrics.
+ *
+ * V8.120 Guards added for very short / malformed decodes: a track shorter than
+ * FFT_SIZE samples previously produced a negative range start and threw from
+ * copyOfRange. Sample rate / channel count are now sanity-checked too.
  */
 class QualityAnalyzer {
 
@@ -13,7 +17,7 @@ class QualityAnalyzer {
     }
 
     fun analyze(pcm: AudioDecoder.PcmResult, fileInfo: AudioFileInfo): AudioQualityReport {
-        val sr = pcm.sampleRate
+        val sr = if (pcm.sampleRate > 0) pcm.sampleRate else 44100  // [V8.120] sanity
         val binRes = sr.toFloat() / FFT_SIZE
 
         // 1. RMS, Peak, DC offset (native, one-pass)
@@ -24,6 +28,7 @@ class QualityAnalyzer {
 
         // 2. Spectrum of a representative segment
         val segment = extractSegment(pcm.samples, sr, 5, 3) // 5s in, 3s window
+        if (segment.size < FFT_SIZE) return finishWithoutSpectrum(pcm, fileInfo, sr, rms, peak, dc)
         val magBins = NativeAnalyzer.computeSpectrum(segment, FFT_SIZE) ?: FloatArray(FFT_SIZE / 2)
 
         // 3. Frequency cutoff (-3dB)
@@ -41,12 +46,61 @@ class QualityAnalyzer {
         // 6. Noise floor: RMS of quietest 5% of frames
         val noiseFloor = estimateNoiseFloor(pcm.samples, FRAME_SIZE)
 
-        // 7. Dynamic range
+        // 7+8. Dynamic range, scoring, tags — assembled in buildReport
+        return buildReport(pcm, fileInfo, sr, rms, peak, dc, cutoffHz, flatness, totalFrames, clippedCount, noiseFloor)
+    }
+
+    /**
+     * V8.120 Short/partial decodes (< one FFT window) cannot yield a meaningful
+     * spectrum. Emit a report from the time-domain metrics only so the scan continues.
+     */
+    private fun finishWithoutSpectrum(
+        pcm: AudioDecoder.PcmResult, fileInfo: AudioFileInfo, sr: Int,
+        rms: Float, peak: Float, dc: Float
+    ): AudioQualityReport {
+        val peakDb0 = if (peak > 0f) 20f * Math.log10(peak.toDouble()).toFloat() else -96f
+        val rmsDb0 = if (rms > 0f) 20f * Math.log10(rms.toDouble()).toFloat() else -96f
+        val dr0 = (peakDb0 - rmsDb0).coerceAtLeast(0f)
+        val totalFrames = pcm.samples.size / FRAME_SIZE
+        val clippedCount = try { NativeAnalyzer.countClippedFrames(pcm.samples, FRAME_SIZE, CLIP_THRESHOLD) } catch (_: Throwable) { 0 }
+        val clippedRatio = if (totalFrames > 0) clippedCount.toFloat() / totalFrames else 0f
+        val noiseFloor = estimateNoiseFloor(pcm.samples, FRAME_SIZE)
+        val score = computeScore(0f, dr0, clippedRatio, 0f, noiseFloor, pcm.bitDepth)
+        val tags = mutableListOf("Short Sample")
+        if (fileInfo.isLossless) tags.add("Lossless")
+        return AudioQualityReport(
+            filePath = fileInfo.filePath,
+            fileName = fileInfo.fileName,
+            fileSize = fileInfo.fileSize,
+            durationSeconds = pcm.samples.size.toFloat() / sr,
+            sampleRate = sr,
+            channelCount = pcm.channelCount,
+            bitDepth = pcm.bitDepth,
+            codecName = pcm.codecName,
+            frequencyCutoff = 0f,
+            dynamicRangeDb = dr0,
+            peakDb = peakDb0,
+            rmsDb = rmsDb0,
+            noiseFloorDb = noiseFloor,
+            clippedFrameRatio = clippedRatio,
+            spectralFlatness = 0f,
+            dcOffset = dc,
+            qualityScore = score,
+            qualityLabel = qualityLabel(score),
+            suspectedSourceVariant = tags
+        )
+    }
+
+    private fun buildReport(
+        pcm: AudioDecoder.PcmResult, fileInfo: AudioFileInfo, sr: Int,
+        rms: Float, peak: Float, dc: Float,
+        cutoffHz: Float, flatness: Float,
+        totalFrames: Int, clippedCount: Int, noiseFloor: Float
+    ): AudioQualityReport {
+        val clippedRatio = if (totalFrames > 0) clippedCount.toFloat() / totalFrames else 0f
         val peakDb = if (peak > 0f) 20f * Math.log10(peak.toDouble()).toFloat() else -96f
         val rmsDb = if (rms > 0f) 20f * Math.log10(rms.toDouble()).toFloat() else -96f
-        val dynamicRange = (peakDb - rmsDb).coerceAtLeast(0f)  // crest factor: true musical dynamic range
-
-        // 8. Scoring
+        val dynamicRange = (peakDb - rmsDb).coerceAtLeast(0f)  // crest factor
         val score = computeScore(cutoffHz, dynamicRange, clippedRatio, flatness, noiseFloor, pcm.bitDepth)
         val label = qualityLabel(score)
         val tags = buildTags(cutoffHz, dynamicRange, clippedRatio, flatness, fileInfo, pcm)
@@ -56,7 +110,7 @@ class QualityAnalyzer {
             fileName = fileInfo.fileName,
             fileSize = fileInfo.fileSize,
             durationSeconds = pcm.samples.size.toFloat() / pcm.sampleRate,
-            sampleRate = pcm.sampleRate,
+            sampleRate = sr,
             channelCount = pcm.channelCount,
             bitDepth = pcm.bitDepth,
             codecName = pcm.codecName,
@@ -79,8 +133,14 @@ class QualityAnalyzer {
      * Returns [durationSec] seconds of mono float[], starting at [startSec].
      */
     private fun extractSegment(samples: FloatArray, sampleRate: Int, startSec: Int, durationSec: Int): FloatArray {
-        val start = (startSec * sampleRate).coerceAtMost(samples.size - FFT_SIZE)
-        val end = (start + durationSec * sampleRate).coerceAtMost(samples.size)
+        // V8.120 Too few samples for an FFT window (short or partially-decoded file):
+        // return whatever we have instead of computing a negative start.
+        if (samples.size <= FFT_SIZE) return samples.copyOf(samples.size)
+
+        val maxStart = (samples.size - FFT_SIZE).coerceAtLeast(0)
+        val start = (startSec.toLong() * sampleRate).toInt().coerceIn(0, maxStart)
+        val end = (start.toLong() + durationSec.toLong() * sampleRate)
+            .coerceAtMost(samples.size.toLong()).toInt()
         val len = end - start
         if (len < FFT_SIZE) {
             // fallback: take from beginning

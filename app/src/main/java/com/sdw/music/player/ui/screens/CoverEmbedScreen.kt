@@ -1,6 +1,7 @@
 package com.sdw.music.player.ui.screens
 
 import android.content.Intent
+import com.sdw.music.player.ui.components.SDWTopBar
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -22,25 +23,34 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import coil.compose.AsyncImage
 import com.sdw.music.player.R
 import com.sdw.music.player.ui.components.AddToPlaylistSheet
+import com.sdw.music.player.ui.components.rememberSharedCoverPainter
+import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.Song
+import com.sdw.music.player.SongRepository
 import com.sdw.music.player.core.audio.AudioCoverEmbedder
 import com.sdw.music.player.core.audio.CoverDownloader
+import com.sdw.music.player.ui.components.glassSurface
+import com.sdw.music.player.ui.components.springPress
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import androidx.compose.animation.animateContentSize
 
 /**
  * 封面下载 & 嵌入工具页（整合自 CoverEmbed 独立应用）。
@@ -124,7 +134,17 @@ fun CoverEmbedScreen(
                         noCoverSongs = noCoverSongs.filter { it.id != song.id }
                         Toast.makeText(context, R.string.cover_embed_success, Toast.LENGTH_SHORT).show()
                     } else {
-                        Toast.makeText(context, R.string.cover_embed_failed, Toast.LENGTH_SHORT).show()
+                        // 【V8.107】区分「该格式暂不支持」与「嵌入失败」
+                        val fmt = (result as? AudioCoverEmbedder.EmbedResult.Failure)?.unsupportedFormat
+                        if (fmt != null) {
+                            Toast.makeText(
+                                context,
+                                context.getString(R.string.cover_embed_unsupported, fmt.uppercase()),
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        } else {
+                            Toast.makeText(context, R.string.cover_embed_failed, Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -160,14 +180,13 @@ fun CoverEmbedScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.cover_embed_title), color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.titleMedium) },
+            SDWTopBar(
+                title = { Text(stringResource(R.string.cover_embed_title), color = MaterialTheme.colorScheme.onBackground) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, null, tint = MaterialTheme.colorScheme.onBackground)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
@@ -211,7 +230,12 @@ fun CoverEmbedScreen(
             }
         }
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .animateContentSize()
+        ) {
             // 写权限引导横幅（Android 11+ 需 All Files Access）
             if (!hasWriteAccess) {
                 Surface(color = MaterialTheme.colorScheme.errorContainer) {
@@ -316,11 +340,17 @@ private fun CoverEmbedRow(
     onClick: () -> Unit,
     onLongClick: () -> Unit = {}
 ) {
-    val context = LocalContext.current
+    val rowInteraction = remember { MutableInteractionSource() }
     Row(
         modifier = Modifier
             .fillMaxWidth()
-                        .combinedClickable(
+            .padding(horizontal = 10.dp, vertical = 2.dp)
+            // [V8.115] 行统一到主界面玻璃语言（原先无卡片，直接贴背景）。
+            .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
+            .springPress(rowInteraction, pressedScale = 0.975f)
+            .combinedClickable(
+                interactionSource = rowInteraction,
+                indication = null,
                 enabled = !isEmbedding,
                 onClick = { onClick() },
                 onLongClick = { if (!isEmbedding) onLongClick() }
@@ -328,31 +358,35 @@ private fun CoverEmbedRow(
             .padding(horizontal = 16.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(48.dp).clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.surfaceVariant)) {
-            if (song.albumArtUri.isNotBlank()) {
-                AsyncImage(
-                    model = song.albumArtUri,
-                    contentDescription = null,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize()
-                )
-            } else {
-                Icon(
-                    Icons.Default.MusicNote,
-                    null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(12.dp)
-                )
-            }
+        Box(Modifier.size(48.dp).clip(SDWShapes.Thumb)) {
+            // V8.69 - 48dp row: this was decoding the source art unbounded.
+            val rowPainter = rememberSharedCoverPainter(
+                uri = song.albumArtUri, contentScale = ContentScale.Crop, big = false
+            )
+            // [V8.94] 规则：有封面就显示封面，只有没封面才显示 logo。
+            // 原先 if/else 二选一，无封面走 MusicNote 图标 —— 不符合规则；而本界面列出的
+            // 恰恰是「有 albumId 但取不到图」的批次。改为 logo 打底 + 封面无条件叠放。
+            DefaultCoverImage(
+                songTitle = song.title,
+                songArtist = song.artist,
+                modifier = Modifier.fillMaxSize(),
+                shape = SDWShapes.Thumb
+            )
+            Image(
+                painter = rowPainter,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
         }
         Spacer(Modifier.width(12.dp))
         Column(Modifier.weight(1f)) {
             Text(song.title, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("${song.artist} · ${song.album}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text("${song.artist.ifBlank { stringResource(R.string.unknown_artist) }} · ${song.album.ifBlank { stringResource(R.string.unknown_album) }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (isEmbedding) {
             CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-        } else if (song.albumArtUri.isNotBlank()) {
+        } else if (SongRepository.hasRealCover(song.albumArtUri)) {
             Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
         }
     }

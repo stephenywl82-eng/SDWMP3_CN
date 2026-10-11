@@ -1,6 +1,7 @@
 package com.sdw.music.player.ui.screens
 
 import androidx.compose.foundation.*
+import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -25,7 +26,10 @@ import com.sdw.music.player.Song
 import com.sdw.music.player.splitArtists
 import com.sdw.music.player.ui.components.AlphabetIndexBar
 import com.sdw.music.player.ui.components.ArtistAvatar
-import com.sdw.music.player.ui.theme.*
+import com.sdw.music.player.ui.components.LibraryRow
+import com.sdw.music.player.ui.components.SectionHeader
+import com.sdw.music.player.ui.components.springPress
+import com.sdw.music.player.ui.theme.SDWSpace
 import com.sdw.music.player.util.PinyinUtils
 import androidx.compose.ui.res.stringResource
 import com.sdw.music.player.R
@@ -43,10 +47,13 @@ fun ArtistListScreen(
     var isSearching by remember { mutableStateOf(false) }
 
     // 把每首歌的 artist 拆成多个独立歌手，各自归组（一首歌可能同时出现在多个歌手名下）
-    val allArtists = remember(songs) {
+    // [V8.93] 兜底文案走资源：原先硬编码英文会凭空多出一个 "Unknown Artist" 歌手分组，
+    // 与中文界面不一致，也和显示层判据对不上。
+    val unknownArtistLabel = stringResource(R.string.unknown_artist)
+    val allArtists = remember(songs, unknownArtistLabel) {
         val map = mutableMapOf<String, MutableList<Song>>()
         songs.forEach { song ->
-            splitArtists(song.artist.ifBlank { "Unknown Artist" }).forEach { name ->
+            splitArtists(song.artist.ifBlank { unknownArtistLabel }).forEach { name ->
                 map.getOrPut(name) { mutableListOf() }.add(song)
             }
         }
@@ -71,9 +78,10 @@ fun ArtistListScreen(
         result.sortedBy { it[0] }.toList()
     }
 
-    val grouped = remember(filteredArtists) {
+    // 【V8.144】显式 Map 类型，避免 JDK21 下推导出 API35 专有类型（Android13 闪退）。
+    val grouped: Map<String, List<Pair<String, List<Song>>>> = remember(filteredArtists) {
         filteredArtists.groupBy { PinyinUtils.getInitial(it.first).toString() }
-            .toSortedMap()
+            .toList().sortedBy { it.first }.toMap()
     }
 
     val listState = rememberLazyListState()
@@ -106,7 +114,7 @@ fun ArtistListScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            SDWTopBar(
                 title = {
                     if (isSearching) {
                         OutlinedTextField(
@@ -141,7 +149,6 @@ fun ArtistListScreen(
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
         },
         containerColor = MaterialTheme.colorScheme.background
@@ -150,7 +157,7 @@ fun ArtistListScreen(
             LazyColumn(
                 state = listState,
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(vertical = 4.dp)
+                contentPadding = PaddingValues(horizontal = SDWSpace.ListInline, vertical = 4.dp)
             ) {
                 items(flatItems.size, key = { idx ->
                     val (isHeader, data) = flatItems[idx]
@@ -158,13 +165,8 @@ fun ArtistListScreen(
                 }) { idx ->
                     val (isHeader, data) = flatItems[idx]
                     if (isHeader) {
-                        Text(
-                            text = data as String,
-                            color = MaterialTheme.colorScheme.primary,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
-                            modifier = Modifier.padding(start = 16.dp, top = 8.dp, bottom = 4.dp)
-                        )
+                        // 分组头与专辑页同源（LibraryKit.SectionHeader）。
+                        SectionHeader(data as String)
                     } else {
                         val (artistName, artistData) = data as Pair<String, Any>
                         val songsList = artistData as List<Song>
@@ -195,40 +197,27 @@ fun ArtistListScreen(
     }
 }
 
+/**
+ * 歌手行。
+ *
+ * V8.118 接入统一设计语言：外壳换成 LibraryRow（与主曲库同一套玻璃 + 弹簧按压 + 16dp
+ * 圆角），标题字重与主曲库对齐，歌曲数走 CountText 资源。前导位保留 ArtistAvatar ——
+ * 歌手没有统一封面，用渐变字母头像比强行塞一张专辑图更诚实。
+ */
 @Composable
 private fun ArtistItem(
     artistName: String,
     songCount: Int,
     onClick: () -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(MaterialTheme.colorScheme.surface)
-            .clickable(onClick = onClick)
-            .padding(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        // 首字母炫彩头像：渐变 + 玻璃高光 + 描边（不用封面）
-        ArtistAvatar(
-            artistName = artistName,
-            size = 52.dp
-        )
-        Spacer(Modifier.width(14.dp))
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                artistName,
-                style = MaterialTheme.typography.titleMedium,
-                color = MaterialTheme.colorScheme.onBackground,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-            Text(
-                "$songCount songs",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
+    LibraryRow(
+        title = artistName,
+        subtitle = stringResource(R.string.count_songs, songCount),
+        onClick = onClick,
+        coverSize = 52.dp,
+        showTrailing = false,
+        leading = {
+            ArtistAvatar(artistName = artistName, size = 52.dp)
         }
-        Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.size(20.dp))
-    }
+    )
 }

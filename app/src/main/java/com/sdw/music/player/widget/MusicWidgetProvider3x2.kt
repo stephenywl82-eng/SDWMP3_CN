@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.widget.RemoteViews
 import com.sdw.music.player.MainActivity
 import com.sdw.music.player.R
+import com.sdw.music.player.SongRepository
 
 /**
  * 3x2 widget provider — always uses the 3x2 layout.
@@ -47,7 +48,7 @@ class MusicWidgetProvider3x2 : AppWidgetProvider() {
                 // Text
                 if (songData != null) {
                     views.setTextViewText(R.id.widget_title, songData.title)
-                    views.setTextViewText(R.id.widget_artist, songData.artist)
+                    views.setTextViewText(R.id.widget_artist, songData.artist.ifBlank { context.getString(R.string.unknown_artist) })
                 } else {
                     views.setTextViewText(R.id.widget_title, context.getString(R.string.app_name_moto))
                     views.setTextViewText(R.id.widget_artist, "No track playing")
@@ -79,7 +80,7 @@ class MusicWidgetProvider3x2 : AppWidgetProvider() {
             }
 
             // Async decode if cache miss
-            if (songData != null && songData.albumArtUri.isNotBlank() && songData.albumArtUri != MusicWidgetProvider.getCachedArtUri()) {
+            if (songData != null && SongRepository.hasRealCover(songData.albumArtUri) && songData.albumArtUri != MusicWidgetProvider.getCachedArtUri()) {
                 val appCtx = context.applicationContext
                 MusicWidgetProvider.triggerAsyncCoverLoad(appCtx, songData.albumArtUri) {
                     MusicWidgetProvider.updateAllWidgets(appCtx)

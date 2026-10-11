@@ -23,8 +23,8 @@ android {
         applicationId = "com.sdw.music.player.cn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 51
-        versionName = "8.36"
+        versionCode = 900
+        versionName = "9.0"     // 【V9.0】歌词页玻璃浮层 + ReplayGain 归一化（versionCode 900）
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -50,7 +50,7 @@ android {
                     keyPassword = "android"
                 }
             }
-            // Same fallback keystore for debug �?debug APKs install -r over the
+            // Same fallback keystore for debug 锟?debug APKs install -r over the
             // release build (shared signing) without an uninstall.
             getByName("debug") {
                 storeFile = file("debug.keystore")
@@ -94,6 +94,7 @@ android {
     buildFeatures {
         compose = true
         buildConfig = true
+        aidl = true
         // prefab disabled: oboe is linked via the prebuilt liboboe.so in jniLibs
         // (the published oboe 1.8.0 prefab only carries NDK r21 artifacts and
         // rejects newer NDKs). Keep the oboe dependency for completeness but do
@@ -102,7 +103,7 @@ android {
     }
 
     composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.8"
+        kotlinCompilerExtensionVersion = "1.5.15"
     }
 
     /* CMake disabled in Gradle to avoid OOM on this 8GB box. liboboe_bridge.so
@@ -121,8 +122,8 @@ android {
 }
 
 dependencies {
-    // Compose BOM �?unified versions
-    val composeBom = platform("androidx.compose:compose-bom:2024.02.00")
+    // Compose BOM 锟?unified versions
+    val composeBom = platform("androidx.compose:compose-bom:2024.09.00")
     implementation(composeBom)
 
     // Compose Core
@@ -137,7 +138,8 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
 
     // Navigation Compose
-    implementation("androidx.navigation:navigation-compose:2.7.7")
+    implementation("androidx.navigation:navigation-compose:2.8.0")
+    // [V8.97] navigation-compose 2.8.0 璧疯繍琛屾湡渚濊禆 kotlinx-serialization-core锛?    // 鏄惧紡閿佺増鏈紝閬垮厤浼犻€掍緷璧栨紓绉诲埌涓?Kotlin 1.9.25 涓嶅尮閰嶇殑鐗堟湰銆?    implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.6.3")
 
     // Hilt
     implementation("com.google.dagger:hilt-android:2.50")

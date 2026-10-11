@@ -345,8 +345,8 @@ class LRCLIBProvider(
         try {
             // 【Steven 修复】使用实际文件路径，而非 content URI
             val actualPath = song.filePath.ifBlank { song.path }
-            val lrcPath = actualPath.replace(Regex("\\.(flac|mp3|m4a|wav|ogg)$", RegexOption.IGNORE_CASE), ".lrc")
-            val lrcFile = File(lrcPath)
+            val lrcFile = LrcPaths.safeTarget(actualPath) ?: return
+            val lrcPath = lrcFile.absolutePath
             
             lrcFile.parentFile?.let { parent ->
                 if (!parent.canWrite()) {

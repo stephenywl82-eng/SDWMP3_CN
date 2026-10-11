@@ -1,0 +1,22 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', top: -140, right: -90, width: 480, height: 480, borderRadius: '50%', background: 'linear-gradient(135deg, #3B82F6 0%, #22D3EE 100%)', opacity: 0.16 }} />
+  <Box style={{ position: 'absolute', bottom: -180, left: -120, width: 540, height: 540, borderRadius: '50%', background: 'linear-gradient(135deg, #22D3EE 0%, #3B82F6 100%)', opacity: 0.10 }} />
+  <Text style={{ position: 'absolute', right: 70, top: 120, fontSize: 340, fontWeight: 'bold', color: '#FFFFFF', opacity: 0.05 }}>13</Text>
+  <Box style={{ position: 'relative', zIndex: 1, height: '100%', paddingLeft: 96, paddingRight: 96, justifyContent: 'center' }}>
+    <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 26 }}>
+      <Box style={{ width: 38, height: 4, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+      <Text style={{ fontSize: 17, color: '#22D3EE', letterSpacing: 2 }}>SDW PLAYER · MSEB PSYCHOACOUSTIC CONSOLE</Text>
+    </Box>
+    <Text style={{ fontSize: 74, fontWeight: 'bold', color: '#E5EDF7', lineHeight: 1.1 }}>MSEB 自定义调节</Text>
+    <Text style={{ fontSize: 28, color: '#8DA2BC', marginTop: 20 }}>图文攻略 · 把同一副耳机，调成你想要的声音</Text>
+    <Box style={{ flexDirection: 'row', gap: 14, marginTop: 44 }}>
+      <Box style={{ paddingVertical: 10, paddingHorizontal: 20, borderRadius: 999, background: 'rgba(59,130,246,0.12)', border: '1px solid rgba(59,130,246,0.4)' }}><Text style={{ fontSize: 16, color: '#9DB8E8' }}>13 段听感滑块</Text></Box>
+      <Box style={{ paddingVertical: 10, paddingHorizontal: 20, borderRadius: 999, background: 'rgba(34,211,238,0.12)', border: '1px solid rgba(34,211,238,0.4)' }}><Text style={{ fontSize: 16, color: '#9DE8F2' }}>进阶音效模块</Text></Box>
+      <Box style={{ paddingVertical: 10, paddingHorizontal: 20, borderRadius: 999, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.12)' }}><Text style={{ fontSize: 16, color: '#C7D2E0' }}>场景配方</Text></Box>
+    </Box>
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 96, right: 96, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>MSEB 攻略</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>01 / 10</Text>
+  </Box>
+</Slide>

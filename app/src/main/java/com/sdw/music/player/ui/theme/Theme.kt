@@ -2,7 +2,10 @@ package com.sdw.music.player.ui.theme
 
 import android.app.Activity
 import android.os.Build
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.Modifier
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
@@ -15,6 +18,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -72,7 +76,14 @@ fun SDWMusicTheme(
     content: @Composable () -> Unit
 ) {
     // 浅色模式由 ThemeManager 驱动（默认深色）
-    val lightMode = ThemeManager.lightMode.value
+    // [V8.111] 「跟随系统」开启时改用系统 uiMode。Manifest 里 MainActivity 已声明
+    // configChanges=...|uiMode，系统切换深/浅色不会重建 Activity，LocalConfiguration
+    // 变化会触发这里重组，所以是实时跟随，无需重启。
+    val followSystem = ThemeManager.followSystem.value
+    val systemNight = (LocalConfiguration.current.uiMode and
+        android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+        android.content.res.Configuration.UI_MODE_NIGHT_YES
+    val lightMode = if (followSystem) !systemNight else ThemeManager.lightMode.value
     // 自定义壁纸取色感知：壁纸偏亮时用深文字（浅色配色），否则浅文字（深色配色）
     val wallpaperDarkText = WallpaperManager.shouldUseDarkText()
     val effectiveLight = lightMode || wallpaperDarkText
@@ -175,8 +186,15 @@ fun SDWMusicTheme(
     ) {
         MaterialTheme(
             colorScheme = finalScheme,
-            typography = finalTypography,
-            content = content
-        )
+            typography = finalTypography
+        ) {
+            // [V8.110] L1+L2 浅色/深色切换液态漫射叠层：全屏覆盖，压在内容之上、
+            // 系统栏区域之内（app 已 edge-to-edge）。空闲时 ThemeFlipOverlay 直接
+            // return，零组合零绘制。
+            Box(modifier = Modifier.fillMaxSize()) {
+                content()
+                ThemeFlipOverlay()
+            }
+        }
     }
 }

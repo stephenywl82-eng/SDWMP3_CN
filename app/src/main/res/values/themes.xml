@@ -5,9 +5,5 @@
         <item name="android:navigationBarColor">#1A1A1F</item>
         <item name="android:windowBackground">#1A1A1F</item>
     </style>
-    <color name="purple_primary">#8E6FD0</color>
-    <color name="purple_accent">#B388FF</color>
-    <color name="dark_bg">#1A1A1F</color>
-    <color name="dark_card">#252530</color>
-    <color name="gold_accent">#C9A962</color>
+    <!-- [UI-TIDY] 以下 5 个旧主题色已 0 引用（配色统一走 ui/theme/Color.kt 的 Compose Color），移入 legacy/ 保留即可。 -->
 </resources>

@@ -1,6 +1,7 @@
 package com.sdw.music.player.ui.screens
 
 import androidx.compose.foundation.background
+import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -31,11 +32,20 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.launch
 import com.sdw.music.player.Song
+import com.sdw.music.player.SongRepository
 import com.sdw.music.player.MusicService
 import com.sdw.music.player.R
 import com.sdw.music.player.ui.components.AlphabetIndexBar
+import com.sdw.music.player.ui.components.CountKind
+import com.sdw.music.player.ui.components.CountText
 import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.SectionHeader
+import com.sdw.music.player.ui.components.glassSurface
+import com.sdw.music.player.ui.components.springPress
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import com.sdw.music.player.ui.theme.*
+import com.sdw.music.player.ui.theme.SDWShape
+import com.sdw.music.player.ui.theme.SDWSpace
 import com.sdw.music.player.util.PinyinUtils
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,10 +65,11 @@ fun AlbumListScreen(
     }
 
     // Sort by pinyin, then group by first letter
-    val grouped = remember(filteredAlbums) {
+    // 【V8.144】显式 Map 类型，避免 JDK21 下推导出 API35 专有类型（Android13 闪退）。
+    val grouped: Map<String, List<Pair<String, List<Song>>>> = remember(filteredAlbums) {
         filteredAlbums.sortedBy { (name, _) -> name.lowercase() }
             .groupBy { PinyinUtils.getInitial(it.first).toString() }
-            .toSortedMap()
+            .toList().sortedBy { it.first }.toMap()
     }
 
     val indexLetters = remember(grouped) { grouped.keys.toList() }
@@ -91,7 +102,7 @@ fun AlbumListScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            SDWTopBar(
                 title = {
                     if (isSearching) {
                         OutlinedTextField(
@@ -126,7 +137,6 @@ fun AlbumListScreen(
                         }
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
         },
         containerColor = MaterialTheme.colorScheme.background
@@ -136,9 +146,12 @@ fun AlbumListScreen(
                 columns = GridCells.Adaptive(minSize = 160.dp),
                 state = gridState,
                 modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+                contentPadding = PaddingValues(
+                    horizontal = SDWSpace.GridInline,
+                    vertical = 6.dp
+                ),
+                horizontalArrangement = Arrangement.spacedBy(SDWSpace.GridGapH),
+                verticalArrangement = Arrangement.spacedBy(SDWSpace.GridGapV)
             ) {
                 grouped.forEach { (letter, group) ->
                     item(span = { GridItemSpan(maxLineSpan) }) {
@@ -172,17 +185,12 @@ fun AlbumListScreen(
     }
 }
 
-@Composable
-private fun SectionHeader(letter: String) {
-    Text(
-        text = letter,
-        color = MaterialTheme.colorScheme.primary,
-        fontWeight = FontWeight.Bold,
-        fontSize = 13.sp,
-        modifier = Modifier.padding(start = 4.dp, top = 12.dp, bottom = 2.dp)
-    )
-}
-
+/**
+ * 专辑网格卡。
+ *
+ * V8.118 接入统一设计语言：封面圆角与卡片同档（Row 16dp，不再上下各 12dp 的半吊子
+ * 组合）、封面与卡片等宽不留缝、歌曲数走 CountText 资源（原先是硬编码英文 "$n songs"）。
+ */
 @Composable
 private fun AlbumGridItem(
     albumName: String,
@@ -190,23 +198,25 @@ private fun AlbumGridItem(
     coverUri: String,
     onClick: () -> Unit
 ) {
+    val interaction = remember { MutableInteractionSource() }
+    val shape = RoundedCornerShape(SDWShape.Row)
     Column(
         modifier = Modifier.fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
-            .clickable(onClick = onClick)
+            .glassSurface(shape = shape, fillBoost = 0f)
+            .springPress(interaction, pressedScale = 0.975f)
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
     ) {
         Box(
-            modifier = Modifier.fillMaxWidth().aspectRatio(1f)
-                .clip(RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp))
+            modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(shape)
         ) {
             // DefaultCoverImage underneath, actual cover on top
             DefaultCoverImage(
                 songTitle = albumName,
                 songArtist = "",
                 modifier = Modifier.fillMaxSize(),
-                shape = RoundedCornerShape(topStart = 12.dp, topEnd = 12.dp)
+                shape = shape
             )
-            if (coverUri.isNotBlank()) {
+            if (SongRepository.hasRealCover(coverUri)) {
                 AsyncImage(
                     model = ImageRequest.Builder(LocalContext.current)
                         .data(coverUri).size(480).crossfade(true).build(),
@@ -220,9 +230,15 @@ private fun AlbumGridItem(
             )
         }
         Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp)) {
-            Text(albumName, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onBackground,
-                maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Text("$songCount songs", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(
+                albumName,
+                style = itemTitleStyle(),
+                color = MaterialTheme.colorScheme.onBackground,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Spacer(Modifier.height(2.dp))
+            CountText(songCount, CountKind.SONGS)
         }
     }
 }

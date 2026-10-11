@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  【V8.216】Android 自动备份白名单（API <= 30，由 android:fullBackupContent 引用）
+
+  背景：Manifest 上 allowBackup="true" 但此前没有任何规则，于是系统默认把整个
+  App 数据全量备份 —— 包括 files/ 下的 song_cache.json（3000+ 首歌库缓存）、
+  AutoEQ 预设、调色板缓存，以及所有 SharedPreferences（含歌曲目录清单、
+  歌词、播放状态）。恢复时这些"本机数据"被原样搬回来，既无意义又会拖慢冷启动。
+
+  用户的备份诉求只有两类：设置开关 + MSEB 调节。这里据此收敛，
+  与 App 内 SettingsBackup 的 AUDIO + UI 两组范围保持一致。
+-->
+<full-backup-content>
+    <!-- 只备份「设置开关 + MSEB 调节」这两类配置 -->
+    <include domain="sharedpref" path="settings.xml" />
+    <include domain="sharedpref" path="mseb.xml" />
+    <include domain="sharedpref" path="mseb_presets.xml" />
+    <include domain="sharedpref" path="compressor.xml" />
+    <include domain="sharedpref" path="crossfeed.xml" />
+    <include domain="sharedpref" path="loudness.xml" />
+    <include domain="sharedpref" path="loudness_norm.xml" />
+    <include domain="sharedpref" path="equalizer_prefs.xml" />
+    <include domain="sharedpref" path="sdw_music_prefs.xml" />
+    <include domain="sharedpref" path="app_language_prefs.xml" />
+    <include domain="sharedpref" path="widget_prefs.xml" />
+
+    <!-- 其余全部不进备份：歌库缓存 / 歌曲目录 / 歌词 / 播放状态 / 收藏歌单 -->
+    <exclude domain="file" path="." />
+    <exclude domain="database" path="." />
+    <exclude domain="external" path="." />
+    <exclude domain="root" path="." />
+    <exclude domain="sharedpref" path="lyric_prefs.xml" />
+    <exclude domain="sharedpref" path="folder_list_cache.xml" />
+    <exclude domain="sharedpref" path="bpm_key_cache.xml" />
+    <exclude domain="sharedpref" path="palette_cache.xml" />
+    <exclude domain="sharedpref" path="playback_state.xml" />
+    <exclude domain="sharedpref" path="permission_flags.xml" />
+    <exclude domain="sharedpref" path="MusicPlayer.xml" />
+    <exclude domain="sharedpref" path="sdw_favorites.xml" />
+    <exclude domain="sharedpref" path="sdw_playlists.xml" />
+</full-backup-content>

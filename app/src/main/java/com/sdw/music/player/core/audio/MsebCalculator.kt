@@ -1,4 +1,5 @@
 package com.sdw.music.player
+import com.sdw.music.player.core.util.floatValue
 
 import android.content.Context
 
@@ -110,37 +111,35 @@ object MsebCalculator {
         return g
     }
 
+    /**
+     * 【V8.184】主观描述。两条硬约束：
+     *  ① 全部用短词（deep / loose / thick / warm…），不用 "loose bass"、"forward vocal" 这种
+     *     双词短语 —— 它要塞进 MSEB 卡片副标题和播放页那枚小胶囊，一行放不下。
+     *  ② 最多只取 3 个（低频 → 中低 → 中高 → 高频 → 瞬态 → 空间），按听感权重排序后截断。
+     * 原来会把二十多个维度一股脑罗列出来，卡片那行是 maxLines=1，实际只露出半截。
+     */
     fun describe(params: MsebParams): String {
         if (params.isFlat) return "Flat / bypass"
-        val parts = mutableListOf<String>()
         val t = 1f
-        if (params.subBass > t) parts.add("deep bass")
-        if (params.subBass < -t) parts.add("lean bass")
-        if (params.bassTexture > t) parts.add("tight bass")
-        if (params.bassTexture < -t) parts.add("loose bass")
-        if (params.thickness > t) parts.add("thick")
-        if (params.thickness < -t) parts.add("thin")
-        if (params.temperature > t) parts.add("warm")
-        if (params.temperature < -t) parts.add("crisp")
-        if (params.vocalForward > t) parts.add("forward vocal")
-        if (params.vocalForward < -t) parts.add("distant vocal")
-        if (params.femaleOvertones > t) parts.add("sweet vocal")
-        if (params.femaleOvertones < -t) parts.add("dry vocal")
+        val parts = mutableListOf<String>()
+        if (params.subBass > t) parts.add("deep") else if (params.subBass < -t) parts.add("lean")
+        if (params.bassTexture > t) parts.add("tight") else if (params.bassTexture < -t) parts.add("loose")
+        if (params.thickness > t) parts.add("thick") else if (params.thickness < -t) parts.add("thin")
+        if (params.temperature > t) parts.add("warm") else if (params.temperature < -t) parts.add("crisp")
+        if (params.vocalForward > t) parts.add("vocal+") else if (params.vocalForward < -t) parts.add("vocal-")
+        if (params.femaleOvertones > t) parts.add("sweet") else if (params.femaleOvertones < -t) parts.add("dry")
+        // 齿音与 its LF/HF 两段描述重复（都是 crisp/soft），只留总开关那一条，
+        // 细分维度留到 |v| > 5 才提一句，避免和 "crisp"/"warm" 撞词。
         if (params.sibilance > t) parts.add("bright")
-        if (params.sibilance < -t) parts.add("smooth")
-        if (params.sibilanceLf > t) parts.add("crisp LF")
-        if (params.sibilanceLf < -t) parts.add("soft LF")
-        if (params.sibilanceHf > t) parts.add("crisp HF")
-        if (params.sibilanceHf < -t) parts.add("soft HF")
-        if (params.air > t) parts.add("airy")
-        if (params.air < -t) parts.add("dark")
-        if (params.impulseResponse > t) parts.add("fast attack")
-        if (params.impulseResponse < -t) parts.add("soft transient")
-        if (params.soundstage > t) parts.add("wide soundstage")
-        if (params.soundstage < -t) parts.add("narrow soundstage")
-        if (params.imaging > t) parts.add("focused imaging")
-        if (params.imaging < -t) parts.add("diffuse imaging")
-        return parts.joinToString(" · ").ifEmpty { "Light touch" }
+        else if (params.sibilance < -t) parts.add("smooth")
+        // 齿音 LF/HF 细分只在总开关没表态时才提，免得和上面那条撞出两个「crisp」
+        else if (params.sibilanceLf > 5f || params.sibilanceHf > 5f) parts.add("crisp HF")
+        else if (params.sibilanceLf < -5f || params.sibilanceHf < -5f) parts.add("soft HF")
+        if (params.air > t) parts.add("airy") else if (params.air < -t) parts.add("dark")
+        if (params.impulseResponse > t) parts.add("snap") else if (params.impulseResponse < -t) parts.add("soft")
+        if (params.soundstage > t) parts.add("wide") else if (params.soundstage < -t) parts.add("narrow")
+        if (params.imaging > t) parts.add("focus") else if (params.imaging < -t) parts.add("diffuse")
+        return parts.take(3).joinToString(" · ").ifEmpty { "Light touch" }
     }
 
     // ── Persistence ──
@@ -161,24 +160,26 @@ object MsebCalculator {
     private const val KEY_IMG    = "imaging"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_DTS_ENABLED = "dts_enabled"
+    private const val KEY_DTS_SURROUND = "dts_surround"
+    private const val KEY_DTS_HEIGHT = "dts_height"
     private const val KEY_PRESET_NAME = "preset_name"
 
     fun load(context: Context): MsebParams {
         val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return MsebParams(
-            temperature     = p.getFloat(KEY_TEMP,  0f),
-            sibilance       = p.getFloat(KEY_SIB,   0f),
-            subBass         = p.getFloat(KEY_SUB,   0f),
-            thickness       = p.getFloat(KEY_THICK, 0f),
-            vocalForward    = p.getFloat(KEY_VOCAL, 0f),
-            air             = p.getFloat(KEY_AIR,   0f),
-            bassTexture     = p.getFloat(KEY_BTEX,  0f),
-            femaleOvertones = p.getFloat(KEY_FEM,   0f),
-            sibilanceLf     = p.getFloat(KEY_SIBLF, 0f),
-            sibilanceHf     = p.getFloat(KEY_SIBHF, 0f),
-            impulseResponse = p.getFloat(KEY_IMP,   0f),
-            soundstage      = p.getFloat(KEY_STAGE, 0f),
-            imaging         = p.getFloat(KEY_IMG,   0f)
+            temperature     = p.floatValue(KEY_TEMP,  0f),
+            sibilance       = p.floatValue(KEY_SIB,   0f),
+            subBass         = p.floatValue(KEY_SUB,   0f),
+            thickness       = p.floatValue(KEY_THICK, 0f),
+            vocalForward    = p.floatValue(KEY_VOCAL, 0f),
+            air             = p.floatValue(KEY_AIR,   0f),
+            bassTexture     = p.floatValue(KEY_BTEX,  0f),
+            femaleOvertones = p.floatValue(KEY_FEM,   0f),
+            sibilanceLf     = p.floatValue(KEY_SIBLF, 0f),
+            sibilanceHf     = p.floatValue(KEY_SIBHF, 0f),
+            impulseResponse = p.floatValue(KEY_IMP,   0f),
+            soundstage      = p.floatValue(KEY_STAGE, 0f),
+            imaging         = p.floatValue(KEY_IMG,   0f)
         )
     }
 
@@ -241,6 +242,7 @@ object MsebCalculator {
      * 【V8.19】DTS 开关开启时应生效的声场参数。
      * 用户没调过声场/结像滑块（都为 0）时返回内置默认环绕参数，
      * 保证"开 DTS 就有环绕效果"，不依赖 MSEB 滑块。
+     * 【V8.162】恢复原设计：未调滑块时 width 兜底 5f（width=1.4）。
      * 用户调过滑块则跟随滑块（DTS 作为总开关控制是否应用）。
      */
     fun dtsStageParams(context: Context): Pair<Float, Float> {
@@ -249,5 +251,35 @@ object MsebCalculator {
         val img = params.imaging
         val hasUserStage = kotlin.math.abs(ss) > 0.1f || kotlin.math.abs(img) > 0.1f
         return if (hasUserStage) ss to img else 5f to 0f
+    }
+
+    /**
+     * 【V8.172】DTS 虚拟环绕的两个高级参数，与宽度/结像正交。
+     *
+     * surround 默认 5（≈0.4 线性）：旧版环绕量是 (width-1)*0.5 再乘 side 幅度，
+     * 实际回灌只有 0.01~0.04，低于可辨阈值；独立成旋钮后默认就给到能听见的量级。
+     * height 默认 5（0.5）：耳廓共振 + 左右耳权重差，决定"两侧变宽"还是"有前后"。
+     */
+    data class DtsStageEx(
+        val surround: Float = 5f,
+        val height: Float = 5f
+    ) {
+        val isDefault: Boolean get() = surround == 5f && height == 5f
+    }
+
+    fun getDtsStageEx(context: Context): DtsStageEx {
+        val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return DtsStageEx(
+            surround = p.floatValue(KEY_DTS_SURROUND, 5f),
+            height = p.floatValue(KEY_DTS_HEIGHT, 5f)
+        )
+    }
+
+    fun saveDtsStageEx(context: Context, ex: DtsStageEx) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putFloat(KEY_DTS_SURROUND, ex.surround)
+            .putFloat(KEY_DTS_HEIGHT, ex.height)
+            .apply()
     }
 }

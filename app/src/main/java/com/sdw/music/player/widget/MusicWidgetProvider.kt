@@ -10,6 +10,7 @@ import android.os.Bundle
 import android.widget.RemoteViews
 import com.sdw.music.player.MainActivity
 import com.sdw.music.player.R
+import com.sdw.music.player.SongRepository
 import com.sdw.music.player.MusicService
 import android.os.Handler
 import android.os.Looper
@@ -196,7 +197,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
                 // Text
                 if (songData != null) {
                     views.setTextViewText(R.id.widget_title, songData.title)
-                    views.setTextViewText(R.id.widget_artist, songData.artist)
+                    views.setTextViewText(R.id.widget_artist, songData.artist.ifBlank { context.getString(R.string.unknown_artist) })
                 } else {
                     views.setTextViewText(R.id.widget_title, context.getString(R.string.app_name_moto))
                     views.setTextViewText(R.id.widget_artist, "No track playing")
@@ -224,7 +225,7 @@ class MusicWidgetProvider : AppWidgetProvider() {
             }
 
             // Async decode if cache miss (avoid blocking onContentResolver I/O)
-            if (songData != null && songData.albumArtUri.isNotBlank() && songData.albumArtUri != cachedArtUri) {
+            if (songData != null && SongRepository.hasRealCover(songData.albumArtUri) && songData.albumArtUri != cachedArtUri) {
                 val appCtx = context.applicationContext
                 triggerAsyncCoverLoad(appCtx, songData.albumArtUri) {
                     updateAllWidgets(appCtx)
@@ -301,10 +302,10 @@ class MusicWidgetProvider : AppWidgetProvider() {
                     }
                 }
                 ACTION_NEXT -> {
-                    MusicService.instance?.playNext()
+                    MusicService.instance?.playNext(fromUser = true)
                 }
                 ACTION_PREV -> {
-                    MusicService.instance?.playPrevious()
+                    MusicService.instance?.playPrevious(fromUser = true)
                 }
             }
             updateAllWidgets(context)

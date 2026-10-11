@@ -1,6 +1,8 @@
 package com.sdw.music.player.ui.screens
 
 import android.content.Context
+import com.sdw.music.player.ui.components.SDWDivider
+import com.sdw.music.player.ui.components.SDWTopBar
 import android.content.Intent
 import android.os.PowerManager
 import androidx.compose.foundation.background
@@ -22,12 +24,14 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
 import com.sdw.audio.analyzer.*
 import com.sdw.music.player.Song
 import com.sdw.music.player.R
 import com.sdw.music.player.ui.theme.*
+import com.sdw.music.player.ui.components.glassSurface
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -202,12 +206,13 @@ fun AudioQualityScreen(
             val decoder = AudioDecoder()
             val analyzer = QualityAnalyzer()
             for ((idx, file) in pending.withIndex()) {
-                val pcm = try { decoder.decode(file.filePath, 10_000) } catch (_: Exception) { null }
+                // [V8.120] Throwable (not just Exception): one bad file must never abort the scan.
+                val pcm = try { decoder.decode(file.filePath, 10_000) } catch (_: Throwable) { null }
                 if (pcm == null) {
                     uiState = uiState.copy(statusText = context.getString(R.string.quality_decode_failed, file.fileName, idx + 1, pending.size))
                     continue
                 }
-                val report = try { analyzer.analyze(pcm, file) } catch (_: Exception) { null }
+                val report = try { analyzer.analyze(pcm, file) } catch (_: Throwable) { null }
                 if (report != null) {
                     merged.removeAll { it.filePath == report.filePath }
                     merged.add(report.toCached())
@@ -230,7 +235,7 @@ fun AudioQualityScreen(
                 reports = final.sortedByDescending { it.qualityScore },
                 cachedCount = final.size
             )
-        } catch (e: Exception) {
+        } catch (e: Throwable) {
             uiState = uiState.copy(phase = "done", statusText = "Error: ${e.message}")
         } finally {
             wl.release()
@@ -253,7 +258,7 @@ fun AudioQualityScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            SDWTopBar(
                 title = { Text(stringResource(R.string.title_audio_quality), color = MaterialTheme.colorScheme.onBackground) },
                 navigationIcon = {
                     IconButton(onClick = onNavigateBack) {
@@ -268,7 +273,6 @@ fun AudioQualityScreen(
                         )
                     }
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background)
             )
         },
         containerColor = MaterialTheme.colorScheme.background
@@ -297,7 +301,7 @@ fun AudioQualityScreen(
                     ),
                     modifier = Modifier.height(36.dp)
                 ) {
-                    Icon(Icons.Default.Refresh, null, Modifier.size(16.dp))
+                    Icon(Icons.Default.Refresh, stringResource(R.string.action_refresh), Modifier.size(16.dp))
                     Spacer(Modifier.width(6.dp))
                     Text(if (uiState.reports.isEmpty()) stringResource(R.string.action_scan) else stringResource(R.string.action_rescan), fontSize = 13.sp)
                 }
@@ -371,9 +375,9 @@ fun AudioQualityScreen(
                         modifier = Modifier.height(28.dp)
                     )
                 }
-                HorizontalDivider(
-                    Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant
+                SDWDivider(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 1f)
                 )
             }
 
@@ -413,10 +417,11 @@ private fun ReportCard(
         else -> AccentRed
     }
 
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        shape = RoundedCornerShape(12.dp)
+    // [V8.115] 统一玻璃语言：报告卡从纯色 Card 换成 glassSurface（与主界面面板同形）。
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
     ) {
         Column(Modifier.padding(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -482,7 +487,7 @@ private fun ReportCard(
                             tag.contains("Spectrally Flat", ignoreCase = true) -> MaterialTheme.colorScheme.secondary
                             else -> MaterialTheme.colorScheme.primary
                         }
-                        Surface(color = c.copy(alpha = 0.12f), shape = RoundedCornerShape(4.dp)) {
+                        Surface(color = c.copy(alpha = 0.12f), shape = SDWShapes.Badge) {
                             Text(tag, Modifier.padding(horizontal = 6.dp, vertical = 2.dp), fontSize = 10.sp, color = c)
                         }
                     }
@@ -515,7 +520,7 @@ private fun ReportCard(
                     },
                     modifier = Modifier.size(32.dp)
                 ) {
-                    Icon(Icons.Default.Share, null, tint = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Share, stringResource(R.string.action_share), tint = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.size(16.dp))
                 }
             }
         }

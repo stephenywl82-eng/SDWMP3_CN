@@ -1,0 +1,42 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', top: -90, left: -70, width: 320, height: 320, borderRadius: '50%', background: 'linear-gradient(135deg, #3B82F6 0%, #22D3EE 100%)', opacity: 0.07 }} />
+  <Box style={{ paddingTop: 40, paddingLeft: 64, paddingRight: 64, paddingBottom: 24 }}>
+    <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+      <Box style={{ width: 38, height: 4, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+      <Text style={{ fontSize: 16, color: '#22D3EE', letterSpacing: 2 }}>13 段滑块</Text>
+    </Box>
+    <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#E5EDF7' }}>13 段滑块一览</Text>
+  </Box>
+  <Box style={{ paddingLeft: 64, paddingRight: 64, paddingBottom: 56, height: 560 }}>
+    <Table
+      style={{ width: '100%', height: '100%' }}
+      defaultTextStyle={{ fontSize: 15, color: '#E5EDF7', textAlign: 'left' }}
+      defaultCellStyle={{ border: { left: { width: 0 }, right: { width: 0 }, top: { width: 1, color: 'rgba(255,255,255,0.08)' }, bottom: { width: 1, color: 'rgba(255,255,255,0.08)' } }, background: { color: '#0F1A30' } }}
+      cells={[
+        [
+          { text: '#', textStyle: { bold: true, color: '#0B1120' }, cellStyle: { background: { color: '#3B82F6' } } },
+          { text: '滑块', textStyle: { bold: true, color: '#0B1120' }, cellStyle: { background: { color: '#3B82F6' } } },
+          { text: '管什么', textStyle: { bold: true, color: '#0B1120' }, cellStyle: { background: { color: '#3B82F6' } } },
+          { text: '左 ↔ 右', textStyle: { bold: true, color: '#0B1120' }, cellStyle: { background: { color: '#3B82F6' } } },
+        ],
+        ['1', '温度 Temperature', '中低频 ↔ 高频能量比', 'Cool 冷 ↔ Warm 暖'],
+        ['2', '厚度 Thickness', '人声 / 乐器基频饱满度', 'Thin 薄 ↔ Thick 厚'],
+        ['3', '人声 Vocal', '人声前后成像位置', 'Distant 远 ↔ Forward 前'],
+        ['4', '超低音 Sub-bass', '下潜与冲击感', 'Lean 瘦 ↔ Deep 深'],
+        ['5', '低频质感 Bass Texture', '低频弹性与紧致', 'Loose 松 ↔ Tight 紧'],
+        ['6', '齿音 Sibilance', '整体齿音亮度', 'Smooth 顺 ↔ Bright 亮'],
+        ['7', '齿音 LF', '精准削 ~6kHz 毛刺', '0 ↔ 削'],
+        ['8', '齿音 HF', '精准削 ~9kHz 锐利', '0 ↔ 削'],
+        ['9', '女声泛音 Female Overtones', '女声甜润与丰盈', 'Soft 柔 ↔ Sweet 甜'],
+        ['10', '空气感 Air', '极高频清晰度与解析', 'Dark 暗 ↔ Airy 通透'],
+        ['11', '瞬态 Transient', '瞬态响应速度与利落', '(慢 / 糊) ↔ Fast 快'],
+        ['12', '声场 Soundstage', '立体声宽度 (M/S 侧)', 'Narrow 窄 ↔ Wide 宽'],
+        ['13', '结像 Imaging', '中央聚焦 / 人声定位', 'Diffuse 散 ↔ Focused 聚'],
+      ]}
+    />
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 64, right: 64, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>MSEB 攻略</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>04 / 10</Text>
+  </Box>
+</Slide>

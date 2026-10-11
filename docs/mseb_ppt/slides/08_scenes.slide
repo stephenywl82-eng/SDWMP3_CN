@@ -1,0 +1,34 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', bottom: -110, right: -80, width: 340, height: 340, borderRadius: '50%', background: 'linear-gradient(135deg, #22D3EE 0%, #3B82F6 100%)', opacity: 0.07 }} />
+  <Box style={{ paddingTop: 40, paddingLeft: 64, paddingRight: 64, paddingBottom: 16 }}>
+    <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+      <Box style={{ width: 38, height: 4, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+      <Text style={{ fontSize: 16, color: '#22D3EE', letterSpacing: 2 }}>场景配方</Text>
+    </Box>
+    <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#E5EDF7' }}>按场景抄作业</Text>
+  </Box>
+  <Box style={{ paddingLeft: 64, paddingRight: 64, paddingBottom: 56, height: 560 }}>
+    <Table
+      style={{ width: '100%', height: '100%' }}
+      defaultTextStyle={{ fontSize: 16, color: '#E5EDF7', textAlign: 'left' }}
+      defaultCellStyle={{ border: { left: { width: 0 }, right: { width: 0 }, top: { width: 1, color: 'rgba(255,255,255,0.08)' }, bottom: { width: 1, color: 'rgba(255,255,255,0.08)' } }, background: { color: '#0F1A30' } }}
+      cells={[
+        [
+          { text: '场景', textStyle: { bold: true, color: '#0B1120' }, cellStyle: { background: { color: '#3B82F6' } } },
+          { text: '怎么调', textStyle: { bold: true, color: '#0B1120' }, cellStyle: { background: { color: '#3B82F6' } } },
+        ],
+        ['通勤 / 地铁（蓝牙 SBC）', '动态 EQ 开一点（补高频瞬态）+ 多段限幅保底 + 等响补偿中'],
+        ['有线 HiFi / DAC 独占', '只留限幅保护，校正全开（传输近透明，不用动）'],
+        ['睡前小音量', '等响补偿开、强度中高；温度略暖'],
+        ['齿音重的老歌', 'Sibilance 往左 + Sibilance LF / HF 精准削'],
+        ['人声 / 播客', 'Vocal 往右（前）+ Thickness 略厚 + Imaging 聚焦'],
+        ['现场 / 交响', 'Space Reverb 开、Soundstage 略宽'],
+        ['游戏 / 电影', 'DTS Surround 开、Height 调高'],
+      ]}
+    />
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 64, right: 64, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>MSEB 攻略</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>08 / 10</Text>
+  </Box>
+</Slide>

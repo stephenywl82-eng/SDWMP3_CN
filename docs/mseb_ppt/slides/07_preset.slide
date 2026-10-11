@@ -1,0 +1,36 @@
+<Slide style={{ width: '1280px', height: '720px', background: '#0B1120', position: 'relative', overflow: 'hidden', fontFamily: "'Inter', 'PingFang SC', 'Microsoft YaHei', sans-serif" }}>
+  <Box style={{ position: 'absolute', top: -90, left: -70, width: 320, height: 320, borderRadius: '50%', background: 'linear-gradient(135deg, #3B82F6 0%, #22D3EE 100%)', opacity: 0.07 }} />
+  <Box style={{ paddingTop: 40, paddingLeft: 64, paddingRight: 64, paddingBottom: 16 }}>
+    <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 12, marginBottom: 6 }}>
+      <Box style={{ width: 38, height: 4, background: 'linear-gradient(135deg, #3B82F6, #22D3EE)' }} />
+      <Text style={{ fontSize: 16, color: '#22D3EE', letterSpacing: 2 }}>预设与保存</Text>
+    </Box>
+    <Text style={{ fontSize: 30, fontWeight: 'bold', color: '#E5EDF7' }}>预设，和你的命名</Text>
+  </Box>
+  <Box style={{ flexDirection: 'row', paddingLeft: 64, paddingRight: 64, paddingBottom: 56, gap: 28, height: 540 }}>
+    <Box style={{ width: '50%', justifyContent: 'center', gap: 20 }}>
+      <Box style={{ padding: 24, background: '#13203A', borderRadius: 16, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}><FAIcon name="check-circle" style={{ fill: '#22D3EE', width: 30, height: 30 }} /><Text style={{ fontSize: 22, fontWeight: 'bold', color: '#E5EDF7' }}>Original Bit-Perfect (A)</Text></Box>
+        <Text style={{ fontSize: 16, color: '#A9B8CC', marginTop: 12, lineHeight: 1.6 }}>原曲比特完美。关掉所有音效，听原始母带——想要完全原汁原味就选它。</Text>
+      </Box>
+      <Box style={{ padding: 24, background: '#13203A', borderRadius: 16, border: '1px solid rgba(255,255,255,0.08)' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}><FAIcon name="undo" style={{ fill: '#22D3EE', width: 30, height: 30 }} /><Text style={{ fontSize: 22, fontWeight: 'bold', color: '#E5EDF7' }}>Reset to flat</Text></Box>
+        <Text style={{ fontSize: 16, color: '#A9B8CC', marginTop: 12, lineHeight: 1.6 }}>一键把所有滑块归零。调乱了？点它立刻回血。</Text>
+      </Box>
+    </Box>
+    <Box style={{ width: '50%', justifyContent: 'center' }}>
+      <Box style={{ padding: 28, background: 'linear-gradient(160deg, rgba(59,130,246,0.16), rgba(34,211,238,0.10))', borderRadius: 18, border: '1px solid rgba(34,211,238,0.35)' }}>
+        <Box style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}><FAIcon name="save" style={{ fill: '#22D3EE', width: 30, height: 30 }} /><Text style={{ fontSize: 22, fontWeight: 'bold', color: '#E5EDF7' }}>Save Preset 存预设</Text></Box>
+        <Text style={{ fontSize: 16, color: '#A9B8CC', marginTop: 14, lineHeight: 1.6 }}>把当前这一套存成预设，<span style={{ color: '#9DE8F2', fontWeight: 'bold' }}>最多 12 个</span>自定义预设。</Text>
+        <Box style={{ marginTop: 18, padding: 16, borderRadius: 12, background: 'rgba(255,255,255,0.05)', border: '1px solid rgba(255,255,255,0.10)' }}>
+          <Text style={{ fontSize: 15, color: '#C7D2E0', lineHeight: 1.6 }}>存的时候可以<span style={{ color: '#9DB8E8', fontWeight: 'bold' }}>命名</span>（如「通勤」「睡前」）。之后播放页会显示这个名字，而不是一长串功能列表。</Text>
+        </Box>
+        <Text style={{ fontSize: 15, color: '#8DA2BC', marginTop: 16, lineHeight: 1.5 }}>例：一套「通勤」+ 一套「人声」+ 一套「现场」，按场景秒切。</Text>
+      </Box>
+    </Box>
+  </Box>
+  <Box style={{ position: 'absolute', bottom: 32, left: 64, right: 64, flexDirection: 'row', justifyContent: 'space-between' }}>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>MSEB 攻略</Text>
+    <Text style={{ fontSize: 14, color: '#5C6B82' }}>07 / 10</Text>
+  </Box>
+</Slide>

@@ -1,9 +1,17 @@
 $ErrorActionPreference = "Stop"
-# [V8.118] Match the shipped .so build profile exactly:
-#   -O2 -DNDEBUG -fno-exceptions + hidden visibility + section GC
-# Shipped liboboe_bridge.so = 479,864 B / 396 dyn symbols / 159 JNI exports.
-# Without hidden visibility the linker exports ~700 libc++ template symbols
-# (1100 dyn syms) and the file balloons to ~770 KB.
+# [V8.118] Build profile: -O2 -DNDEBUG + hidden visibility + section GC
+# Hidden visibility matters: without it the linker exports ~700 libc++ template
+# symbols (1100 dyn syms) and the file balloons from ~480 KB to ~770 KB.
+#
+# NOTE (-fno-exceptions / -fno-rtti REMOVED):
+# These were correct back in V8.118, but the code base has since grown
+# exception-based paths:
+#   * oboe_bridge.cpp  - codecCallTimed/codecCallVoid wrap AMediaCodec calls in
+#                        try/catch(...) for timeout safety (V8.392 area)
+#   * rubberband       - Allocators.h uses throw / std::bad_alloc
+# Keeping -fno-exceptions made the build fail outright
+# ("cannot use 'try'/'throw' with exceptions disabled"). Exceptions are off the
+# hot path (decoder open/stop), so the size cost is negligible.
 $ndk = "E:\Android\Sdk\ndk\25.1.8937393"
 $cmake = "E:\Android\Sdk\cmake\3.22.1\bin\cmake.exe"
 $ninja = "E:\Android\Sdk\cmake\3.22.1\bin\ninja.exe"
@@ -14,7 +22,7 @@ $out = "E:\SDWMP3_CN\app\src\main\jniLibs\arm64-v8a\liboboe_bridge.so"
 if (Test-Path $build) { Remove-Item $build -Recurse -Force }
 New-Item -ItemType Directory -Path $build -Force | Out-Null
 
-$cxxFlags = "-O2 -DNDEBUG -fno-exceptions -fno-rtti -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections"
+$cxxFlags = "-O2 -DNDEBUG -fvisibility=hidden -fvisibility-inlines-hidden -ffunction-sections -fdata-sections"
 $cFlags   = "-O2 -DNDEBUG -fvisibility=hidden -ffunction-sections -fdata-sections"
 
 & $cmake -S $src -B $build -G Ninja `

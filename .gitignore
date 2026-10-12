@@ -34,12 +34,17 @@ Thumbs.db
 gradle/wrapper/gradle.zip
 
 # --- Local native build & backup scratch (never commit) ---
-cpp_build_v83/
+cpp_build*/
 backup_*/
 
 # --- Root-level scratch/debug files (added for clean git backup) ---
 *.txt
 *.log
+# ...but CMakeLists.txt is a build script, not scratch. The *.txt rule above
+# silently excluded app/src/main/cpp/CMakeLists.txt and
+# analyzer/src/main/cpp/CMakeLists.txt from version control, which means the
+# native build could not be reproduced from a fresh clone. Keep them tracked.
+!**/CMakeLists.txt
 adb_*.py
 check_*.py
 dump*.py

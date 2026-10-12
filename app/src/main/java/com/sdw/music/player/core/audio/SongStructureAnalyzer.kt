@@ -617,15 +617,22 @@ object SongStructureAnalyzer {
         idealStartMs: Long,
         firstBeatMs: Long,
         bpmF: Float,
-        maxSnapMs: Long = 2_000L
+        maxSnapMs: Long = 2_000L,
+        /** 【P2】拍号（一小节几拍）。默认 4 → 旧调用行为完全不变；3/4 拍传 3。 */
+        beatsPerBar: Int = 4,
+        /** 【P2】小节第一拍相对 firstBeatMs 的偏移(ms)。默认 0 → 首拍即重拍，与旧行为一致。 */
+        downbeatOffsetMs: Int = 0
     ): Long {
         if (idealStartMs <= 0) return idealStartMs
         if (firstBeatMs < 0 || bpmF < 40f || bpmF > 220f) return idealStartMs
-        val barMs = 4.0 * 60_000.0 / bpmF
+        val bpb = if (beatsPerBar in 1..16) beatsPerBar else 4
+        val barMs = bpb.toDouble() * 60_000.0 / bpmF
         if (barMs <= 1.0) return idealStartMs
+        // 【P2】锚点改为「小节第一拍」= 首拍 + 重拍偏移
+        val anchor = firstBeatMs + downbeatOffsetMs
         // floor：只往「更早」的格子取，绝不取比 idealStart 更晚的（那会把过渡推出歌尾）
-        val k = Math.floor((idealStartMs - firstBeatMs) / barMs)
-        val snapped = firstBeatMs + (k * barMs).toLong()
+        val k = Math.floor((idealStartMs - anchor) / barMs)
+        val snapped = anchor + (k * barMs).toLong()
         if (snapped > idealStartMs) return idealStartMs       // 防御：绝不允许更晚
         if (idealStartMs - snapped > maxSnapMs) return idealStartMs   // 挪太远，放弃量化
         if (snapped < 0L) return idealStartMs

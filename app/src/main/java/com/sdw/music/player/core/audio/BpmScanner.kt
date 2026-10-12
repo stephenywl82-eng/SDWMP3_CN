@@ -156,16 +156,26 @@ object BpmScanner {
                                 detected++
                                 val firstBeat = full?.getOrNull(1) ?: -1
                                 val conf = (full?.getOrNull(2) ?: 0) / 1000f
-                                // 【P2-2】解析动态 beatgrid：段数 N，后接 N 组 {bpm, firstBeatMs, startMs}
+                                // 【P2-2】解析动态 beatgrid：段数 N，后接 N 组
+                                //   {bpm, firstBeatMs, startMs}                        (旧 .so, 每段 3 int)
+                                //   {bpm, firstBeatMs, startMs, beatsPerBar, downbeatOffsetMs}  (P2 起, 每段 5 int)
+                                // 尾部固定 5 个 int（chorusMs/keyCode/lufs/peak/bpmMilli），
+                                // 于是「每段宽度 = (总长 - 4 - 5) / N」可自动识别，
+                                // **未重新编译 .so 时（仍发 3 int）也照样解析正确**。
                                 val nseg = full?.getOrNull(3) ?: 0
                                 val grid = ArrayList<IntArray>()
                                 if (nseg > 0) {
+                                    val total = full?.size ?: 0
+                                    val body = total - 4 - 5          // 段数据区长度
+                                    val stride = if (nseg > 0 && body >= nseg * 5 && body % nseg == 0 && body / nseg >= 5) 5 else 3
                                     var w = 4
                                     for (s in 0 until nseg) {
                                         val gb = full?.getOrNull(w) ?: break
                                         val gf = full?.getOrNull(w + 1) ?: break
                                         val gs = full?.getOrNull(w + 2) ?: break
-                                        grid.add(intArrayOf(gb, gf, gs)); w += 3
+                                        val bpb = if (stride >= 5) (full?.getOrNull(w + 3) ?: 4) else 4
+                                        val dbo = if (stride >= 5) (full?.getOrNull(w + 4) ?: 0) else 0
+                                        grid.add(intArrayOf(gb, gf, gs, bpb, dbo)); w += stride
                                     }
                                 }
                                 // 【v8.166】网格之后追加：副歌起点 + 调性（Camelot 编码）

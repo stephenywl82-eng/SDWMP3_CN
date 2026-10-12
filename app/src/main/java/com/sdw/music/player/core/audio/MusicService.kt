@@ -784,8 +784,9 @@ private var xfadeBChorusMs = -1L
                                 com.sdw.music.player.BpmKeyCache.getEntry(ap0)?.bpmFloat ?: 0f
                             } else 0f
                             val idealStart = pos + remain - dur      // 「如果按 dur 走，该在哪一刻起切」
-                            val qStart = com.sdw.music.player.core.audio.SongStructureAnalyzer
-                                .quantizeTriggerUpToBar(idealStart, xfadeABeatPhaseMs, aBpmF0)
+                            // 【P1】改走动态 beatgrid：用 idealStart 所在段的 BPM/首拍做量化；
+                            // 无 grid 或置信度不足时内部自动回退到原恒定 BPM 路径。
+                            val qStart = quantizeTriggerWithGrid(ap0, idealStart, xfadeABeatPhaseMs, aBpmF0)
                             // 量化只会把起切点提前 snapLead 毫秒（绝不推迟，否则过渡会超出歌尾）。
                             // 于是闸门要相应放宽：允许在 remain 尚大于 dur 时就起切，
                             // 否则「remain <= dur」会把提前量吃掉，量化等于没生效。
@@ -5914,6 +5915,54 @@ private var xfadeBChorusMs = -1L
         val thr = minConf / 10f
         val c = com.sdw.music.player.BpmKeyCache.confOf(path)
         return c >= thr
+    }
+
+    /**
+     * 【P1 · 动态 beatgrid 量化】把「A 轨触发时刻」向上量化到最近的小节线，
+     * 但**用触发点所在段的 BPM/首拍**，而不是整轨的恒定 BPM。
+     *
+     * 背景：原先直接调 [SongStructureAnalyzer.quantizeTriggerUpToBar]，形参是
+     * 单一的 firstBeatMs + 单一 bpmF（恒定速度模型）。变速曲、或整轨 BPM 有
+     * 亚 BPM 误差时，过渡越长累积漂移越大（0.5% × 30s ≈ 150ms）。
+     * B 轨入场点早已走 grid（见 [snapBToBarGrid]），这里把 A 侧补齐。
+     *
+     * 兼容性（重要）：
+     * - grid 为空 / 段数 < 2 → 走原函数，行为与改造前**完全一致**；
+     * - 置信度不足（[gridTrusted] 为 false）→ 同样走原函数；
+     * - 恒定速度曲即便有 2 段以上，各段 bpm/首拍相同 → 结果与原来一致。
+     * 也就是说：**只有真正变速的曲子才会走到新分支**，绝大多数曲子零回归。
+     */
+    private fun quantizeTriggerWithGrid(
+        path: String,
+        idealStartMs: Long,
+        fallbackBeatMs: Long,
+        fallbackBpmF: Float,
+        maxSnapMs: Long = 2_000L
+    ): Long {
+        if (idealStartMs <= 0) return idealStartMs
+        if (path.isNotBlank()) {
+            com.sdw.music.player.BpmKeyCache.init(this)
+            if (gridTrusted(path)) {
+                val (gBeat, gBpm) = gridBeatAt(path, idealStartMs)
+                if (gBeat > 0 && gBpm in 40..220) {
+                    // 段内 BPM 是整数精度；只有当该段 BPM 与整轨 bpmF 基本吻合时，
+                    // 才换用浮点 bpmF 保留亚 BPM 精度；段速确实不同时必须用段自己的 BPM。
+                    val segBpmF = if (fallbackBpmF >= 40f && Math.abs(gBpm - Math.round(fallbackBpmF)) <= 1) {
+                        fallbackBpmF
+                    } else {
+                        gBpm.toFloat()
+                    }
+                    val snapped = com.sdw.music.player.core.audio.SongStructureAnalyzer
+                        .quantizeTriggerUpToBar(idealStartMs, gBeat, segBpmF, maxSnapMs)
+                    Log.i(TAG, "Crossfade: grid-quantize seg(bpm=$gBpm beat=$gBeat useBpmF=%.2f) " +
+                        "ideal=$idealStartMs -> bar=$snapped".format(segBpmF))
+                    return snapped
+                }
+                Log.i(TAG, "Crossfade: grid-quantize skipped (no segment at ideal=$idealStartMs)")
+            }
+        }
+        return com.sdw.music.player.core.audio.SongStructureAnalyzer
+            .quantizeTriggerUpToBar(idealStartMs, fallbackBeatMs, fallbackBpmF, maxSnapMs)
     }
 
     private fun snapBToBeatGrid(preSong: Song?, msLong: Long): Long {

@@ -65,6 +65,9 @@ internal object MasterSyncShadow {
     val ready: Boolean get() = masterBpmF > 0f
 
     val masterBpm: Float get() = masterBpmF
+
+    /** 当前曲目的 BPM（MASTER SKIP 时也会更新，只是没并入 master 时间线）。 */
+    val currentBpmF: Float get() = curBpmF
     val stats: String
         get() = "transitions=$transitionCount avgErrMs=%.1f maxErrMs=%.1f outOfRange=$adjustOutOfRange"
             .format(if (transitionCount > 0) phaseErrSumMs / transitionCount else 0.0, phaseErrMaxMs)

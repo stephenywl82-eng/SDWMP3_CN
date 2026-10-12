@@ -5988,8 +5988,13 @@ private var xfadeBChorusMs = -1L
                     val dbo = if (seg != null && seg.size >= 5) seg[4] else 0
                     val snapped = com.sdw.music.player.core.audio.SongStructureAnalyzer
                         .quantizeTriggerUpToBar(idealStartMs, gBeat, segBpmF, maxSnapMs, bpb, dbo)
-                    Log.i(TAG, "Crossfade: grid-quantize seg(bpm=$gBpm beat=$gBeat useBpmF=%.2f " +
-                        "bpb=$bpb dbo=$dbo) ideal=$idealStartMs -> bar=$snapped".format(segBpmF))
+                    // 注意：必须用 String.format 包住整条消息。写成
+                    // "a" + "b".format(x) 时，方法调用优先级高于 +，format 只会作用在后半段，
+                    // 前半段的 %.2f 会原样输出。
+                    Log.i(TAG, String.format(
+                        "Crossfade: grid-quantize seg(bpm=$gBpm beat=$gBeat useBpmF=%.2f bpb=$bpb dbo=$dbo) ideal=$idealStartMs -> bar=$snapped",
+                        segBpmF
+                    ))
                     return snapped
                 }
                 Log.i(TAG, "Crossfade: grid-quantize skipped (no segment at ideal=$idealStartMs)")

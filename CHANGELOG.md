@@ -28,6 +28,61 @@
 
 ---
 
+## 9.1 (2026-10-12，开发中 / 未发版)
+
+> 这一版全部是**交叉淡化对拍精度**与**构建可复现性**的工程工作，`versionName` 仍为 9.0。
+> 方案与真机数据见 `docs/DJ-BeatGrid.md`。
+
+### 新增
+- **P1 · A 轨触发点改用动态节拍网格量化**：原先触发点用「单一 BPM + 单一首拍」量化
+  （`quantizeTriggerUpToBar`），变速曲或 BPM 有微小误差时会随过渡时长累积漂移
+  （0.5% 误差 × 30 秒过渡 ≈ 150ms，听感就是「没对上」）。新增 `quantizeTriggerWithGrid()`，
+  按触发点所在的**速度段**用量。带三道回退闸：grid 段数不足 / 置信度不足 / 该点找不到段 →
+  一律退回原算法，**恒定速度曲行为与改造前完全一致**（占绝大多数，不回归）。
+- **P2 · 每段拍号与重拍偏移**：native `BeatSegment` 增加 `beatsPerBar` / `downbeatOffsetMs`，
+  每段发射从 3 个 int 扩为 5 个；Kotlin 侧按数组长度自动识别 3/5 两种布局，**旧 `.so` 与旧缓存
+  都能正常工作**（旧缓存自动按 4/4、偏移 0 补齐）。A 轨触发延迟、A 轨量化、B 轨吸附三处
+  统一改用段自己的拍号，为 3/4 拍曲子与「吸附到小节第一拍」铺好结构。
+  ⚠️ native 检测本身仍输出 4/4、偏移 0，要产出真实拍号还需改检测算法。
+- **P3 第一步 · Master Sync 真实同步**（默认关，`crossfade_master_sync`）：
+  原先 `MasterSyncShadow` 只观测不解算（影子模式）。现在打开开关后，会算出「让落点踩在
+  master 小节线上，过渡时长该平移多少毫秒」，并施加到三条触发路径（自动 / FLOOR / 手动）。
+  刻意做得**很窄**：只改过渡时长、不动入场点与 native 参数，且量化到整拍后夹在 ±1 拍内
+  —— 最坏情况只是过渡长短差不到一拍（8 小节约 19 秒里的 2.5%），不会破坏对拍本身。
+
+### 修复
+- **native 构建本来就是坏的**：`build_so_v8118.ps1` 传全局 `-fno-exceptions -fno-rtti`，
+  但 Rubber Band（`Allocators.h` 用 throw）**和 oboe_bridge 自身**（`codecCallTimed` 等用
+  try/catch 包 AMediaCodec 超时保护）都需要异常 → 根本编不出 `.so`。已从脚本去掉该开关，
+  并在 CMakeLists 给 rubberband target 单独开 `-fexceptions -frtti`。
+- **`liboboe_bridge.so` 重新生成**：1,889,352 → **893,440** 字节（hidden visibility 与
+  `--gc-sections` 这次才真正生效，即 V8.118 脚本原本想要的配置）。P2 的 native 字段由此接通。
+- **P3 修正静默失效**：`Song.filePath` 并非总是真实路径（`SongRepository` 有
+  `fileUri.toString()` 的来源），而 `BpmKeyCache` 以真实文件路径为 key，导致查不到 BPM、
+  整个调整静默返回 0。改为回退 `MasterSyncShadow.currentBpmF`，并在每个提前返回点补 warning 日志。
+- **P3 折算基准错误**：原先用固定的 `masterBpmF` 把过渡时长换算成拍数，但过渡期间音频按
+  **A 轨速度**走；A 轨偏离 master 时（MASTER SKIP 的曲子实测偏 10~21%）误差单向累积
+  （真机首轮 7 个样本 err 几乎全为正、均值 1.24 拍）。改为用 A 轨真实拍长折算。
+
+### 工程
+- **`CMakeLists.txt` 从未进过版本库**：`.gitignore` 的 `*.txt` 规则把 app 与 analyzer 两个
+  `CMakeLists.txt` 一起忽略了，导致新克隆无法重建 native。已加 `!**/CMakeLists.txt` 例外
+  并把两个文件纳入跟踪；`cpp_build_v83/` 放宽为 `cpp_build*/`。
+- `Crossfade: grid-quantize` 日志的 `useBpmF=%.2f` 因 `"a" + "b".format(x)` 的运算符优先级
+  问题原样输出，已改为整体 `String.format`。
+
+### 真机验证（Master Sync，两轮共 16 个样本）
+- 第一轮（master=81.6，7 样本）：暴露上述「折算基准」与「静默失效」两个问题。
+- 第二轮（master=72.1，9 样本，同一会话）：`err` 方向 3 正 / 6 负（首轮 5 正 2 负且都 >1.3 拍），
+  **单向累积消失**；`|err|` avg 1.127 → 修正后 `|残留|` avg **0.362** 拍（改善 68%），
+  残留 7/9 在半拍以内、无一超过 1 拍。
+- 限幅维持 ±1 拍：放宽到 ±2 拍只能把最大残留从 0.74 压到约 0.15 拍，代价是过渡时长波动
+  ±0.75s→±1.5s（8 小节过渡的 6.7%），不划算。
+- 结论：P3 第一步达标。剩余误差主要来自 `MASTER SKIP`（BPM 偏离超 ±8% 的曲子锁不住），
+  要进一步压低需做 P3 第二步（native 落点交棒，PLL 跨曲目持续锁相）。
+
+---
+
 ## 8.36 (2026-09-09)
 
 ### 新增

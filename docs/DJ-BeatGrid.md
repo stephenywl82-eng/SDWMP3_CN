@@ -104,9 +104,15 @@ Mixxx `src/track/beats.h` 的模型：
 **做了什么**
 
 - `MasterSyncShadow.suggestDurationAdjustMs(xfadeMs, aBeatMs)`：算出"要让落点落在 master
-  小节线上，过渡时长该平移多少毫秒"。推导与 `solvePhase` 同口径（速度 1.0 近似）：
-  落点拍数 `L = masterBeatsNow() + xfadeMs / masterBeatMs`，希望 `L ≡ 0 (mod 4)`；
-  误差归一到 `(-2, 2]`，理想修正 `-e × masterBeatMs`，再量化到 A 轨整拍并夹在 **±1 拍**内。
+  小节线上，过渡时长该平移多少毫秒"。推导（速度 1.0 近似）：
+  落点拍数 `L = masterBeatsNow() + xfadeMs / aBeatMs`，希望 `L ≡ 0 (mod 4)`；
+  误差归一到 `(-2, 2]`，理想修正 `-e × aBeatMs`，再量化到 A 轨整拍并夹在 **±1 拍**内。
+
+  ⚠️ **基准必须用 A 轨拍长，不能用固定的 `masterBpmF`**：过渡期间音频按 A 轨速度播放，
+  一旦 A 轨偏离 master（MASTER SKIP 的曲子实测偏离 10~21%），用 masterBpmF 折算会让
+  误差单向累积。真机第一轮 7 个样本 `err` 几乎全为正、均值 1.24 拍即此原因；修正后
+  均值 1.24 → 0.51 拍（改善 59%）。注意 `solvePhase`（纯观测）仍用 masterBpmF 口径，
+  两者刻意不同：观测看"master 理论相位"，修正看"A 轨实际能挪多少"。
 - `MusicService.masterSyncDurAdjustMs()`：三条触发路径（auto / FLOOR / manual）统一接入，
   在 `adaptiveXfadeDur()` 之后、安全 clamp 之前施加，所以仍受"A 轨剩余时长"上限约束。
   任何异常或数据缺失一律返回 0（等价于影子模式）。

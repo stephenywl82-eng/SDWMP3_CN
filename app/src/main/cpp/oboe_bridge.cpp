@@ -12543,7 +12543,11 @@ public:
                 }
             }
             if (_nowUs < _winEnd) {
-                if ((s_skip++ & 3) == 0) {   // every 4 callbacks (~21/s) over ~6s
+                // 【降频】原先是每 4 个回调采一次（约 21 次/秒），而这个 block 在**音频回调
+                // 线程**里做 getTimestamp() + LOGI，6 秒窗口内持续占用音频线程 —— 它本身
+                // 就是 stall/xrun 的来源之一，与它要测的问题同源。降到每 32 个回调一次
+                // （约 0.2 次/秒）：6 秒窗口仍有 5~6 个采样点，足够看趋势，开销降到 1/8。
+                if ((s_skip++ & 31) == 0) {
                     const auto _xrR = stream->getXRunCount();
                     const int32_t _xr = _xrR ? (int32_t)_xrR.value() : 0;
                     const int32_t _dxr = (s_lastXrun >= 0) ? (_xr - (int32_t)s_lastXrun) : 0;
@@ -29366,6 +29370,22 @@ static void stopInternal(bool keepStream) {
 
 
     LOGI("OboeDirectPlayer: stopping (keepStream=%d)", (int)keepStream);
+
+
+
+    // 【硬切 de-click】keepStream=true 正是切歌的软停止路径（stop → open 下一首），
+    // 而它原先**没有任何 click 防护**：A 轨被 requestStop 直接断、B 轨从 seek 点硬起
+    // （seek 点常为首拍，能量最大），用户听感就是「切换前后两声哒」。
+    // 交叉淡化完成时早已上膛同一套机制（见翻转处的 g_declickArmPending），这里补上：
+    // 末样本与 B 轨首样本的阶跃会被摊到后续约 43ms（g_declickRemain=2048）。
+    // 安全性：delta = 末样本 − 新首样本，阶跃为 0 时修正量也趋 0，正常音乐无副作用；
+    // 且上膛只在音频回调里消费，stop 后若不再有回调，残留标志在下次 open 的首次回调
+    // 触发时 delta≈0，同样无害。
+    if (keepStream) {
+        g_declickArmPending = true;
+        // 便于真机确认这条路径真的上膛了（历史上硬切 click 修过一次没生效，查不出原因）
+        LOGI("de-click armed (hard-cut path, remain=%d frames)", g_declickRemain);
+    }
 
 
 

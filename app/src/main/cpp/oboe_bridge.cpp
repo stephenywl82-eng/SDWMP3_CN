@@ -15579,16 +15579,35 @@ public:
                     const float blendPos = g_crossfadePos.load(std::memory_order_relaxed);
                     const float HALF_PI = 1.5707963f;
                     const float TWO_OVER_PI = 0.6366198f;   // 2/PI
-                    float tb = (blendPos - TWO_OVER_PI * sinf(blendPos * HALF_PI)) / (1.0f - TWO_OVER_PI);
+                    // 【修复落点"哒"】原实现把 ramp 铺满整段过渡（tb 要到 blendPos=1.0 才到 1），
+                    // 且 blend 的收尾目标就是 `to`（=1/rt，把 B 拉来对 A 的拍）而不是 1.0。
+                    // 落点后新轨改 1:1 原速直读 → 硬弹回 |1-to| 的速度阶跃。
+                    // 真机取证：XFADE-SPEED landing residual=0.93040 (tempo -6.960%)
+                    //            guard{live=1 blend=1 pitch=0 conv=0}
+                    // 收敛块明确排除 blend 模式（注释"blend/pitch 各自有收尾逻辑，别抢"），
+                    // 而 blend 自己的收尾并没把比率送回 1.0 —— 这 7% 阶跃一直存在。
+                    // 另外 `blendPos >= 0.999f` 这个完成条件实际不可达：位置只在 pos<1.0
+                    // 时存储（混音末尾的 if/else），回调粒度又会从 0.998 直接跳到 1.001。
+                    // 改法：ramp 压缩到前 55% 完成（B 尽早对上拍、中段稳定持有 to），
+                    // 之后用同一套 smootherstep 把比率平滑送回 1.0，0.92 前收敛完，
+                    // 落点即无缝，也不再依赖那个不可达的阈值。
+                    float bp = blendPos / 0.55f;
+                    if (bp > 1.0f) bp = 1.0f;
+                    float tb = (bp - TWO_OVER_PI * sinf(bp * HALF_PI)) / (1.0f - TWO_OVER_PI);
                     if (tb < 0.0f) tb = 0.0f;
-                    if (blendPos >= 0.999f || tb >= 1.0f) {
-                        tb = 1.0f;
-                        g_bmBlendActive.store(false, std::memory_order_relaxed);
-                        LOGI("TempoBlend done (ratio -> %.4f)", (double)g_bmBlendTo.load(std::memory_order_relaxed));
-                    }
                     // tb 已是 0->1 凸曲线（起点缓、尾段陡），直接作 ramp 进度，不再套 smoothstep
                     const float to = g_bmBlendTo.load(std::memory_order_relaxed);
-                    const float r = 1.0f + (to - 1.0f) * tb;
+                    float r = 1.0f + (to - 1.0f) * tb;
+                    if (blendPos > 0.55f) {
+                        float t2 = (blendPos - 0.55f) / 0.37f;   // 0.55 -> 0.92 收敛完
+                        if (t2 > 1.0f) t2 = 1.0f;
+                        const float ce2 = t2 * t2 * t2 * (t2 * (t2 * 6.0f - 15.0f) + 10.0f);
+                        r = r + (1.0f - r) * ce2;
+                    }
+                    if (blendPos >= 0.999f) {
+                        g_bmBlendActive.store(false, std::memory_order_relaxed);
+                        LOGI("TempoBlend done (ratio -> %.4f)", (double)r);
+                    }
 
 
 
@@ -16130,10 +16149,15 @@ public:
                 // 的「退役引擎 + 改 1:1 直读」造成速率映射突然换轨。
                 {
                     const float plEnd = g_bmPlRcur;
-                    if (fabsf(plEnd - 1.0f) > 0.0005f) {
-                        LOGI("XFADE-SPEED landing residual=%.5f (tempo %.3f%%)",
-                             (double)plEnd, (double)((plEnd - 1.0f) * 100.0));
-                    }
+                    // 【诊断】把收敛块的守卫状态一起打出：残差非 0 时，一眼看出是哪个条件
+                    // 把收敛挡掉了（live/blend/pitch/pos），而不是继续猜。
+                    LOGI("XFADE-SPEED landing residual=%.5f (tempo %.3f%%) guard{live=%d blend=%d pitch=%d conv=%d pos=%.4f}",
+                         (double)plEnd, (double)((plEnd - 1.0f) * 100.0),
+                         (int)g_beatmatchLive.load(std::memory_order_relaxed),
+                         (int)g_bmBlendActive.load(std::memory_order_relaxed),
+                         (int)g_bmPitchActive.load(std::memory_order_relaxed),
+                         (int)g_bmConvergeActive.load(std::memory_order_relaxed),
+                         (double)pos);
                 }
                 // crossfade 完成：翻转 active 槽，停旧 active（无阻塞，join 延后到下次 open/stop）
 

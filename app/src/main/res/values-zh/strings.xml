@@ -100,6 +100,8 @@
 <string name="settings_crossfade_smart_align">智能对齐</string>
 <string name="settings_crossfade_smart_align_sub">检测静音段，交叉过渡更自然</string>
 <string name="settings_crossfade_hint">自动切歌与手动 DJ 键都生效</string>
+<string name="settings_master_sync">主同步（Master Sync）</string>
+<string name="settings_master_sync_sub">微调每次过渡，让落点都对齐同一条时间线。实验功能：过渡长度可能变动最多一拍。</string>
 <string name="settings_vu_on">开 · 播放器实时VU表</string>
 <string name="settings_debug_log">调试日志面板</string>
 <string name="settings_debug_on">开 · 可能造成卡顿</string>

@@ -4,8 +4,17 @@
 > 方法：逐条核对本项目代码，并与 Mixxx（开源 DJ 标杆）的 Beats 数据模型做对照。
 > 结论先行：**本项目并不缺「节拍网格」，缺的是「小节内位置（downbeat）」和「量化时是否走动态 grid」这两处精度问题。**
 
-**进度**：P1、P2 已实现（`BUILD SUCCESSFUL`，Kotlin 侧）。P3（Master Sync）待影子数据达标后再做。
-⚠️ **P2 的 native 部分（`bpm_detector.h/.cpp`）需要重新生成 `liboboe_bridge.so` 才会真正产出拍号/重拍偏移**；在此之前 native 仍按 4/4、偏移 0 输出，Kotlin 侧已兼容，行为与改造前一致（详见 §4 兼容性说明）。
+**进度**：P1、P2 已实现；**P3 第一步已实现，默认关闭**（`crossfade_master_sync`，见 §4）。
+原生 `.so` 已于 2026-10-12 重新生成（构建此前是坏的，详见 §4 附注），P2 的拍号/重拍偏移字段已接通，
+但 native 检测本身仍输出 4/4、偏移 0，要产出真实拍号还需改检测算法。
+
+> **P3 的实现方式与当初方案的偏差（如实记录）**
+> 原方案写的是"先用 `MasterSyncShadow` 的影子数据判断可行性、达标后再设计 native 落点交棒，
+> 在此之前不改播放行为"。实际落地时改为：**先做出能力，但用开关关着**（默认 `false`）。
+> 这样既不阻塞（不必先攒够真机数据才能写代码），也不会在用户没听过的情况下擅自改变听感。
+> 开关打开后仅微调**过渡时长**（±1 拍以内），不动入场点、不动 native 参数。
+> 影子数据（`MasterSync` 的 `STATS` / `solve`）仍然照常输出，用于判断是否该默认开启、
+> 以及是否值得做第二步（native 落点交棒，即让 PLL 跨曲目持续锁相而非落点即退役）。
 
 ---
 
@@ -90,9 +99,38 @@ Mixxx `src/track/beats.h` 的模型：
 2. `BpmKeyCache` 的 grid 序列化（现在是 `JSONArray` 每行 3 个 int）扩到 5 个，**并做版本兼容**：读到 3 个字段的旧数据时 `beatsPerBar` 默认 4。
 3. `quantizeTriggerUpToBar` 增加"吸附到小节第一拍"模式（原来只能吸附到拍），配合 `crossfade_align_prefer=beat` 使用。
 
-### P3：Master Sync 从影子转真实
+### P3：Master Sync 从影子转真实 —— 已实现第一步（默认关）
 
-- 先用 `MasterSyncShadow` 积累的数据判断可行性（相位误差是否落在可用范围），达标后再设计 native 落点交棒；在此之前**不改播放行为**。
+**做了什么**
+
+- `MasterSyncShadow.suggestDurationAdjustMs(xfadeMs, aBeatMs)`：算出"要让落点落在 master
+  小节线上，过渡时长该平移多少毫秒"。推导与 `solvePhase` 同口径（速度 1.0 近似）：
+  落点拍数 `L = masterBeatsNow() + xfadeMs / masterBeatMs`，希望 `L ≡ 0 (mod 4)`；
+  误差归一到 `(-2, 2]`，理想修正 `-e × masterBeatMs`，再量化到 A 轨整拍并夹在 **±1 拍**内。
+- `MusicService.masterSyncDurAdjustMs()`：三条触发路径（auto / FLOOR / manual）统一接入，
+  在 `adaptiveXfadeDur()` 之后、安全 clamp 之前施加，所以仍受"A 轨剩余时长"上限约束。
+  任何异常或数据缺失一律返回 0（等价于影子模式）。
+- 开关 `crossfade_master_sync`（默认 `false`），设置页 DJ 折叠内有开关项，改完立即生效。
+
+**为什么只改过渡时长**
+
+改入场点或 native 参数的风险更高（会破坏已有的 grid 吸附与 BPM 锁相）。只改时长时，
+最坏情况只是过渡长了/短了不到一拍 —— 在 8 小节（约 19 秒）过渡里约 2.5%，听感上察觉不到，
+且不会破坏对拍本身。
+
+**还没做的（第二步）**
+
+native 落点交棒：现在 PLL 在落点时随引擎退役（`oboe_bridge.cpp retireTimeEngineAtLanding`），
+之后 B 轨按自己的速度走，相位仍会漂移。真正的"整晚一条时间线"需要 PLL 跨曲目持续锁相。
+这一步要等影子数据（见下）验证值得做再动。
+
+**判定是否该默认开启 / 是否做第二步的依据**
+
+`MasterSyncShadow` 照常输出观测日志（TAG=`MasterSync`）：
+- 每次解算：`solve ... err=X ms suggestDelay=Y ms feasible=true/false`
+- 每 5 次过渡：`STATS transitions=N avgErrMs=.. maxErrMs=.. outOfRange=..`
+看 `avgErrMs` 是否明显小于半拍、`outOfRange` 占比是否够低。达标 → 可考虑默认开启并做第二步。
+⚠️ `dump()` 已实现但当前没有任何调用点，只能靠自动 `STATS`（接个 adb/设置页入口会更方便）。
 
 ---
 

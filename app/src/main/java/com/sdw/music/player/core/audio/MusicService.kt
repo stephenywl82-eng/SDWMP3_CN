@@ -1236,7 +1236,9 @@ private var xfadeBChorusMs = -1L
                                         } else {
                                             xfadeLastBStartMs = -1L
                                         }
-                                        val cfDur0 = adaptiveXfadeDur(preSong)
+                                        val cfDurBase0 = adaptiveXfadeDur(preSong)
+                                        // 【P3】真实 Master Sync：微调过渡时长使落点落在 master 小节线（未开启时返回 0）
+                                        val cfDur0 = cfDurBase0 + masterSyncDurAdjustMs(preSong, cfDurBase0)
                                         // [V8.343] shadow: master phase solve (observation only)
                                         if (bpmChorusMode) shadowSolvePhase(preSong, chorusMs, cfDur0)
                                         // 【V8.231→V8.498】同 doCrossfadeTriggerBg：FLOOR 触发时 remain 更小，
@@ -1605,6 +1607,8 @@ private var xfadeBChorusMs = -1L
         }
         // 【V8.23 BPM 自适应时长】A/B 两轨 BPM 差 ≤2 → 短混音（2s，DJ 式拍上交接）；差 >2 → 用户设定时长
         var cfDur = adaptiveXfadeDur(preSong)
+        // 【P3】真实 Master Sync：微调过渡时长使落点落在 master 小节线（未开启时返回 0）
+        cfDur += masterSyncDurAdjustMs(preSong, cfDur)
         // [V8.343] shadow: master phase solve (observation only)
         if (bpmChorusMode) shadowSolvePhase(preSong, chorusMs, cfDur)
         // 【V8.231→V8.498】过渡时长不得大于 A 的剩余可播时长：拍点对齐/窗口触发都可能比
@@ -1863,7 +1867,9 @@ private var xfadeBChorusMs = -1L
                     // 时长走（crossfade_bars → adaptiveXfadeDur），与自动过渡同一口径。
                     // 用户反馈 3.5s「太快了」——封顶是我加的，越过了用户的时长设置意图。
                     // 连点被挡的问题改由「已排队」提示（8.305）解释，不再靠偷偷缩短时长。
-                    val cfDur = adaptiveXfadeDur(nextSong)
+                    val cfDurBase = adaptiveXfadeDur(nextSong)
+                    // 【P3】真实 Master Sync：微调过渡时长使落点落在 master 小节线（未开启时返回 0）
+                    val cfDur = cfDurBase + masterSyncDurAdjustMs(nextSong, cfDurBase)
                     // [V8.343] shadow: master phase solve (observation only).
                     // Manual path starts B from 0 (no entry-point seek), so pass 0 and let
                     // the shadow solver skip -- there is no entry offset to align.
@@ -3205,7 +3211,10 @@ private var xfadeBChorusMs = -1L
         crossfadeDurationMs = cfPrefs.getInt("crossfade_duration_ms", 5000)
         crossfadeBars = cfPrefs.getInt("crossfade_bars", 4)
         bEntryMode = cfPrefs.getString("crossfade_b_entry", "auto") ?: "auto"
-        Log.d(TAG, "Restored crossfade: enabled=$crossfadeEnabled, dur=$crossfadeDurationMs")
+        // 【P3】Master Sync 真实同步，默认关闭。打开后过渡时长会被微调（±1 拍以内），
+        // 让落点尽量落在 master 小节线上；关闭时 MasterSyncShadow 仍是纯观测，不改播放行为。
+        MasterSyncShadow.enabled = cfPrefs.getBoolean("crossfade_master_sync", false)
+        Log.d(TAG, "Restored crossfade: enabled=$crossfadeEnabled, dur=$crossfadeDurationMs, masterSync=${MasterSyncShadow.enabled}")
 
         // :,
         // 
@@ -7030,6 +7039,28 @@ private var xfadeBChorusMs = -1L
             MasterSyncShadow.solvePhase(entryMs, beatMs, anchor, xfDurMs)
         } catch (_: Throwable) {
             // shadow mode must never affect the main path
+        }
+    }
+
+    /**
+     * 【P3】Master Sync 真实同步：把过渡时长微调到能让落点落在 master 的小节线上。
+     *
+     * 只改过渡时长、不动入场点和 native 参数 —— 这样即使算错，最坏情况也只是过渡
+     * 长了/短了不到一拍，不会破坏对拍本身。
+     * 开关未开 / master 未就绪 / 取不到 BPM 时一律返回 0（等价于影子模式，行为不变）。
+     */
+    private fun masterSyncDurAdjustMs(preSong: Song?, xfadeMs: Int): Int {
+        if (!MasterSyncShadow.enabled) return 0
+        if (xfadeMs <= 0) return 0
+        return try {
+            val path = preSong?.filePath?.ifEmpty { preSong.path } ?: ""
+            if (path.isBlank()) return 0
+            com.sdw.music.player.BpmKeyCache.init(this)
+            val bpmF = com.sdw.music.player.BpmKeyCache.getBpmFloat(path)
+                .takeIf { it >= 40f && it <= 220f } ?: return 0
+            MasterSyncShadow.suggestDurationAdjustMs(xfadeMs, 60_000.0 / bpmF)
+        } catch (_: Throwable) {
+            0   // 同步计算失败绝不能影响主路径
         }
     }
 

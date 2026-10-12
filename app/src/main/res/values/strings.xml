@@ -100,6 +100,8 @@
     <string name="settings_crossfade_smart_align">Smart align</string>
     <string name="settings_crossfade_smart_align_sub">Detect quiet segments for smoother transitions</string>
 <string name="settings_crossfade_hint">Applies to automatic and manual DJ trigger</string>
+<string name="settings_master_sync">Master Sync</string>
+<string name="settings_master_sync_sub">Nudge each mix so it lands on one continuous timeline. Experimental: mix length may shift by up to one beat.</string>
 <string name="settings_vu_on">On · live VU meter in player</string>
 <string name="settings_debug_log">Debug Log Panel</string>
 <string name="settings_debug_on">On · may cause lag</string>

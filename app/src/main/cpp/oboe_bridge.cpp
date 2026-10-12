@@ -16818,7 +16818,8 @@ public:
                     // 【V8.448诊断】原用 LOGD_GATED —— 编译期裁掉，
                     // 这条"过渡期间逐帧取证"从来没输出过。
                     // 改用 LOGI + 窗口门；400 帧上限保留（过渡约9s ≈ 900帧，取前400帧足够）。
-                    LOGI("XF-DBG i=%d pos=%.4f rms=%.5f aF=%d aT=%d shortA=%d shortB=%d",
+                    LOGI("XF-DBG i=%d pos=%.4f rms=%.5f aF=%d aT=%d shortA=%d shortB=%d "
+                         "fL=%.6f fR=%.6f lL=%.6f lR=%.6f",
 
 
 
@@ -16826,7 +16827,23 @@ public:
 
 
 
-                         availFrom, availTo, totalSamples - toReadFrom, totalSamples - toReadTo);
+                         availFrom, availTo, totalSamples - toReadFrom, totalSamples - toReadTo,
+
+
+
+                         (double)output[0],
+
+
+
+                         (double)(channels > 1 ? output[1] : output[0]),
+
+
+
+                         (double)output[totalSamples - channels],
+
+
+
+                         (double)output[totalSamples - 1]);
 
 
 
@@ -18107,6 +18124,26 @@ public:
 
 
                 }
+
+            // 【修复"B 轨进场哒一下】g_xfadeLast 必须在每个 callback 都更新，不能只在
+            // 点击检测窗口内更新。原来它唯一的赋值点在窗口块内部
+            // (if (_u3 < g_xfadeClickUntilUs))，而正常播放时窗口是关闭的 ——
+            // 于是交叉淡化起点的接缝平滑（V8.473）拿到的是上一个过渡的残留末样本
+            // （首次更是初始值 0），把 A 轨满音量音频插值成"从 0 爬升"的 23ms 斜坡。
+            //
+            // 真机取证（XT2401_2 / 22:52:51，过渡 dur=11034ms）：
+            //   首个回调 fL=0.000000（双声道精确为 0）
+            //   aRms 0.00000 → 0.00171 → 0.02754 → 0.13870 → 0.28279（约 23ms 才恢复）
+            //   B 进场区跨回调阶跃均值 0.1005 = 过渡中段 0.0218 的 4.6 倍
+            //   A 退场区仅 0.0167（落点侧本来就是干净的）
+            // 即：用户听到的两声"哒"里，"A 退场"那声不在落点样本级，
+            // 而"B 进场"这声就是这 23ms 斜坡。
+            if (totalSamples >= channels && channels > 0) {
+                const int _cN = (channels > 2) ? 2 : channels;
+                for (int c = 0; c < _cN; c++) {
+                    g_xfadeLast[c] = output[(size_t)(totalSamples - channels) + (size_t)c];
+                }
+            }
 
 
 

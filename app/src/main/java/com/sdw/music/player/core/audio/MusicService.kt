@@ -7054,12 +7054,25 @@ private var xfadeBChorusMs = -1L
         if (xfadeMs <= 0) return 0
         return try {
             val path = preSong?.filePath?.ifEmpty { preSong.path } ?: ""
-            if (path.isBlank()) return 0
+            if (path.isBlank()) {
+                Log.w(TAG, "P3 skip: blank path")
+                return 0
+            }
             com.sdw.music.player.BpmKeyCache.init(this)
-            val bpmF = com.sdw.music.player.BpmKeyCache.getBpmFloat(path)
-                .takeIf { it >= 40f && it <= 220f } ?: return 0
+            val cachedBpmF = com.sdw.music.player.BpmKeyCache.getBpmFloat(path)
+                .takeIf { it >= 40f && it <= 220f }
+            // 兜底：Song.filePath 有时是 content:// URI（SongRepository 有 fileUri.toString()
+            // 的来源），而 BpmKeyCache 以真实文件路径为 key，直接查会 miss。
+            // 此时退回 MasterSyncShadow 自己维护的当前曲目 BPM —— 它同样来自 BpmKeyCache，
+            // 只是 key 的取法不同，且 MASTER SKIP 时也会更新。
+            val bpmF = cachedBpmF ?: MasterSyncShadow.currentBpmF.takeIf { it >= 40f && it <= 220f }
+            if (bpmF == null) {
+                Log.w(TAG, "P3 skip: no bpm for ...${path.takeLast(40)} (cache=$cachedBpmF cur=${MasterSyncShadow.currentBpmF})")
+                return 0
+            }
             MasterSyncShadow.suggestDurationAdjustMs(xfadeMs, 60_000.0 / bpmF)
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            Log.w(TAG, "P3 skip: exception ${t.javaClass.simpleName}: ${t.message}")
             0   // 同步计算失败绝不能影响主路径
         }
     }

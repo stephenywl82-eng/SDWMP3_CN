@@ -87,16 +87,20 @@ internal object MasterSyncShadow {
      *
      * 与 `solvePhase` 的区别：solvePhase 只观测不干预（影子），这个返回可直接施加的修正量。
      *
-     * 推导（与 solvePhase 同口径，速度 1.0 近似）：
+     * 推导（速度 1.0 近似）：
      *   触发即此刻 → master 拍数 M0 = masterBeatsNow()
-     *   过渡耗时 xfadeMs → master 再前进 xfadeMs / masterBeatMs 拍
-     *   落点拍数 L = M0 + xfadeMs / masterBeatMs，希望 L ≡ 0 (mod 4)
-     * 误差 e 归一到 (-2, 2]，理想修正量 = -e × masterBeatMs 毫秒。
+     *   过渡耗时 xfadeMs，而**这段音频按 A 轨速度走** → 前进 xfadeMs / aBeatMs 拍
+     *   落点拍数 L = M0 + xfadeMs / aBeatMs，希望 L ≡ 0 (mod 4)
+     * 误差 e 归一到 (-2, 2]，理想修正量 = -e × aBeatMs 毫秒。
      * 最后量化到 A 轨整拍并夹在 ±1 拍内 —— 否则过渡长度会有肉眼可闻的变化，
      * 而 ±1 拍落在 8 小节过渡里只有约 2.5%，听感上察觉不到。
      *
+     * ⚠️ 基准必须用 A 轨拍长，不能用固定的 masterBpmF：过渡实际按 A 轨速度播放，
+     * 一旦 A 轨偏离 master（MASTER SKIP 的曲子实测偏离 10~21%），用 masterBpmF
+     * 折算会让误差单向累积（真机 7 个样本 err 几乎全为正、均值 1.24 拍）。
+     *
      * @param xfadeMs 本次过渡时长
-     * @param aBeatMs A 轨拍长（用于量化与限幅）
+     * @param aBeatMs A 轨拍长（折算、量化与限幅都用它）
      * @return 要加到过渡时长上的毫秒数（0 = 未开启 / master 未就绪 / 无需修正）
      */
     @Synchronized
@@ -104,18 +108,23 @@ internal object MasterSyncShadow {
         if (!enabled) return 0
         if (masterBpmF <= 0f || xfadeMs <= 0) return 0
         if (aBeatMs <= 0.0) return 0
-        val masterBeatMs = 60_000.0 / masterBpmF
-        val landingBeat = masterBeatsNow() + xfadeMs / masterBeatMs
+        // 【修正基准】过渡期间音频是按 A 轨的 BPM 在走的，所以"这段时长等于多少拍"
+        // 必须用 A 轨拍长折算，不能用固定的 masterBpmF。
+        // 旧代码用 masterBeatMs = 60000/masterBpmF 折算，一旦 A 轨速度偏离 master
+        // （实测 SKIP 的曲子有 90/93/98 BPM，偏离 10~21%）折算就整体偏掉，
+        // 表现为误差单向累积（实测 err 几乎全为正、平均 1.24 拍）。
+        val landingBeat = masterBeatsNow() + xfadeMs / aBeatMs
         var e = landingBeat % 4.0
         if (e > 2.0) e -= 4.0
         if (e <= -2.0) e += 4.0
-        val idealMs = -e * masterBeatMs
+        val idealMs = -e * aBeatMs
+        // idealMs/aBeatMs 就是 -e，这里保留显式除法只为让"量化到整拍"的意图可读
         val nBeats = Math.round(idealMs / aBeatMs).toInt().coerceIn(-1, 1)
         val adj = (nBeats * aBeatMs).toLong().toInt()
         Log.i(
             TAG,
-            "P3 adjust xf=%dms landingBeat=%.3f err=%+.3f beat ideal=%+.1fms -> %+dms (%+d beat)"
-                .format(xfadeMs, landingBeat, e, idealMs, adj, nBeats)
+            "P3 adjust xf=%dms aBeat=%.1fms landingBeat=%.3f err=%+.3f beat ideal=%+.1fms -> %+dms (%+d beat)"
+                .format(xfadeMs, aBeatMs, landingBeat, e, idealMs, adj, nBeats)
         )
         return adj
     }

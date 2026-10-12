@@ -152,7 +152,13 @@ object BpmKeyCache {
                     obj.optJSONArray("grid")?.let { ga ->
                         for (i in 0 until ga.length()) {
                             val g = ga.optJSONArray(i) ?: continue
-                            if (g.length() >= 3) grid.add(intArrayOf(g.optInt(0), g.optInt(1), g.optInt(2)))
+                            // 【P2】段宽度 5：{bpm, firstBeat, startMs, beatsPerBar, downbeatOffsetMs}
+                            // 旧缓存只有 3 个 → 拍号按 4/4、重拍偏移按 0 补齐（与旧行为一致）。
+                            if (g.length() >= 5) {
+                                grid.add(intArrayOf(g.optInt(0), g.optInt(1), g.optInt(2), g.optInt(3), g.optInt(4)))
+                            } else if (g.length() >= 3) {
+                                grid.add(intArrayOf(g.optInt(0), g.optInt(1), g.optInt(2), 4, 0))
+                            }
                         }
                     }
                     // 【V8.304】浮点 tempo（milli，缺省 0 = 旧条目 → 读时回退整数 bpm）
@@ -288,7 +294,14 @@ object BpmKeyCache {
                 if (e.bpmF >= 40f && e.bpmF <= 220f) obj.put("bpmM", (bf * 1000f).toInt())
                 if (e.grid.isNotEmpty()) {
                     val ga = org.json.JSONArray()
-                    for (g in e.grid) { val t = org.json.JSONArray(); t.put(g[0]); t.put(g[1]); t.put(g[2]); ga.put(t) }
+                    // 【P2】写 5 个字段（不足则按 4/4、偏移 0 补齐）
+                    for (g in e.grid) {
+                        val t = org.json.JSONArray()
+                        t.put(g[0]); t.put(g[1]); t.put(g[2])
+                        t.put(if (g.size >= 4) g[3] else 4)
+                        t.put(if (g.size >= 5) g[4] else 0)
+                        ga.put(t)
+                    }
                     obj.put("grid", ga)
                 }
                 // 【v8.166】段落结构（只写已检出的字段，保持 JSON 紧凑）

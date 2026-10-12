@@ -4,6 +4,9 @@
 > 方法：逐条核对本项目代码，并与 Mixxx（开源 DJ 标杆）的 Beats 数据模型做对照。
 > 结论先行：**本项目并不缺「节拍网格」，缺的是「小节内位置（downbeat）」和「量化时是否走动态 grid」这两处精度问题。**
 
+**进度**：P1、P2 已实现（`BUILD SUCCESSFUL`，Kotlin 侧）。P3（Master Sync）待影子数据达标后再做。
+⚠️ **P2 的 native 部分（`bpm_detector.h/.cpp`）需要重新生成 `liboboe_bridge.so` 才会真正产出拍号/重拍偏移**；在此之前 native 仍按 4/4、偏移 0 输出，Kotlin 侧已兼容，行为与改造前一致（详见 §4 兼容性说明）。
+
 ---
 
 ## 0. 对上一轮判断的更正

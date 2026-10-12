@@ -34,6 +34,12 @@ struct BeatSegment {
     int bpm = 0;
     float bpmF = 0.f;      // 【V8.304】该段浮点 tempo（bpm = lround(bpmF)）
     int firstBeatMs = -1;
+    // 【P2】拍号与小节内偏移。解决"吸附到拍点"吸不到**小节第一拍**的问题：
+    // 没有这两项时所有量化都隐含假设 4/4 且首拍即重拍，3/4 或段内非重拍起点会吸错位置。
+    // downbeatOffsetMs = 该段内第一个小节第一拍相对 firstBeatMs 的偏移(ms)；
+    // 未检出 → 0（= 首拍即重拍，与旧行为一致，不退化）。
+    int beatsPerBar = 4;
+    int downbeatOffsetMs = 0;
 };
 
 // ================================================================

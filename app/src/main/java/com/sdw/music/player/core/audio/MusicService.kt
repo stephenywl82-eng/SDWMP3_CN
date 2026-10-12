@@ -1076,7 +1076,11 @@ private var xfadeBChorusMs = -1L
                                         // 两边差 0~3/4 小节，所谓"拍上交接"实际对不齐。
                                         // 配了小节数（>0）时，A 也吸附到整小节线。
                                         val barAligned = crossfadeBars > 0
-                                        val gridMs = if (barAligned) beatMs * 4 else beatMs
+                                        // 【P2】一小节按该段自己的拍号算（旧数据缺省 4 → 与原来 beatMs*4 一致）
+                                        val bpbA = beatsPerBarOf(
+                                            if (aPathForBeat.isNotBlank()) gridSegmentAt(aPathForBeat, pos) else null
+                                        )
+                                        val gridMs = if (barAligned) beatMs * bpbA else beatMs
                                         // 【V8.142】用 A 轨首拍相位校正（原 pos % beatMs 误把重拍当成落在 t=0）
                                         val anchor = if (gBeat > 0) gBeat else if (xfadeABeatPhaseMs > 0) xfadeABeatPhaseMs else 0L
                                         val phase = anchor % gridMs
@@ -5905,6 +5909,32 @@ private var xfadeBChorusMs = -1L
         return Pair(beat.toLong(), bpm)
     }
 
+    /**
+     * 【P2】取 targetMs 所在的**整段** grid 记录（不再只拿 bpm/首拍）。
+     * 段结构：{bpm, firstBeatMs, startMs, beatsPerBar, downbeatOffsetMs}
+     * 旧缓存只有前 3 个 → [beatsPerBarOf] / [downbeatOffsetOf] 会给出 4 / 0 的默认值，不退化。
+     *
+     * 与 [gridBeatAt] 保持同一套挑选规则（取 startMs <= targetMs 的最后一段，无则首段）。
+     */
+    private fun gridSegmentAt(path: String, targetMs: Long): IntArray? {
+        val g = com.sdw.music.player.BpmKeyCache.getGrid(path)
+        if (g.isEmpty()) return null
+        var chosen: IntArray? = null
+        for (seg in g) {
+            val st = seg.getOrElse(2) { 0 }
+            if (st.toLong() <= targetMs) chosen = seg
+        }
+        return chosen ?: g[0]
+    }
+
+    /** 拍号（一小节几拍），缺省 4/4 */
+    private fun beatsPerBarOf(seg: IntArray?): Int =
+        if (seg != null && seg.size >= 4 && seg[3] in 1..16) seg[3] else 4
+
+    /** 小节第一拍相对段内首拍的偏移(ms)，缺省 0（首拍即重拍） */
+    private fun downbeatOffsetOf(seg: IntArray?): Int =
+        if (seg != null && seg.size >= 5) seg[4] else 0
+
     // 【#1】置信度门控（与 V8.419 对拍门控共用 crossfade_bpm_min_conf 阈值）：
     // 低置信度(-1 未知 / 低于阈值)的 BPM 测值，beatgrid 不可信，吸附到（可能错的）小节线
     // 只会切在错误相位。返回 false 时调用方应跳过网格吸附，回退到基于剩余时间/检测段落的触发。
@@ -5952,10 +5982,14 @@ private var xfadeBChorusMs = -1L
                     } else {
                         gBpm.toFloat()
                     }
+                    // 【P2】拍号与重拍偏移：3/4 拍、或段内首拍不是重拍时，小节线才算得准
+                    val seg = gridSegmentAt(path, idealStartMs)
+                    val bpb = if (seg != null && seg.size >= 4 && seg[3] in 1..16) seg[3] else 4
+                    val dbo = if (seg != null && seg.size >= 5) seg[4] else 0
                     val snapped = com.sdw.music.player.core.audio.SongStructureAnalyzer
-                        .quantizeTriggerUpToBar(idealStartMs, gBeat, segBpmF, maxSnapMs)
-                    Log.i(TAG, "Crossfade: grid-quantize seg(bpm=$gBpm beat=$gBeat useBpmF=%.2f) " +
-                        "ideal=$idealStartMs -> bar=$snapped".format(segBpmF))
+                        .quantizeTriggerUpToBar(idealStartMs, gBeat, segBpmF, maxSnapMs, bpb, dbo)
+                    Log.i(TAG, "Crossfade: grid-quantize seg(bpm=$gBpm beat=$gBeat useBpmF=%.2f " +
+                        "bpb=$bpb dbo=$dbo) ideal=$idealStartMs -> bar=$snapped".format(segBpmF))
                     return snapped
                 }
                 Log.i(TAG, "Crossfade: grid-quantize skipped (no segment at ideal=$idealStartMs)")
@@ -6806,19 +6840,24 @@ private var xfadeBChorusMs = -1L
     }
 
     private fun snapBToBarGrid(preSong: Song?, msLong: Long, aBeatInBar: Int): Long {
-        if (aBeatInBar !in 0..3) return snapBToBeatGrid(preSong, msLong)
         if (msLong <= 0L) return msLong
         val path = preSong?.let { it.filePath.ifEmpty { it.path } } ?: ""
         if (path.isBlank()) return msLong
         if (!gridTrusted(path)) return msLong   // 【#1】低置信度：不吸附，回退非网格触发
         com.sdw.music.player.BpmKeyCache.init(this)
+        // 【P2】拍号取该段自己的（旧数据缺省 4/4 → 与改造前完全一致）
+        val segB = gridSegmentAt(path, msLong)
+        val bpbB = beatsPerBarOf(segB)
+        if (aBeatInBar !in 0 until bpbB) return snapBToBeatGrid(preSong, msLong)
         val (gBeat, gBpm) = gridBeatAt(path, msLong)
         val bpm = if (gBpm in 40..220) gBpm else com.sdw.music.player.BpmKeyCache.get(path)?.first ?: 0
         if (bpm !in 40..220) return msLong
         val cachedBeat = com.sdw.music.player.BpmKeyCache.getFirstBeatMs(path)
-        val anchor = if (gBeat > 0) gBeat
-            else if (cachedBeat > 0) cachedBeat.toLong()
-            else if (xfadeBFirstBeatMs > 0) xfadeBFirstBeatMs
+        // 【P2】锚点 = 首拍 + 重拍偏移（旧数据偏移 0 → 与改造前一致）
+        val dboB = downbeatOffsetOf(segB)
+        val anchor = if (gBeat > 0) gBeat + dboB
+            else if (cachedBeat > 0) cachedBeat.toLong() + dboB
+            else if (xfadeBFirstBeatMs > 0) xfadeBFirstBeatMs + dboB
             else return msLong
         // 【V8.304】浮点 tempo 算拍长（整数 BPM 量化会让 ±32 拍乐句搜索的候选点整体偏移）
         val bpmF = if (gBpm in 40..220) gBpm.toFloat()
@@ -6865,7 +6904,8 @@ private var xfadeBChorusMs = -1L
         var bestDelta = Double.MAX_VALUE
         for (dk in -3..3) {
             val cand = k0 + dk
-            val m = ((cand % 4) + 4) % 4
+            // 【P2】按实际拍号取模（4/4 时与原来的 %4 完全等价）
+            val m = ((cand % bpbB) + bpbB) % bpbB
             if (m.toInt() != aBeatInBar) continue
             val delta = kotlin.math.abs(anchor + cand * beatMs - msLong)
             if (delta < bestDelta) { bestDelta = delta; bestK = cand }
@@ -6875,7 +6915,7 @@ private var xfadeBChorusMs = -1L
         if (snapped <= 0L) return msLong
         // 最多允许挪 2 拍，超出说明栅格不可信
         if (kotlin.math.abs(snapped - msLong) > beatMs * 2.0 + 1.0) return msLong
-        if (snapped != msLong) Log.i(TAG, "Crossfade: B bar-snap ${msLong}ms -> ${snapped}ms (barPhase=$aBeatInBar/4 beat=$anchor bpm=$bpm)")
+        if (snapped != msLong) Log.i(TAG, "Crossfade: B bar-snap ${msLong}ms -> ${snapped}ms (barPhase=$aBeatInBar/$bpbB dbo=$dboB beat=$anchor bpm=$bpm)")
         return snapped
     }
 

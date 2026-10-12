@@ -32,13 +32,18 @@ namespace {
 
 // 【P2-2】把 BpmResult 打包成 int[]：
 //   [0]=bpm  [1]=firstBeatMs  [2]=confPct  [3]=gridSegCount  [4..]=每段{bpm, firstBeatMs, startMs}
+//   【P2】每段扩为 5 个 int：{bpm, firstBeatMs, startMs, beatsPerBar, downbeatOffsetMs}
+//   尾部固定 5 个 int（chorusMs/keyCode/lufs/peak/bpmMilli），Kotlin 据此反推每段宽度(3 或 5)。
 //   【v8.166】网格之后追加 [w]=chorusMs  [w+1]=keyCode（Camelot：小调 1..12 / 大调 101..112 / -1 未知）
 // 【V8.304】再追加 [x]=bpmMilli（浮点 BPM × 1000，0 = 无/未算）。
 //   整数 BPM 量化步进 1 在 120 附近 = ±0.83% 速度误差，交叉淡化对拍必须用浮点值。
 jintArray makeResultArray(JNIEnv* env, const bpmdet::BpmResult& r, int bpm, int chorusMs, int keyCode,
                           int lufs100 = 0, int peak1000 = 0) {
     const int nseg = (int)r.grid.size();
-    jint vals[5 + 3 * 32 + 2 + 2];
+    // 【P2】每段从 3 个 int 扩到 5 个（多 beatsPerBar / downbeatOffsetMs），
+    // 所以这里按 5 预留；Kotlin 侧按数组长度自动识别 3/5 两种布局（见 BpmScanner），
+    // 未重新编译 .so 时（仍发 3 个）也不会解析错乱。
+    jint vals[5 + 5 * 32 + 2 + 2 + 1];
     vals[0] = (jint)bpm;
     vals[1] = (jint)r.firstBeatMs;
     vals[2] = (jint)std::lround(r.conf * 1000.f);
@@ -48,6 +53,9 @@ jintArray makeResultArray(JNIEnv* env, const bpmdet::BpmResult& r, int bpm, int 
         vals[w++] = (jint)r.grid[i].bpm;
         vals[w++] = (jint)r.grid[i].firstBeatMs;
         vals[w++] = (jint)r.grid[i].startMs;
+        // 【P2】拍号 + 小节第一拍相对首拍的偏移
+        vals[w++] = (jint)r.grid[i].beatsPerBar;
+        vals[w++] = (jint)r.grid[i].downbeatOffsetMs;
     }
     vals[w++] = (jint)chorusMs;
     vals[w++] = (jint)keyCode;

@@ -400,6 +400,29 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             )
                         }
 
+                        // 【P3】Master Sync 真实同步。默认关：关闭时 MasterSyncShadow 仍是纯观测，
+                        // 不改任何播放行为；打开后过渡时长会被微调（±1 拍内）以对齐 master 小节线。
+                        if (cfEnabled && djEnabledForCf) {
+                            var masterSync by remember(refreshTrigger) {
+                                mutableStateOf(settingsPrefs.getBoolean("crossfade_master_sync", false))
+                            }
+                            SDWDivider()
+                            SettingsSwitchItem(
+                                icon = Icons.Default.GraphicEq,
+                                title = stringResource(R.string.settings_master_sync),
+                                subtitle = stringResource(R.string.settings_master_sync_sub),
+                                checked = masterSync,
+                                inCard = true,
+                                onCheckedChange = { on ->
+                                    masterSync = on
+                                    settingsPrefs.edit().putBoolean("crossfade_master_sync", on).apply()
+                                    // 立刻生效，不等服务重启
+                                    com.sdw.music.player.MasterSyncShadow.enabled = on
+                                    bump()
+                                }
+                            )
+                        }
+
                         // 【V8.250】过渡方式：淡化（交叉）/ 硬切（djay CUT，在对齐点直接切歌）
                         if (cfEnabled && djEnabledForCf) {
                             // 【V8.312·A】自动切歌最小间隔：两次自动过渡之间的冷却时间。

@@ -69,6 +69,54 @@ internal object MasterSyncShadow {
         get() = "transitions=$transitionCount avgErrMs=%.1f maxErrMs=%.1f outOfRange=$adjustOutOfRange"
             .format(if (transitionCount > 0) phaseErrSumMs / transitionCount else 0.0, phaseErrMaxMs)
 
+    /**
+     * 【P3】真实同步开关。由 MusicService 读 `crossfade_master_sync` 后写入。
+     *
+     * 默认关闭：打开后过渡时长会被微调（最多 ±1 拍），使落点尽量落在 master 小节线上。
+     * 之所以做成开关而不是直接生效，是因为这一步会实际改变听感（过渡变长/变短一点），
+     * 必须先能 AB 对比、且随时可退回影子模式。
+     */
+    @Volatile
+    var enabled: Boolean = false
+
+    /**
+     * 【P3】建议把过渡时长平移多少毫秒，才能让落点落在 master 的小节线上。
+     *
+     * 与 `solvePhase` 的区别：solvePhase 只观测不干预（影子），这个返回可直接施加的修正量。
+     *
+     * 推导（与 solvePhase 同口径，速度 1.0 近似）：
+     *   触发即此刻 → master 拍数 M0 = masterBeatsNow()
+     *   过渡耗时 xfadeMs → master 再前进 xfadeMs / masterBeatMs 拍
+     *   落点拍数 L = M0 + xfadeMs / masterBeatMs，希望 L ≡ 0 (mod 4)
+     * 误差 e 归一到 (-2, 2]，理想修正量 = -e × masterBeatMs 毫秒。
+     * 最后量化到 A 轨整拍并夹在 ±1 拍内 —— 否则过渡长度会有肉眼可闻的变化，
+     * 而 ±1 拍落在 8 小节过渡里只有约 2.5%，听感上察觉不到。
+     *
+     * @param xfadeMs 本次过渡时长
+     * @param aBeatMs A 轨拍长（用于量化与限幅）
+     * @return 要加到过渡时长上的毫秒数（0 = 未开启 / master 未就绪 / 无需修正）
+     */
+    @Synchronized
+    fun suggestDurationAdjustMs(xfadeMs: Int, aBeatMs: Double): Int {
+        if (!enabled) return 0
+        if (masterBpmF <= 0f || xfadeMs <= 0) return 0
+        if (aBeatMs <= 0.0) return 0
+        val masterBeatMs = 60_000.0 / masterBpmF
+        val landingBeat = masterBeatsNow() + xfadeMs / masterBeatMs
+        var e = landingBeat % 4.0
+        if (e > 2.0) e -= 4.0
+        if (e <= -2.0) e += 4.0
+        val idealMs = -e * masterBeatMs
+        val nBeats = Math.round(idealMs / aBeatMs).toInt().coerceIn(-1, 1)
+        val adj = (nBeats * aBeatMs).toLong().toInt()
+        Log.i(
+            TAG,
+            "P3 adjust xf=%dms landingBeat=%.3f err=%+.3f beat ideal=%+.1fms -> %+dms (%+d beat)"
+                .format(xfadeMs, landingBeat, e, idealMs, adj, nBeats)
+        )
+        return adj
+    }
+
     // ------------------------------------------------------------------
     // 时钟维护
     // ------------------------------------------------------------------

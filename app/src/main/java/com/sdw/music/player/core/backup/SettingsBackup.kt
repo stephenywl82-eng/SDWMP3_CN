@@ -359,6 +359,10 @@ object SettingsBackup {
             svc?.setCrossfadeEnabled(s.getBoolean("crossfade_enabled", false))
             svc?.setCrossfadeDurationMs(s.getInt("crossfade_duration_ms", 15000))
             svc?.setCrossfadeBars(s.getInt("crossfade_bars", 0))
+            // 【P3】Master Sync 真实同步。它只在服务启动时读一次 prefs，备份恢复属于
+            // "运行时改 prefs" 的场景，不在这里同步的话要等服务重启才生效。
+            com.sdw.music.player.MasterSyncShadow.enabled =
+                s.getBoolean("crossfade_master_sync", false)
             svc?.applyLiveFx()
             applied += "交叉淡化 / DJ 效果"
         }

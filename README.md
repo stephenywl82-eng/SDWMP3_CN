@@ -1,7 +1,7 @@
 # Moto Music Premium（中文版 / 多语言）
 
 > Android 高保真本地无损音乐播放器，主打 **USB DAC 独占直通** 的 Bit-Perfect 输出。
-> 当前版本 **9.0**（versionCode 900）。
+> 当前版本 **9.01**（versionCode 901）。
 
 ## 定位
 
@@ -16,7 +16,7 @@
 | 项目 | 值 |
 |------|------|
 | `applicationId` | `com.sdw.music.player.cn` |
-| `versionName` / `versionCode` | 9.0 / 900 |
+| `versionName` / `versionCode` | 9.01 / 901 |
 | `minSdk` / `targetSdk` / `compileSdk` | 24 / 35 / 35 |
 | 语言 | 9 种（10 个 locale：简中、繁中、English、Español、日本語、한국어、Français、Português、हिन्दी） |
 | 模块 | `:app`（主工程，131 个 Kotlin 文件）、`:analyzer`（音频分析） |
@@ -154,9 +154,10 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 ## 版本与更新日志
 
-- 当前：`versionName` 9.0 / `versionCode` 900
-- 完整更新记录见 **`CHANGELOG.md`**（已补齐至 9.0，8.2 及更早同样收录）。其中几个值得注意的节点：
+- 当前：`versionName` 9.01 / `versionCode` 901
+- 完整更新记录见 **`CHANGELOG.md`**（已补齐至 9.01，8.2 及更早同样收录）。其中几个值得注意的节点：
 
+  - **9.01**：修复切歌时的两声"哒"（B 进场 23ms 音频坑 / A 退场 7% 变速弹回）
   - **9.0**：ReplayGain 响度归一化、歌词页玻璃浮层
   - **8.36**：液态进度条、文件夹批量加入歌单、灭屏元数据补推
   - **8.32**：DAC 连接状态机、FLAC seek 修正、33d8 DAC 白名单、蓝牙预加重

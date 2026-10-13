@@ -23,8 +23,8 @@ android {
         applicationId = "com.sdw.music.player.cn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 900
-        versionName = "9.0"     // 【V9.0】歌词页玻璃浮层 + ReplayGain 归一化（versionCode 900）
+        versionCode = 901
+        versionName = "9.01"    // 【V9.01】切歌"哒"声修复：B 进场 23ms 音频坑 + A 退场 7% 变速弹回（versionCode 901）
 
         ndk {
             abiFilters += listOf("arm64-v8a")

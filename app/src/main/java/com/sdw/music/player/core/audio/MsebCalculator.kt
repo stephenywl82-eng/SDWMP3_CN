@@ -160,6 +160,11 @@ object MsebCalculator {
     private const val KEY_IMG    = "imaging"
     private const val KEY_ENABLED = "enabled"
     private const val KEY_DTS_ENABLED = "dts_enabled"
+    private const val KEY_HRTF_PROBE_ENABLED = "hrtf_probe_enabled"
+    private const val KEY_HRTF_PROBE_DIR = "hrtf_probe_dir"
+    private const val KEY_HRTF_SPATIAL_ENABLED = "hrtf_spatial_enabled"
+    private const val KEY_HRTF_FIELD_YAW = "hrtf_field_yaw"
+    private const val KEY_HRTF_FIELD_PITCH = "hrtf_field_pitch"
     private const val KEY_DTS_SURROUND = "dts_surround"
     private const val KEY_DTS_HEIGHT = "dts_height"
     private const val KEY_PRESET_NAME = "preset_name"
@@ -225,6 +230,62 @@ object MsebCalculator {
             .apply()
     }
 
+    /**
+     * 【第2步·隔离探针】HRTF 双耳渲染探针开关（诊断用，与 DTS/M-S 互斥，仅 Oboe 链）。
+     * 默认关；勾上后 native 侧用合成 HRIR 做 2×2 卷积，按 前/后/左/右/上 轮播或锁定方向。
+     */
+    fun isHrtfProbeEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_HRTF_PROBE_ENABLED, false)
+
+    fun setHrtfProbeEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_HRTF_PROBE_ENABLED, enabled)
+            .apply()
+    }
+
+    /** 探针方向：-1=自动轮播；0=前 1=后 2=左 3=右 4=上 */
+    fun getHrtfProbeDir(context: Context): Int =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getInt(KEY_HRTF_PROBE_DIR, -1)
+
+    fun setHrtfProbeDir(context: Context, dir: Int) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_HRTF_PROBE_DIR, dir)
+            .apply()
+    }
+
+    /** 【真·双耳环绕】HRIR 多虚拟音箱 upmix 开关状态（替换 DTS）。 */
+    fun isHrtfSpatialEnabled(context: Context): Boolean =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_HRTF_SPATIAL_ENABLED, false)
+
+    fun setHrtfSpatialEnabled(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_HRTF_SPATIAL_ENABLED, enabled)
+            .apply()
+    }
+
+    /** 声场朝向：yaw=水平旋转(±180°)、pitch=俯仰(±90°)，由拖动手柄设置。 */
+    fun getHrtfFieldYaw(context: Context): Float =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_HRTF_FIELD_YAW, 0f)
+
+    fun getHrtfFieldPitch(context: Context): Float =
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getFloat(KEY_HRTF_FIELD_PITCH, 0f)
+
+    fun setHrtfFieldYaw(context: Context, v: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putFloat(KEY_HRTF_FIELD_YAW, v).apply()
+    }
+
+    fun setHrtfFieldPitch(context: Context, v: Float) {
+        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .edit().putFloat(KEY_HRTF_FIELD_PITCH, v).apply()
+    }
+
     /** 【V8.20】当前应用中的 MSEB 预设名（"" = 手动调音/未命名）。 */
     fun getPresetName(context: Context): String =
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -250,7 +311,7 @@ object MsebCalculator {
         val ss = params.soundstage
         val img = params.imaging
         val hasUserStage = kotlin.math.abs(ss) > 0.1f || kotlin.math.abs(img) > 0.1f
-        return if (hasUserStage) ss to img else 5f to 0f
+        return if (hasUserStage) ss to img else 7f to 0f   // 【V9.13】兜底声场宽度默认 5→7
     }
 
     /**
@@ -261,8 +322,8 @@ object MsebCalculator {
      * height 默认 5（0.5）：耳廓共振 + 左右耳权重差，决定"两侧变宽"还是"有前后"。
      */
     data class DtsStageEx(
-        val surround: Float = 5f,
-        val height: Float = 5f
+        val surround: Float = 7f,   // 【V9.13】更激进：默认环绕 5→7（native≈0.70）
+        val height: Float = 6f      // 【V9.13】更激进：默认高度 5→6（native≈0.72）
     ) {
         val isDefault: Boolean get() = surround == 5f && height == 5f
     }
@@ -270,8 +331,8 @@ object MsebCalculator {
     fun getDtsStageEx(context: Context): DtsStageEx {
         val p = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         return DtsStageEx(
-            surround = p.floatValue(KEY_DTS_SURROUND, 5f),
-            height = p.floatValue(KEY_DTS_HEIGHT, 5f)
+            surround = p.floatValue(KEY_DTS_SURROUND, 7f),   // 【V9.13】默认 5→7
+            height = p.floatValue(KEY_DTS_HEIGHT, 6f)        // 【V9.13】默认 5→6
         )
     }
 

@@ -1,7 +1,9 @@
 package com.sdw.music.player.ui.screens
+import android.util.Log
 import com.sdw.music.player.core.util.floatValue
 
 import androidx.compose.animation.core.*
+import com.sdw.music.player.ui.components.ExpressiveSwitch
 import com.sdw.music.player.ui.components.SDWDivider
 import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.compose.foundation.background
@@ -9,8 +11,11 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -18,6 +23,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -42,6 +49,73 @@ import com.sdw.music.player.ui.components.glassSurface
 import kotlinx.coroutines.delay
 import java.util.Timer
 import java.util.TimerTask
+
+/**
+ * 【真·双耳环绕】声场拖动手柄：水平拖动 = 方位旋转(±180°)，垂直拖动 = 俯仰(±90°)。
+ * 拖动时把归一化坐标换算成 yaw/pitch 回调出去，native 据此旋转整圈虚拟音箱。
+ */
+@Composable
+fun HrtfFieldPanner(yaw: Float, pitch: Float, onYawPitch: (Float, Float) -> Unit) {
+    val sizeDp = 180.dp
+    val accent = MaterialTheme.colorScheme.tertiary
+    val ring = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
+    Box(
+        modifier = Modifier
+            .size(sizeDp)
+            .background(
+                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                RoundedCornerShape(16.dp)
+            )
+            .pointerInput(Unit) {
+                awaitPointerEventScope {
+                    fun report(p: Offset) {
+                        val w = size.width.toFloat().coerceAtLeast(1f)
+                        val h = size.height.toFloat().coerceAtLeast(1f)
+                        val nx = (p.x / w).coerceIn(0f, 1f)
+                        val ny = (p.y / h).coerceIn(0f, 1f)
+                        val nyaw = (nx * 2f - 1f) * 180f
+                        val npitch = (0.5f - ny) * 180f
+                        onYawPitch(nyaw, npitch.coerceIn(-90f, 90f))
+                    }
+                    while (true) {
+                        val down = awaitPointerEvent()
+                        val d = down.changes.first()
+                        if (!d.pressed) continue
+                        var cur = d.position
+                        d.consume()
+                        report(cur)
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.first()
+                            if (!change.pressed) break
+                            cur = change.position
+                            change.consume()
+                            report(cur)
+                        }
+                    }
+                }
+            }
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val cx = w / 2f
+            val cy = h / 2f
+            drawCircle(
+                color = ring,
+                radius = (w.coerceAtMost(h) / 2f) - 6.dp.toPx(),
+                style = Stroke(width = 1.5.dp.toPx())
+            )
+            drawLine(ring, Offset(cx, 6.dp.toPx()), Offset(cx, h - 6.dp.toPx()), strokeWidth = 1.dp.toPx())
+            drawLine(ring, Offset(6.dp.toPx(), cy), Offset(w - 6.dp.toPx(), cy), strokeWidth = 1.dp.toPx())
+            val nx = ((yaw / 180f) + 1f) / 2f
+            val ny = 0.5f - pitch / 180f
+            val kx = (nx * w).coerceIn(8f, w - 8f)
+            val ky = (ny * h).coerceIn(8f, h - 8f)
+            drawCircle(color = accent, radius = 9.dp.toPx(), center = Offset(kx, ky))
+        }
+    }
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -104,6 +178,17 @@ fun MsebScreen(
     // 前提是所有写入都要落盘（见 setDts / 预设 / 设备建议三处），否则镜像会被数据源打回。
     var dtsOn by remember { mutableStateOf(MsebCalculator.isDtsEnabled(context)) }
 
+    // ── 【第2步·隔离探针】HRTF 双耳渲染探针（诊断用）：与 DTS 互斥、仅 Oboe 链。
+    // 默认关；开了以后 native 用合成 HRIR 做 2×2 卷积，按 前/后/左/右/上 轮播或锁定单方向。
+    var hrtfProbeOn by remember { mutableStateOf(MsebCalculator.isHrtfProbeEnabled(context)) }
+    // 方向：-1=自动轮播；0=前 1=后 2=左 3=右 4=上（与 OboeDirectPlayer.setHrtfProbeDir 约定一致）
+    var hrtfProbeDir by remember { mutableStateOf(MsebCalculator.getHrtfProbeDir(context)) }
+
+    // ── 【真·双耳环绕】HRIR 多虚拟音箱 upmix（替换 DTS）──
+    var hrtfSpatialOn by remember { mutableStateOf(MsebCalculator.isHrtfSpatialEnabled(context)) }
+    var hrtfFieldYaw by remember { mutableStateOf(MsebCalculator.getHrtfFieldYaw(context)) }
+    var hrtfFieldPitch by remember { mutableStateOf(MsebCalculator.getHrtfFieldPitch(context)) }
+
     // ── 【V8.172】DTS 虚拟环绕的两个高级参数（与宽度/结像正交）──
     // surround = 环绕包围强度，height = 高度/耳廓感。这两个值决定"两侧变宽"和
     // "真的听得出前后"的差别，是蓝牙耳机上效果明显与否的主旋钮。
@@ -114,7 +199,7 @@ fun MsebScreen(
     val btCodec = remember { mutableStateOf(BtCodecTracker.currentCodecName) }
     val btActive = remember { mutableStateOf(BtCodecTracker.isBluetoothOutput) }
     LaunchedEffect(Unit) {
-        suspend fun sync() {
+        fun sync() {
             btCodec.value = BtCodecTracker.currentCodecName
             btActive.value = BtCodecTracker.isBluetoothOutput
             // 【V8.172】进入这一屏时把 codec 下发给 native，环绕的高频反射量立刻按链路收敛。
@@ -122,24 +207,21 @@ fun MsebScreen(
                 BtCodecTracker.currentCodecName.takeIf { BtCodecTracker.isBluetoothOutput }
             )
         }
-        // 【V8.174】绑定 A2DP profile proxy 是阻塞调用（最长 8s），必须扔到 IO 线程，
-        // 不能让主线程陪等。
+        // 【V9.16】detect() 在 BtCodecTracker 后台线程异步执行，必须用 onResult 回调在检测
+        // 真正完成后才同步 UI——否则 sync() 会在 detect() 还没跑完时读到 stale 的
+        // isBluetoothOutput=false，于是蓝牙已连却误显"有线"（旧实现 refresh() 后立刻
+        // sync()，竞态必现）。onResult 同样不阻塞当前协程。
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-            runCatching { BtCodecTracker.refresh(context) }
+            runCatching { BtCodecTracker.refreshAsync(context) { sync() } }
         }
-        sync()
-        // 缺 BLUETOOTH_CONNECT 时 refresh 会顺手把系统授权框拉起来。
-        // 用户在弹窗里点"允许"后多半还停在这一屏，隔一会儿复查几次，
-        // 拿到权限就立刻刷新成真实编码（LHDC/LDAC/aptX…），不再停在保守的 SBC 档。
+        // 开屏后蓝牙路由有时延迟上报，或用户中途才连上 BT；每 1.5s 复探一轮（同样走
+        // onResult 回调，检测一完成即刷新），最多 ~6s 内持续收敛到正确状态。
         var tries = 0
-        while (tries++ < 6) {
+        while (tries++ < 4) {
             kotlinx.coroutines.delay(1500)
-            if (!BtCodecTracker.hasPermission(context)) continue
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
-                runCatching { BtCodecTracker.refresh(context) }
+                runCatching { BtCodecTracker.refreshAsync(context) { sync() } }
             }
-            sync()
-            break
         }
     }
 
@@ -171,6 +253,11 @@ fun MsebScreen(
         n.multiBandLimiterEnabled?.let { mblEnabled = it }
         n.autoEqMix?.let { autoEqMix = it }
         dtsOn = MsebCalculator.isDtsEnabled(context)
+        hrtfProbeOn = MsebCalculator.isHrtfProbeEnabled(context)
+        hrtfProbeDir = MsebCalculator.getHrtfProbeDir(context)
+        hrtfSpatialOn = MsebCalculator.isHrtfSpatialEnabled(context)
+        hrtfFieldYaw = MsebCalculator.getHrtfFieldYaw(context)
+        hrtfFieldPitch = MsebCalculator.getHrtfFieldPitch(context)
     }
 
     // 【V8.171 修同步】前台期间把镜像对齐回数据源：这一屏从回退栈回来时可能还留着
@@ -310,6 +397,21 @@ fun MsebScreen(
         return if (dtsEx.height >= 6f) "$level ↑" else level
     }
 
+    /** 【第2步·隔离探针】副标题：关时提示是诊断探针，开时显示当前渲染方向。 */
+    @Composable
+    fun hrtfProbeSubtitle(): String {
+        if (!hrtfProbeOn) return stringResource(R.string.mseb_hrtf_probe_desc)
+        return when (hrtfProbeDir) {
+            -1   -> stringResource(R.string.mseb_hrtf_probe_dir_auto)
+            0    -> stringResource(R.string.mseb_hrtf_probe_dir_front)
+            1    -> stringResource(R.string.mseb_hrtf_probe_dir_back)
+            2    -> stringResource(R.string.mseb_hrtf_probe_dir_left)
+            3    -> stringResource(R.string.mseb_hrtf_probe_dir_right)
+            4    -> stringResource(R.string.mseb_hrtf_probe_dir_up)
+            else -> stringResource(R.string.mseb_hrtf_probe_dir_auto)
+        }
+    }
+
     fun toggleDts(on: Boolean) {
         dtsOn = on
         MsebCalculator.setDtsEnabled(context, on)
@@ -320,6 +422,54 @@ fun MsebScreen(
         applyMseb(context, params, dtsEx)   // 重发 M/S，或 resetMsStage
         dumpDspState(context, on, srEnabled, deEnabled, mblEnabled,
             compEnabled, loudEnabled, xfEnabled, srWet, deDepth, autoEqMix, xfAmount)
+    }
+
+    // 【第2步·隔离探针】HRTF 双耳渲染探针开关：与 DTS/M-S 互斥，互不影响出声。
+    fun toggleHrtfProbe(on: Boolean) {
+        hrtfProbeOn = on
+        MsebCalculator.setHrtfProbeEnabled(context, on)
+        // 探针与 DTS 互斥——开探针时若 DTS 还亮着，先把它关掉，避免两段双耳处理叠加变浑浊。
+        if (on && dtsOn) {
+            dtsOn = false
+            MsebCalculator.setDtsEnabled(context, false)
+            MusicService.instance?.applyDtsEnabled(false)
+        }
+        MusicService.instance?.applyHrtfProbeEnabled(on)
+        Log.i("MsebScreen", "HrtfProbe ${if (on) "ON" else "OFF"}")
+    }
+
+    // 锁定方向：-1=自动轮播；0=前 1=后 2=左 3=右 4=上
+    fun selectHrtfProbeDir(dir: Int) {
+        hrtfProbeDir = dir
+        MsebCalculator.setHrtfProbeDir(context, dir)
+        MusicService.instance?.applyHrtfProbeDir(dir)
+    }
+
+    // 【真·双耳环绕】HRIR 多虚拟音箱 upmix 开关：与 DTS/探针互斥——开它时关掉 DTS 与探针，
+    // 实现"用真实 HRIR 环绕替换 DTS"。
+    fun toggleHrtfSpatial(on: Boolean) {
+        hrtfSpatialOn = on
+        MsebCalculator.setHrtfSpatialEnabled(context, on)
+        if (on && (dtsOn || hrtfProbeOn)) {
+            dtsOn = false
+            hrtfProbeOn = false
+            MsebCalculator.setDtsEnabled(context, false)
+            MsebCalculator.setHrtfProbeEnabled(context, false)
+            MusicService.instance?.applyDtsEnabled(false)
+            MusicService.instance?.applyHrtfProbeEnabled(false)
+        }
+        MusicService.instance?.applyHrtfSpatialEnabled(on)
+        MusicService.instance?.applyHrtfFieldOrientation(hrtfFieldYaw, hrtfFieldPitch)
+        Log.i("MsebScreen", "HrtfSpatial ${if (on) "ON" else "OFF"}")
+    }
+
+    // 声场朝向（拖动手柄）：yaw=水平旋转(±180°)、pitch=俯仰(±90°)。
+    fun setHrtfFieldOrientation(yaw: Float, pitch: Float) {
+        hrtfFieldYaw = yaw
+        hrtfFieldPitch = pitch
+        MsebCalculator.setHrtfFieldYaw(context, yaw)
+        MsebCalculator.setHrtfFieldPitch(context, pitch)
+        MusicService.instance?.applyHrtfFieldOrientation(yaw, pitch)
     }
 
     fun applyCompressorParams(en: Boolean, thr: Float, ratio: Float, atk: Float, rel: Float, makeup: Float) {
@@ -524,7 +674,7 @@ fun MsebScreen(
                             )
                         }
                     }
-                    Switch(checked = enabled, onCheckedChange = { toggleEnabled(it) })
+                    ExpressiveSwitch(checked = enabled, onCheckedChange = { toggleEnabled(it) })
                 }
             }
 
@@ -535,7 +685,7 @@ fun MsebScreen(
                 checked = dtsOn,
                 onCheckedChange = { toggleDts(it) },
                 accent = MaterialTheme.colorScheme.primary,
-                dimmed = dacPath,
+                dimmed = false,   // 【V9.01】USB DAC 引擎已支持 DTS/M-S（setMsStage + g_msEnabled），解除 DAC 模式锁定
                 dimmedNote = stringResource(R.string.mseb_unavailable)
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -568,6 +718,82 @@ fun MsebScreen(
                         valueRange = 0f..10f,
                         decimals = 1,
                         onValueChange = { updateDtsEx(dtsEx.copy(height = it)) }
+                    )
+                }
+            }
+
+            // ── 【第2步·隔离探针】HRTF 双耳渲染探针（诊断用，与 DTS 互斥、仅 Oboe 链）──
+            DspModuleCard(
+                title = stringResource(R.string.mseb_hrtf_probe),
+                subtitle = hrtfProbeSubtitle(),
+                checked = hrtfProbeOn,
+                onCheckedChange = { toggleHrtfProbe(it) },
+                accent = MaterialTheme.colorScheme.tertiary,
+                dimmed = false,
+                dimmedNote = null
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        stringResource(R.string.mseb_hrtf_probe_desc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    // 方向锁定：自动轮播 / 前 / 后 / 左 / 右 / 上。
+                    // 默认“自动”会每 ~4.5s 推进一个点，方便盲听分辨；锁定后停在单方向做对比。
+                    val dirs = listOf(
+                        -1 to stringResource(R.string.mseb_hrtf_probe_dir_auto),
+                        0  to stringResource(R.string.mseb_hrtf_probe_dir_front),
+                        1  to stringResource(R.string.mseb_hrtf_probe_dir_back),
+                        2  to stringResource(R.string.mseb_hrtf_probe_dir_left),
+                        3  to stringResource(R.string.mseb_hrtf_probe_dir_right),
+                        4  to stringResource(R.string.mseb_hrtf_probe_dir_up)
+                    )
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.Start)
+                    ) {
+                        dirs.forEach { (dir, label) ->
+                            FilterChip(
+                                selected = hrtfProbeDir == dir,
+                                onClick = { selectHrtfProbeDir(dir) },
+                                label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = MaterialTheme.colorScheme.tertiary.copy(alpha = 0.22f)
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            // ── 【真·双耳环绕】HRIR 多虚拟音箱 upmix（替换 DTS，仅 Oboe 链）──
+            DspModuleCard(
+                title = stringResource(R.string.mseb_hrtf_spatial),
+                subtitle = stringResource(R.string.mseb_hrtf_spatial_desc),
+                checked = hrtfSpatialOn,
+                onCheckedChange = { toggleHrtfSpatial(it) },
+                accent = MaterialTheme.colorScheme.tertiary,
+                dimmed = false,
+                dimmedNote = null
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        stringResource(R.string.mseb_hrtf_spatial_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    // 拖动声场：水平=方位旋转(±180°)，垂直=俯仰(±90°)
+                    HrtfFieldPanner(
+                        yaw = hrtfFieldYaw,
+                        pitch = hrtfFieldPitch,
+                        onYawPitch = { y, p -> setHrtfFieldOrientation(y, p) }
+                    )
+                    Text(
+                        "方位 ${hrtfFieldYaw.toInt()}° · 俯仰 ${hrtfFieldPitch.toInt()}°",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -786,7 +1012,7 @@ fun MsebScreen(
                 checked = autoEqMix > 0.99f,
                 onCheckedChange = { autoEqMix = if (it) 1f else 0.5f; MusicService.instance?.setAutoEqMix(autoEqMix) },
                 accent = MaterialTheme.colorScheme.tertiary,
-                dimmed = dacPath,
+                dimmed = false,   // 【V9.01】USB DAC 引擎已支持 AutoEQ（setAutoEq10Band + g_autoEqEnabled），解除 DAC 模式锁定
                 dimmedNote = stringResource(R.string.mseb_unavailable)
             ) {
                 val a = if (autoEqMix > 0.02f) 1f else 0.45f
@@ -1110,7 +1336,7 @@ private fun DspModuleCard(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                Switch(
+                ExpressiveSwitch(
                     checked = checked,
                     enabled = !dimmed,
                     onCheckedChange = onCheckedChange

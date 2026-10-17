@@ -912,6 +912,11 @@ static std::atomic<bool> g_wideHeadroom{true};
 
 static std::atomic<bool> g_directPassthrough{false};
 
+// 【V9.01】引擎 DSP 主开关（DAC 模块"启用引擎 DSP"）。false = 整个创意 DSP 链旁路，
+// 仅保留音量(masterGain) / DJ 混音层 / 收尾硬钳 + dither，做到比特完美直通。
+// 各子效果(MSEB/DTS/Limiter/AutoEQ/BassSwap)仍保留各自的独立子开关。
+static std::atomic<bool> g_engineDspEnabled{true};
+
 
 
 static std::mutex g_sinkEqMutex;
@@ -4203,6 +4208,13 @@ static std::atomic<int>    g_xfadeClickN{0};         // 窗口内 callback 计�
 
 
 static float g_xfadeLast[2] = {0.0f, 0.0f};          // 上一个 callback 末样本（L/R）
+static std::atomic<int64_t> g_xfadeLastUpdCount{0};  // 【诊断】每回调更新执行次数
+// 【V8.52x 去咔·硬切补齐】硬切 stop 时置位；新轨 nativePlay 时 re-arm 接缝，覆盖新轨响亮起点（消除"B 进场哒"）。
+// 仅硬切（stop→open→play）路径会触发：nativePlay 对首播/暂停恢复一律为 false，不引入多余淡入。
+static std::atomic<bool> g_seamArmOnNewTrack{false};
+// 【V8.52x 去咔·flip 落点】落点回调内 flip(=g_bmEngSrcActive) 已被 retireTimeEngineAtLanding 复位，
+// 故在调用前持久化，供下方 XFADE-DONE 加宽接缝窗口判定使用。
+static std::atomic<bool> g_lastLandingFlip{false};
 
 // 【V8.473 落点接缝平滑】过渡结束那一帧，输出源从"交叉淡化/引擎"切到"1:1 直读"，
 // 两条路径的电平与相位不可能天然对齐 → 接缝处留一个阶跃。
@@ -4213,6 +4225,10 @@ static float g_xfadeLast[2] = {0.0f, 0.0f};          // 上一个 callback 末�
 // 摊到 1024(≈23ms @44.1k / ≈21ms @48k) 后斜率远低于人耳"咔哒"分辨阈值，且仍不改变音频内容。
 static const int SEAM_FRAMES = 1024;
 static std::atomic<int> g_seamLeft{0};
+// 【V8.52x 去咔】接缝斜坡的"已完成帧数/总窗口"原写死用 SEAM_FRAMES。当落点窗口被加宽
+// （flip 落点用 SEAM_FRAMES*N）时写死常量会让 done 变负、t 越界。改用 g_seamTotal 记录本次窗口总长，
+// 斜坡公式 done=g_seamTotal-sl、t=(done+f+1)/g_seamTotal 才能正确跨多 callback 平滑。
+static std::atomic<int> g_seamTotal{SEAM_FRAMES};
 // [V8.502 seam probe] capture xRun + timestamp trajectory for ~6s after each seam
 static std::atomic<int64_t> g_lastSeamUs{0};       // most recent seam monotonic time (us)
 static std::atomic<int>     g_seamSeq{0};          // seam sequence (incremented at XFADE-DONE)
@@ -6703,7 +6719,61 @@ static BiquadFilter g_autoEqBand9L, g_autoEqBand9R;
 
 static BiquadFilter g_autoEqBand10L, g_autoEqBand10R;
 
-
+// 【二期】手动参数 EQ 扩到 30 段：11-30 段专用 biquad 实例（1-5 复用 g_eqBand1-5，6-10 复用 g_autoEqBand6-10）。
+static BiquadFilter g_autoEqBand11L, g_autoEqBand11R;
+static BiquadFilter g_autoEqBand12L, g_autoEqBand12R;
+static BiquadFilter g_autoEqBand13L, g_autoEqBand13R;
+static BiquadFilter g_autoEqBand14L, g_autoEqBand14R;
+static BiquadFilter g_autoEqBand15L, g_autoEqBand15R;
+static BiquadFilter g_autoEqBand16L, g_autoEqBand16R;
+static BiquadFilter g_autoEqBand17L, g_autoEqBand17R;
+static BiquadFilter g_autoEqBand18L, g_autoEqBand18R;
+static BiquadFilter g_autoEqBand19L, g_autoEqBand19R;
+static BiquadFilter g_autoEqBand20L, g_autoEqBand20R;
+static BiquadFilter g_autoEqBand21L, g_autoEqBand21R;
+static BiquadFilter g_autoEqBand22L, g_autoEqBand22R;
+static BiquadFilter g_autoEqBand23L, g_autoEqBand23R;
+static BiquadFilter g_autoEqBand24L, g_autoEqBand24R;
+static BiquadFilter g_autoEqBand25L, g_autoEqBand25R;
+static BiquadFilter g_autoEqBand26L, g_autoEqBand26R;
+static BiquadFilter g_autoEqBand27L, g_autoEqBand27R;
+static BiquadFilter g_autoEqBand28L, g_autoEqBand28R;
+static BiquadFilter g_autoEqBand29L, g_autoEqBand29R;
+static BiquadFilter g_autoEqBand30L, g_autoEqBand30R;
+static BiquadFilter g_autoEqBand31L, g_autoEqBand31R;
+static BiquadFilter g_autoEqBand32L, g_autoEqBand32R;
+static BiquadFilter g_autoEqBand33L, g_autoEqBand33R;
+static BiquadFilter g_autoEqBand34L, g_autoEqBand34R;
+static BiquadFilter g_autoEqBand35L, g_autoEqBand35R;
+static BiquadFilter g_autoEqBand36L, g_autoEqBand36R;
+static BiquadFilter g_autoEqBand37L, g_autoEqBand37R;
+static BiquadFilter g_autoEqBand38L, g_autoEqBand38R;
+static BiquadFilter g_autoEqBand39L, g_autoEqBand39R;
+static BiquadFilter g_autoEqBand40L, g_autoEqBand40R;
+static BiquadFilter g_autoEqBand41L, g_autoEqBand41R;
+static BiquadFilter g_autoEqBand42L, g_autoEqBand42R;
+static BiquadFilter g_autoEqBand43L, g_autoEqBand43R;
+static BiquadFilter g_autoEqBand44L, g_autoEqBand44R;
+static BiquadFilter g_autoEqBand45L, g_autoEqBand45R;
+static BiquadFilter g_autoEqBand46L, g_autoEqBand46R;
+static BiquadFilter g_autoEqBand47L, g_autoEqBand47R;
+static BiquadFilter g_autoEqBand48L, g_autoEqBand48R;
+static BiquadFilter g_autoEqBand49L, g_autoEqBand49R;
+static BiquadFilter g_autoEqBand50L, g_autoEqBand50R;
+static BiquadFilter g_autoEqBand51L, g_autoEqBand51R;
+static BiquadFilter g_autoEqBand52L, g_autoEqBand52R;
+static BiquadFilter g_autoEqBand53L, g_autoEqBand53R;
+static BiquadFilter g_autoEqBand54L, g_autoEqBand54R;
+static BiquadFilter g_autoEqBand55L, g_autoEqBand55R;
+static BiquadFilter g_autoEqBand56L, g_autoEqBand56R;
+static BiquadFilter g_autoEqBand57L, g_autoEqBand57R;
+static BiquadFilter g_autoEqBand58L, g_autoEqBand58R;
+static BiquadFilter g_autoEqBand59L, g_autoEqBand59R;
+static BiquadFilter g_autoEqBand60L, g_autoEqBand60R;
+static BiquadFilter g_autoEqBand61L, g_autoEqBand61R;
+static BiquadFilter g_autoEqBand62L, g_autoEqBand62R;
+static BiquadFilter g_autoEqBand63L, g_autoEqBand63R;
+static BiquadFilter g_autoEqBand64L, g_autoEqBand64R;
 
 static std::atomic<bool> g_autoEqEnabled{false};
 
@@ -6766,6 +6836,13 @@ static BiquadFilter g_msebBand10L, g_msebBand10R;
 
 
 static std::atomic<bool> g_mseb10Enabled{false};
+// 【V9.01】DAC 模块 MSEB 子开关独立标志：只由 DAC 模块子开关控制，曲线载入路径完全不碰。
+// 与 g_mseb10Enabled（"曲线是否载入"）正交，DSP 链同时检查两者（AND 门）实现"子开关强制覆盖"。
+static std::atomic<bool> g_msebSubEnabled{true};
+// 【V9.01】DAC 模块 AutoEQ 子开关独立标志（与 g_autoEqEnabled 正交）。
+static std::atomic<bool> g_autoEqSubEnabled{true};
+// 【V9.01】DAC 模块 DTS 环绕子开关独立标志（与 g_msEnabled 正交）。
+static std::atomic<bool> g_dtsSubEnabled{true};
 
 
 
@@ -8322,6 +8399,15 @@ public:
 };
 
 
+
+// 【第2步·隔离探针】HRIR 卷积真双耳渲染（独立通路，验证用，不影响现有 DTS）。
+// 生产版应换 Resonance PartitionedFftFilter + 真实 HRTF 数据集（见 docs/dts_hrtf_reference_mapping.md）。
+#include "hrtf_probe.h"
+#include "hrtf_surround.h"
+static HrtfProbe g_hrtfProbe;
+static std::atomic<bool> g_hrtfProbeEnabled{false};
+static HrtfSurround g_hrtfSurround;                                   // 【真·双耳环绕】多虚拟音箱 upmix，替换 DTS
+static std::atomic<bool> g_hrtfSpatialEnabled{false};
 
 static DtsVirtualSurround g_dts;
 
@@ -12444,8 +12530,8 @@ struct DspFrame {
 struct MsebPreGainNode {
     static double computeTargetPreGain() {
         double g = 1.0;
-        if (g_autoEqEnabled.load(std::memory_order_relaxed))    g *= (double)g_autoEqPreGain.load(std::memory_order_relaxed);
-        if (g_mseb10Enabled.load(std::memory_order_relaxed))    g *= (double)g_msebPreGain.load(std::memory_order_relaxed);   // 含 V8.513 ×0.5 预留比例
+        if (g_autoEqEnabled.load(std::memory_order_relaxed) && g_autoEqSubEnabled.load(std::memory_order_relaxed))    g *= (double)g_autoEqPreGain.load(std::memory_order_relaxed);
+        if (g_mseb10Enabled.load(std::memory_order_relaxed) && g_msebSubEnabled.load(std::memory_order_relaxed))    g *= (double)g_msebPreGain.load(std::memory_order_relaxed);   // 含 V8.513 ×0.5 预留比例
         if (!g_mseb10Enabled.load(std::memory_order_relaxed)
             && !g_autoEqEnabled.load(std::memory_order_relaxed)
             && g_dspEqEnabled.load(std::memory_order_relaxed))  g *= (double)g_dspEqPreGain.load(std::memory_order_relaxed);
@@ -16383,6 +16469,9 @@ public:
                              (int)((flip ? !fromB : fromB) == (!fromB)),
                              g_ringBuffer ? g_ringBuffer->available() : -1,
                              g_ringBufferB ? g_ringBufferB->available() : -1);
+                        // 【V8.52x】flip 落点的引擎延迟残响需在下方加宽接缝；retireTimeEngineAtLanding 内部会复位
+                        // g_bmEngSrcActive，故先持久化 flip 供 XFADE-DONE 判定。
+                        g_lastLandingFlip.store(flip, std::memory_order_relaxed);
                         retireTimeEngineAtLanding("crossfade-end", nr, /*newActiveIsEngSrc=*/!flip, channels);
                     }
                 }
@@ -16742,7 +16831,13 @@ public:
 
 
                     LOGI("Crossfade complete: A is now active");
-                    g_seamLeft.store(SEAM_FRAMES, std::memory_order_relaxed);   // 【V8.473】
+                    // 【V8.52x 去咔·flip 落点】flip 模式下引擎吃 A 轨带 ~1024 帧(≈21ms@48k) 延迟，
+                    // 落点退役引擎后其最后那批 A 残响延迟 ~L 帧才出声，标准 21ms 接缝窗口漏掉它 → "哒"。
+                    // 加宽接缝窗口覆盖「落点 + 引擎延迟余波」，把那记延迟残响在 SEAM_FRAMES*4(≈85ms) 内摊平。
+                    // 纯增益斜坡（from=g_xfadeLast 线性插值），不会引入断流；非 flip 落点维持原 21ms。
+                    const int _seamFr = g_lastLandingFlip.load(std::memory_order_relaxed) ? (SEAM_FRAMES * 4) : SEAM_FRAMES;
+                    g_seamLeft.store(_seamFr, std::memory_order_relaxed);   // 【V8.473 / V8.52x】
+                    g_seamTotal.store(_seamFr, std::memory_order_relaxed);
 
 
 
@@ -16759,7 +16854,13 @@ public:
 
 
                     LOGI("Crossfade complete: B is now active");
-                    g_seamLeft.store(SEAM_FRAMES, std::memory_order_relaxed);   // 【V8.473】
+                    // 【V8.52x 去咔·flip 落点】flip 模式下引擎吃 A 轨带 ~1024 帧(≈21ms@48k) 延迟，
+                    // 落点退役引擎后其最后那批 A 残响延迟 ~L 帧才出声，标准 21ms 接缝窗口漏掉它 → "哒"。
+                    // 加宽接缝窗口覆盖「落点 + 引擎延迟余波」，把那记延迟残响在 SEAM_FRAMES*4(≈85ms) 内摊平。
+                    // 纯增益斜坡（from=g_xfadeLast 线性插值），不会引入断流；非 flip 落点维持原 21ms。
+                    const int _seamFr = g_lastLandingFlip.load(std::memory_order_relaxed) ? (SEAM_FRAMES * 4) : SEAM_FRAMES;
+                    g_seamLeft.store(_seamFr, std::memory_order_relaxed);   // 【V8.473 / V8.52x】
+                    g_seamTotal.store(_seamFr, std::memory_order_relaxed);
 
 
 
@@ -17976,6 +18077,16 @@ public:
 
 
 
+                // 【SEAM 诊断】确认点击检测块是否被音频回调执行，以及窗口 / g_seamLeft / crossfade 状态
+                static std::atomic<int> _cdDbg{0};
+                if (_cdDbg.fetch_add(1) % 60 == 0) {
+                    LOGI("CLICKDIAG win=%lld now=%lld sl=%d inWin=%d cfAct=%d",
+                         (long long)g_xfadeClickUntilUs.load(std::memory_order_relaxed),
+                         (long long)_u3,
+                         (int)g_seamLeft.load(std::memory_order_relaxed),
+                         (int)(_u3 < g_xfadeClickUntilUs.load(std::memory_order_relaxed)),
+                         (int)g_crossfadeActive.load(std::memory_order_relaxed));
+                }
                 if (_u3 < g_xfadeClickUntilUs.load(std::memory_order_relaxed)) {
 
 
@@ -18024,10 +18135,14 @@ public:
                         int sl = g_seamLeft.load(std::memory_order_relaxed);
                         if (sl > 0) {
                             const int nf = (sl < numFrames) ? sl : numFrames;
-                            const int done = SEAM_FRAMES - sl;   // 已完成帧数
+                            const int done = g_seamTotal.load(std::memory_order_relaxed) - sl;   // 已完成帧数
+                            // 【诊断】接缝平滑的插值起点：为 0 说明 g_xfadeLast 没被更新到
+                            LOGI("SEAM-SMOOTH sl=%d nf=%d from=%.6f,%.6f updCount=%lld",
+                                 sl, nf, (double)g_xfadeLast[0], (double)g_xfadeLast[1],
+                                 (long long)g_xfadeLastUpdCount.load(std::memory_order_relaxed));
                             for (int f = 0; f < nf; f++) {
-                                // t: 0 → 1，越靠后越接近真实内容
-                                const float t = (float)(done + f + 1) / (float)SEAM_FRAMES;
+                                // t: 0 → 1，越靠后越接近真实内容（分母用总窗口 g_seamTotal，支持加宽）
+                                const float t = (float)(done + f + 1) / (float)g_seamTotal.load(std::memory_order_relaxed);
                                 for (int c = 0; c < channels; c++) {
                                     const size_t ix = (size_t)f * (size_t)channels + (size_t)c;
                                     const float from = (c < 2) ? g_xfadeLast[c] : g_xfadeLast[0];
@@ -18167,6 +18282,7 @@ public:
                 for (int c = 0; c < _cN; c++) {
                     g_xfadeLast[c] = output[(size_t)(totalSamples - channels) + (size_t)c];
                 }
+                g_xfadeLastUpdCount.fetch_add(1, std::memory_order_relaxed);
             }
 
 
@@ -19639,7 +19755,7 @@ public:
 
 
 
-        if (!g_directPassthrough.load() && dspHasActiveEffects()) {   // [V8.514] 细粒度 hasActiveEffects 短路
+        if (g_engineDspEnabled.load() && !g_directPassthrough.load() && dspHasActiveEffects()) {   // [V8.514] 细粒度 hasActiveEffects 短路 + 【V9.01】引擎 DSP 主开关
 
 
 
@@ -19784,7 +19900,7 @@ public:
 
 
 
-                if (g_autoEqEnabled.load()) {
+                if (g_autoEqEnabled.load() && g_autoEqSubEnabled.load()) {
 
 
 
@@ -19825,6 +19941,61 @@ public:
 
 
                     sL = g_autoEqBand10L.process(sL);
+                    sL = g_autoEqBand11L.process(sL);
+                    sL = g_autoEqBand12L.process(sL);
+                    sL = g_autoEqBand13L.process(sL);
+                    sL = g_autoEqBand14L.process(sL);
+                    sL = g_autoEqBand15L.process(sL);
+                    sL = g_autoEqBand16L.process(sL);
+                    sL = g_autoEqBand17L.process(sL);
+                    sL = g_autoEqBand18L.process(sL);
+                    sL = g_autoEqBand19L.process(sL);
+                    sL = g_autoEqBand20L.process(sL);
+                    sL = g_autoEqBand21L.process(sL);
+                    sL = g_autoEqBand22L.process(sL);
+                    sL = g_autoEqBand23L.process(sL);
+                    sL = g_autoEqBand24L.process(sL);
+                    sL = g_autoEqBand25L.process(sL);
+                    sL = g_autoEqBand26L.process(sL);
+                    sL = g_autoEqBand27L.process(sL);
+                    sL = g_autoEqBand28L.process(sL);
+                    sL = g_autoEqBand29L.process(sL);
+                    sL = g_autoEqBand30L.process(sL);
+                    sL = g_autoEqBand31L.process(sL);
+                    sL = g_autoEqBand32L.process(sL);
+                    sL = g_autoEqBand33L.process(sL);
+                    sL = g_autoEqBand34L.process(sL);
+                    sL = g_autoEqBand35L.process(sL);
+                    sL = g_autoEqBand36L.process(sL);
+                    sL = g_autoEqBand37L.process(sL);
+                    sL = g_autoEqBand38L.process(sL);
+                    sL = g_autoEqBand39L.process(sL);
+                    sL = g_autoEqBand40L.process(sL);
+                    sL = g_autoEqBand41L.process(sL);
+                    sL = g_autoEqBand42L.process(sL);
+                    sL = g_autoEqBand43L.process(sL);
+                    sL = g_autoEqBand44L.process(sL);
+                    sL = g_autoEqBand45L.process(sL);
+                    sL = g_autoEqBand46L.process(sL);
+                    sL = g_autoEqBand47L.process(sL);
+                    sL = g_autoEqBand48L.process(sL);
+                    sL = g_autoEqBand49L.process(sL);
+                    sL = g_autoEqBand50L.process(sL);
+                    sL = g_autoEqBand51L.process(sL);
+                    sL = g_autoEqBand52L.process(sL);
+                    sL = g_autoEqBand53L.process(sL);
+                    sL = g_autoEqBand54L.process(sL);
+                    sL = g_autoEqBand55L.process(sL);
+                    sL = g_autoEqBand56L.process(sL);
+                    sL = g_autoEqBand57L.process(sL);
+                    sL = g_autoEqBand58L.process(sL);
+                    sL = g_autoEqBand59L.process(sL);
+                    sL = g_autoEqBand60L.process(sL);
+                    sL = g_autoEqBand61L.process(sL);
+                    sL = g_autoEqBand62L.process(sL);
+                    sL = g_autoEqBand63L.process(sL);
+                    sL = g_autoEqBand64L.process(sL);
+
 
 
 
@@ -19832,7 +20003,7 @@ public:
 
 
 
-                if (g_mseb10Enabled.load()) {
+                if (g_mseb10Enabled.load() && g_msebSubEnabled.load()) {
 
 
 
@@ -19876,7 +20047,7 @@ public:
 
 
 
-                } else if (!g_autoEqEnabled.load()) {
+                } else if (!g_autoEqEnabled.load() || !g_autoEqSubEnabled.load()) {
 
 
 
@@ -19976,7 +20147,7 @@ public:
 
 
 
-                    if (g_autoEqEnabled.load()) {
+                    if (g_autoEqEnabled.load() && g_autoEqSubEnabled.load()) {
 
 
 
@@ -20017,6 +20188,61 @@ public:
 
 
                         sR = g_autoEqBand10R.process(sR);
+                        sR = g_autoEqBand11R.process(sR);
+                        sR = g_autoEqBand12R.process(sR);
+                        sR = g_autoEqBand13R.process(sR);
+                        sR = g_autoEqBand14R.process(sR);
+                        sR = g_autoEqBand15R.process(sR);
+                        sR = g_autoEqBand16R.process(sR);
+                        sR = g_autoEqBand17R.process(sR);
+                        sR = g_autoEqBand18R.process(sR);
+                        sR = g_autoEqBand19R.process(sR);
+                        sR = g_autoEqBand20R.process(sR);
+                        sR = g_autoEqBand21R.process(sR);
+                        sR = g_autoEqBand22R.process(sR);
+                        sR = g_autoEqBand23R.process(sR);
+                        sR = g_autoEqBand24R.process(sR);
+                        sR = g_autoEqBand25R.process(sR);
+                        sR = g_autoEqBand26R.process(sR);
+                        sR = g_autoEqBand27R.process(sR);
+                        sR = g_autoEqBand28R.process(sR);
+                        sR = g_autoEqBand29R.process(sR);
+                        sR = g_autoEqBand30R.process(sR);
+                        sR = g_autoEqBand31R.process(sR);
+                        sR = g_autoEqBand32R.process(sR);
+                        sR = g_autoEqBand33R.process(sR);
+                        sR = g_autoEqBand34R.process(sR);
+                        sR = g_autoEqBand35R.process(sR);
+                        sR = g_autoEqBand36R.process(sR);
+                        sR = g_autoEqBand37R.process(sR);
+                        sR = g_autoEqBand38R.process(sR);
+                        sR = g_autoEqBand39R.process(sR);
+                        sR = g_autoEqBand40R.process(sR);
+                        sR = g_autoEqBand41R.process(sR);
+                        sR = g_autoEqBand42R.process(sR);
+                        sR = g_autoEqBand43R.process(sR);
+                        sR = g_autoEqBand44R.process(sR);
+                        sR = g_autoEqBand45R.process(sR);
+                        sR = g_autoEqBand46R.process(sR);
+                        sR = g_autoEqBand47R.process(sR);
+                        sR = g_autoEqBand48R.process(sR);
+                        sR = g_autoEqBand49R.process(sR);
+                        sR = g_autoEqBand50R.process(sR);
+                        sR = g_autoEqBand51R.process(sR);
+                        sR = g_autoEqBand52R.process(sR);
+                        sR = g_autoEqBand53R.process(sR);
+                        sR = g_autoEqBand54R.process(sR);
+                        sR = g_autoEqBand55R.process(sR);
+                        sR = g_autoEqBand56R.process(sR);
+                        sR = g_autoEqBand57R.process(sR);
+                        sR = g_autoEqBand58R.process(sR);
+                        sR = g_autoEqBand59R.process(sR);
+                        sR = g_autoEqBand60R.process(sR);
+                        sR = g_autoEqBand61R.process(sR);
+                        sR = g_autoEqBand62R.process(sR);
+                        sR = g_autoEqBand63R.process(sR);
+                        sR = g_autoEqBand64R.process(sR);
+
 
 
 
@@ -20024,7 +20250,7 @@ public:
 
 
 
-                    if (g_mseb10Enabled.load()) {
+                    if (g_mseb10Enabled.load() && g_msebSubEnabled.load()) {
 
 
 
@@ -20068,7 +20294,7 @@ public:
 
 
 
-                    } else if (!g_autoEqEnabled.load()) {
+                    } else if (!g_autoEqEnabled.load() || !g_autoEqSubEnabled.load()) {
 
 
 
@@ -20248,7 +20474,10 @@ public:
 
 
 
-                if (g_msEnabled.load() && stereo) {
+                // 【V9.16】解耦：DTS 虚拟环绕不再依赖 M/S 宽度开关(g_msEnabled)。
+                // 仅开启环绕/高度(surround/height)且 DTS 总开关打开时即可生效，无需动宽度/成像滑块。
+                // g_msEnabled 为假时 M/S 宽度恒为 1.0(中性)，不会污染声场。
+                if (((g_msEnabled.load() || g_dtsSubEnabled.load()) || g_hrtfProbeEnabled.load(std::memory_order_relaxed) || g_hrtfSpatialEnabled.load(std::memory_order_relaxed)) && stereo) {
 
 
 
@@ -20320,7 +20549,7 @@ public:
 
 
 
-                    g_dtsCfg.widthHigh = powf(w, 1.35f);
+                    g_dtsCfg.widthHigh = powf(w, 1.50f);   // 【V9.13】高频宽度更猛一点（空气感）
 
 
 
@@ -20356,7 +20585,15 @@ public:
 
 
 
-                    g_dts.process(mid, side, g_dtsCfg, outL, outR);
+                    if (g_hrtfSpatialEnabled.load(std::memory_order_relaxed)) {
+                        // 【真·双耳环绕】多虚拟音箱 HRIR upmix，替换 DTS
+                        g_hrtfSurround.process(sL, sR, outL, outR);
+                    } else if (g_hrtfProbeEnabled.load(std::memory_order_relaxed)) {
+                        // 隔离探针：真·HRIR 卷积（5 点自动轮播），不走 DTS
+                        g_hrtfProbe.process(sL, sR, outL, outR);
+                    } else {
+                        g_dts.process(mid, side, g_dtsCfg, outL, outR);
+                    }
 
 
 
@@ -22526,6 +22763,8 @@ static bool reopenOutputStream(int newRate) {
 
 
         g_dts.setSampleRate((float)actualRate);
+        g_hrtfProbe.setSampleRate((float)actualRate);
+        g_hrtfSurround.setSampleRate((float)actualRate);
 
 
 
@@ -26980,6 +27219,8 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
 
 
         g_dts.setSampleRate((float)sr);
+        g_hrtfProbe.setSampleRate((float)sr);
+    g_hrtfSurround.setSampleRate((float)sr);
 
 
 
@@ -28643,6 +28884,8 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thi
 
 
         g_dts.setSampleRate((float)sr);
+        g_hrtfProbe.setSampleRate((float)sr);
+    g_hrtfSurround.setSampleRate((float)sr);
 
 
 
@@ -28881,6 +29124,15 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativePlay(JNIEnv *env, jobject thiz)
     // pause（蓝牙断连时系统就是走这条）**不清** —— 否则恢复路径的前置条件又没了。
 
 
+
+    // 【V8.52x 去咔·硬切补齐】硬切 stop 时置位的标志：此处（新轨真正开播）re-arm 接缝，
+    // 把新轨首样本从静音/旧样本在 SEAM_FRAMES(≈21ms@48k) 内线性淡入，消除"B 进场那一下哒"。
+    // exchange(false) 保证只生效一次；首播/暂停恢复路径此标志恒为 false，不引入多余淡入。
+    if (g_seamArmOnNewTrack.exchange(false, std::memory_order_relaxed)) {
+        g_seamLeft.store(SEAM_FRAMES, std::memory_order_relaxed);
+                    g_seamTotal.store(SEAM_FRAMES, std::memory_order_relaxed);
+        LOGI("de-click re-armed (new-track start, hard-cut path) seam=%d", (int)SEAM_FRAMES);
+    }
 
     g_playSessionLatched.store(true);
 
@@ -29444,6 +29696,22 @@ static void stopInternal(bool keepStream) {
     // 触发时 delta≈0，同样无害。
     if (keepStream) {
         g_declickArmPending = true;
+        // 【V8.52x 去咔·硬切补齐】硬切路径原本只上膛 g_declickArmPending，但那套包络在音频回调里取的
+        // 参考样本已是新轨数据（stop 跑在非音频线程、无法在切换瞬间采到旧轨末样本），delta≈0 形同空转，
+        // 旧轨末样本↔新轨首样本的阶跃没被抹平 → 正是 A 退出 / B 进入「哒」一声的根。
+        // 改挂真正生效的 SEAM-SMOOTH：from=g_xfadeLast（上一回调末样本，音频线程每回调更新，基准正确），
+        // 这里上膛 g_seamLeft 并打开点击窗口，新轨首回调把旧→新阶跃在 SEAM_FRAMES(~21ms@48k) 内摊平。
+        // 无阶跃时插值零阶跃=零副作用；与交叉淡化路径共用同一机制，行为一致。
+        g_seamLeft.store(SEAM_FRAMES, std::memory_order_relaxed);
+                    g_seamTotal.store(SEAM_FRAMES, std::memory_order_relaxed);
+        // 【V8.52x】硬切 stop 已上膛旧轨尾→静音的接缝；新轨 nativePlay 时再 re-arm 一道，
+        // 把新轨响亮首拍（seek 点=首拍能量最大）从静音/旧样本在 SEAM_FRAMES 内淡入，消除"B 进场哒"。
+        g_seamArmOnNewTrack.store(true, std::memory_order_relaxed);
+        {
+            struct timespec _ts; clock_gettime(CLOCK_MONOTONIC, &_ts);
+            int64_t _now = (int64_t)_ts.tv_sec * 1000000LL + (int64_t)_ts.tv_nsec / 1000LL;
+            g_xfadeClickUntilUs.store(_now + 1200000LL, std::memory_order_relaxed);  // 硬切窗口 ~1.2s
+        }
         // 便于真机确认这条路径真的上膛了（历史上硬切 click 修过一次没生效，查不出原因）
         LOGI("de-click armed (hard-cut path, remain=%d frames)", g_declickRemain);
     }
@@ -35218,6 +35486,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, job
     // 把边界阶跃摊到 SEAM_FRAMES(256≈5.8ms) 帧内，低于人耳对"咔哒"的分辨阈值且不改音频内容。
     // 无切源（普通淡入）时插值的是零阶跃 → 零副作用；有切源时把硬咔哒摊平。低风险。
     g_seamLeft.store(SEAM_FRAMES, std::memory_order_relaxed);
+                    g_seamTotal.store(SEAM_FRAMES, std::memory_order_relaxed);
 
 
 
@@ -36768,6 +37037,61 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDspEnabled(JNIEnv *env, jobj
 
 
         g_autoEqBand10L.reset(); g_autoEqBand10R.reset();
+        g_autoEqBand11L.reset(); g_autoEqBand11R.reset();
+        g_autoEqBand12L.reset(); g_autoEqBand12R.reset();
+        g_autoEqBand13L.reset(); g_autoEqBand13R.reset();
+        g_autoEqBand14L.reset(); g_autoEqBand14R.reset();
+        g_autoEqBand15L.reset(); g_autoEqBand15R.reset();
+        g_autoEqBand16L.reset(); g_autoEqBand16R.reset();
+        g_autoEqBand17L.reset(); g_autoEqBand17R.reset();
+        g_autoEqBand18L.reset(); g_autoEqBand18R.reset();
+        g_autoEqBand19L.reset(); g_autoEqBand19R.reset();
+        g_autoEqBand20L.reset(); g_autoEqBand20R.reset();
+        g_autoEqBand21L.reset(); g_autoEqBand21R.reset();
+        g_autoEqBand22L.reset(); g_autoEqBand22R.reset();
+        g_autoEqBand23L.reset(); g_autoEqBand23R.reset();
+        g_autoEqBand24L.reset(); g_autoEqBand24R.reset();
+        g_autoEqBand25L.reset(); g_autoEqBand25R.reset();
+        g_autoEqBand26L.reset(); g_autoEqBand26R.reset();
+        g_autoEqBand27L.reset(); g_autoEqBand27R.reset();
+        g_autoEqBand28L.reset(); g_autoEqBand28R.reset();
+        g_autoEqBand29L.reset(); g_autoEqBand29R.reset();
+        g_autoEqBand30L.reset(); g_autoEqBand30R.reset();
+        g_autoEqBand31L.reset(); g_autoEqBand31R.reset();
+        g_autoEqBand32L.reset(); g_autoEqBand32R.reset();
+        g_autoEqBand33L.reset(); g_autoEqBand33R.reset();
+        g_autoEqBand34L.reset(); g_autoEqBand34R.reset();
+        g_autoEqBand35L.reset(); g_autoEqBand35R.reset();
+        g_autoEqBand36L.reset(); g_autoEqBand36R.reset();
+        g_autoEqBand37L.reset(); g_autoEqBand37R.reset();
+        g_autoEqBand38L.reset(); g_autoEqBand38R.reset();
+        g_autoEqBand39L.reset(); g_autoEqBand39R.reset();
+        g_autoEqBand40L.reset(); g_autoEqBand40R.reset();
+        g_autoEqBand41L.reset(); g_autoEqBand41R.reset();
+        g_autoEqBand42L.reset(); g_autoEqBand42R.reset();
+        g_autoEqBand43L.reset(); g_autoEqBand43R.reset();
+        g_autoEqBand44L.reset(); g_autoEqBand44R.reset();
+        g_autoEqBand45L.reset(); g_autoEqBand45R.reset();
+        g_autoEqBand46L.reset(); g_autoEqBand46R.reset();
+        g_autoEqBand47L.reset(); g_autoEqBand47R.reset();
+        g_autoEqBand48L.reset(); g_autoEqBand48R.reset();
+        g_autoEqBand49L.reset(); g_autoEqBand49R.reset();
+        g_autoEqBand50L.reset(); g_autoEqBand50R.reset();
+        g_autoEqBand51L.reset(); g_autoEqBand51R.reset();
+        g_autoEqBand52L.reset(); g_autoEqBand52R.reset();
+        g_autoEqBand53L.reset(); g_autoEqBand53R.reset();
+        g_autoEqBand54L.reset(); g_autoEqBand54R.reset();
+        g_autoEqBand55L.reset(); g_autoEqBand55R.reset();
+        g_autoEqBand56L.reset(); g_autoEqBand56R.reset();
+        g_autoEqBand57L.reset(); g_autoEqBand57R.reset();
+        g_autoEqBand58L.reset(); g_autoEqBand58R.reset();
+        g_autoEqBand59L.reset(); g_autoEqBand59R.reset();
+        g_autoEqBand60L.reset(); g_autoEqBand60R.reset();
+        g_autoEqBand61L.reset(); g_autoEqBand61R.reset();
+        g_autoEqBand62L.reset(); g_autoEqBand62R.reset();
+        g_autoEqBand63L.reset(); g_autoEqBand63R.reset();
+        g_autoEqBand64L.reset(); g_autoEqBand64R.reset();
+
 
 
 
@@ -39169,11 +39493,11 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDtsStage(JNIEnv *env, jobjec
 
 
 
-    float su = surround * 0.08f;
+    float su = surround * 0.10f;   // 【V9.13】更激进：斜率 0.08→0.10
 
 
 
-    float ht = height * 0.10f;
+    float ht = height * 0.12f;     // 【V9.13】更激进：斜率 0.10→0.12
 
 
 
@@ -39181,7 +39505,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDtsStage(JNIEnv *env, jobjec
 
 
 
-    if (su > 0.8f) su = 0.8f;
+    if (su > 1.0f) su = 1.0f;     // 【V9.13】上限放宽到 1.0，给更猛的包裹感留余量
 
 
 
@@ -39757,30 +40081,56 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEq10Band(JNIEnv *env, jo
 
 
 
-    struct { BiquadFilter* L; BiquadFilter* R; } bands[10] = {
-
-
-
+    struct { BiquadFilter* L; BiquadFilter* R; } bands[64] = {
         {&g_eqBand1L, &g_eqBand1R}, {&g_eqBand2L, &g_eqBand2R},
-
-
-
         {&g_eqBand3L, &g_eqBand3R}, {&g_eqBand4L, &g_eqBand4R},
-
-
-
         {&g_eqBand5L, &g_eqBand5R}, {&g_autoEqBand6L, &g_autoEqBand6R},
-
-
-
         {&g_autoEqBand7L, &g_autoEqBand7R}, {&g_autoEqBand8L, &g_autoEqBand8R},
-
-
-
-        {&g_autoEqBand9L, &g_autoEqBand9R}, {&g_autoEqBand10L, &g_autoEqBand10R}
-
-
-
+        {&g_autoEqBand9L, &g_autoEqBand9R}, {&g_autoEqBand10L, &g_autoEqBand10R},
+        {&g_autoEqBand11L, &g_autoEqBand11R}, {&g_autoEqBand12L, &g_autoEqBand12R},
+        {&g_autoEqBand13L, &g_autoEqBand13R}, {&g_autoEqBand14L, &g_autoEqBand14R},
+        {&g_autoEqBand15L, &g_autoEqBand15R}, {&g_autoEqBand16L, &g_autoEqBand16R},
+        {&g_autoEqBand17L, &g_autoEqBand17R}, {&g_autoEqBand18L, &g_autoEqBand18R},
+        {&g_autoEqBand19L, &g_autoEqBand19R}, {&g_autoEqBand20L, &g_autoEqBand20R},
+        {&g_autoEqBand21L, &g_autoEqBand21R}, {&g_autoEqBand22L, &g_autoEqBand22R},
+        {&g_autoEqBand23L, &g_autoEqBand23R}, {&g_autoEqBand24L, &g_autoEqBand24R},
+        {&g_autoEqBand25L, &g_autoEqBand25R}, {&g_autoEqBand26L, &g_autoEqBand26R},
+        {&g_autoEqBand27L, &g_autoEqBand27R}, {&g_autoEqBand28L, &g_autoEqBand28R},
+        {&g_autoEqBand29L, &g_autoEqBand29R}, {&g_autoEqBand30L, &g_autoEqBand30R},
+        {&g_autoEqBand31L, &g_autoEqBand31R},
+        {&g_autoEqBand32L, &g_autoEqBand32R},
+        {&g_autoEqBand33L, &g_autoEqBand33R},
+        {&g_autoEqBand34L, &g_autoEqBand34R},
+        {&g_autoEqBand35L, &g_autoEqBand35R},
+        {&g_autoEqBand36L, &g_autoEqBand36R},
+        {&g_autoEqBand37L, &g_autoEqBand37R},
+        {&g_autoEqBand38L, &g_autoEqBand38R},
+        {&g_autoEqBand39L, &g_autoEqBand39R},
+        {&g_autoEqBand40L, &g_autoEqBand40R},
+        {&g_autoEqBand41L, &g_autoEqBand41R},
+        {&g_autoEqBand42L, &g_autoEqBand42R},
+        {&g_autoEqBand43L, &g_autoEqBand43R},
+        {&g_autoEqBand44L, &g_autoEqBand44R},
+        {&g_autoEqBand45L, &g_autoEqBand45R},
+        {&g_autoEqBand46L, &g_autoEqBand46R},
+        {&g_autoEqBand47L, &g_autoEqBand47R},
+        {&g_autoEqBand48L, &g_autoEqBand48R},
+        {&g_autoEqBand49L, &g_autoEqBand49R},
+        {&g_autoEqBand50L, &g_autoEqBand50R},
+        {&g_autoEqBand51L, &g_autoEqBand51R},
+        {&g_autoEqBand52L, &g_autoEqBand52R},
+        {&g_autoEqBand53L, &g_autoEqBand53R},
+        {&g_autoEqBand54L, &g_autoEqBand54R},
+        {&g_autoEqBand55L, &g_autoEqBand55R},
+        {&g_autoEqBand56L, &g_autoEqBand56R},
+        {&g_autoEqBand57L, &g_autoEqBand57R},
+        {&g_autoEqBand58L, &g_autoEqBand58R},
+        {&g_autoEqBand59L, &g_autoEqBand59R},
+        {&g_autoEqBand60L, &g_autoEqBand60R},
+        {&g_autoEqBand61L, &g_autoEqBand61R},
+        {&g_autoEqBand62L, &g_autoEqBand62R},
+        {&g_autoEqBand63L, &g_autoEqBand63R},
+        {&g_autoEqBand64L, &g_autoEqBand64R},
     };
 
 
@@ -39813,7 +40163,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEq10Band(JNIEnv *env, jo
 
 
 
-    for (int i = 0; i < 10 && i < bandCount; i++) {
+    for (int i = 0; i < 64 && i < bandCount; i++) {
 
 
 
@@ -39989,39 +40339,65 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeResetAutoEq(JNIEnv *env, jobjec
 
 
 
-    // 重置全部 10 段：前 5 段复用 g_eqBand1-5，后 5 段 g_autoEqBand6-10
+    // 重置全部 64 段：前 5 段复用 g_eqBand1-5，后 5 段 g_autoEqBand6-10
 
 
 
-    struct { BiquadFilter* L; BiquadFilter* R; } bands[10] = {
-
-
-
+    struct { BiquadFilter* L; BiquadFilter* R; } bands[64] = {
         {&g_eqBand1L, &g_eqBand1R}, {&g_eqBand2L, &g_eqBand2R},
-
-
-
         {&g_eqBand3L, &g_eqBand3R}, {&g_eqBand4L, &g_eqBand4R},
-
-
-
         {&g_eqBand5L, &g_eqBand5R}, {&g_autoEqBand6L, &g_autoEqBand6R},
-
-
-
         {&g_autoEqBand7L, &g_autoEqBand7R}, {&g_autoEqBand8L, &g_autoEqBand8R},
-
-
-
-        {&g_autoEqBand9L, &g_autoEqBand9R}, {&g_autoEqBand10L, &g_autoEqBand10R}
-
-
-
+        {&g_autoEqBand9L, &g_autoEqBand9R}, {&g_autoEqBand10L, &g_autoEqBand10R},
+        {&g_autoEqBand11L, &g_autoEqBand11R}, {&g_autoEqBand12L, &g_autoEqBand12R},
+        {&g_autoEqBand13L, &g_autoEqBand13R}, {&g_autoEqBand14L, &g_autoEqBand14R},
+        {&g_autoEqBand15L, &g_autoEqBand15R}, {&g_autoEqBand16L, &g_autoEqBand16R},
+        {&g_autoEqBand17L, &g_autoEqBand17R}, {&g_autoEqBand18L, &g_autoEqBand18R},
+        {&g_autoEqBand19L, &g_autoEqBand19R}, {&g_autoEqBand20L, &g_autoEqBand20R},
+        {&g_autoEqBand21L, &g_autoEqBand21R}, {&g_autoEqBand22L, &g_autoEqBand22R},
+        {&g_autoEqBand23L, &g_autoEqBand23R}, {&g_autoEqBand24L, &g_autoEqBand24R},
+        {&g_autoEqBand25L, &g_autoEqBand25R}, {&g_autoEqBand26L, &g_autoEqBand26R},
+        {&g_autoEqBand27L, &g_autoEqBand27R}, {&g_autoEqBand28L, &g_autoEqBand28R},
+        {&g_autoEqBand29L, &g_autoEqBand29R}, {&g_autoEqBand30L, &g_autoEqBand30R},
+        {&g_autoEqBand31L, &g_autoEqBand31R},
+        {&g_autoEqBand32L, &g_autoEqBand32R},
+        {&g_autoEqBand33L, &g_autoEqBand33R},
+        {&g_autoEqBand34L, &g_autoEqBand34R},
+        {&g_autoEqBand35L, &g_autoEqBand35R},
+        {&g_autoEqBand36L, &g_autoEqBand36R},
+        {&g_autoEqBand37L, &g_autoEqBand37R},
+        {&g_autoEqBand38L, &g_autoEqBand38R},
+        {&g_autoEqBand39L, &g_autoEqBand39R},
+        {&g_autoEqBand40L, &g_autoEqBand40R},
+        {&g_autoEqBand41L, &g_autoEqBand41R},
+        {&g_autoEqBand42L, &g_autoEqBand42R},
+        {&g_autoEqBand43L, &g_autoEqBand43R},
+        {&g_autoEqBand44L, &g_autoEqBand44R},
+        {&g_autoEqBand45L, &g_autoEqBand45R},
+        {&g_autoEqBand46L, &g_autoEqBand46R},
+        {&g_autoEqBand47L, &g_autoEqBand47R},
+        {&g_autoEqBand48L, &g_autoEqBand48R},
+        {&g_autoEqBand49L, &g_autoEqBand49R},
+        {&g_autoEqBand50L, &g_autoEqBand50R},
+        {&g_autoEqBand51L, &g_autoEqBand51R},
+        {&g_autoEqBand52L, &g_autoEqBand52R},
+        {&g_autoEqBand53L, &g_autoEqBand53R},
+        {&g_autoEqBand54L, &g_autoEqBand54R},
+        {&g_autoEqBand55L, &g_autoEqBand55R},
+        {&g_autoEqBand56L, &g_autoEqBand56R},
+        {&g_autoEqBand57L, &g_autoEqBand57R},
+        {&g_autoEqBand58L, &g_autoEqBand58R},
+        {&g_autoEqBand59L, &g_autoEqBand59R},
+        {&g_autoEqBand60L, &g_autoEqBand60R},
+        {&g_autoEqBand61L, &g_autoEqBand61R},
+        {&g_autoEqBand62L, &g_autoEqBand62R},
+        {&g_autoEqBand63L, &g_autoEqBand63R},
+        {&g_autoEqBand64L, &g_autoEqBand64R},
     };
 
 
 
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 64; i++) {
 
 
 
@@ -40241,6 +40617,72 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDirectPassthrough(JNIEnv *en
 
 
 
+}
+
+// 【V9.01】引擎 DSP 主开关（DAC 模块"启用引擎 DSP"）。false = 创意 DSP 整链旁路，仅保留音量/DJ混音/硬钳。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetEngineDspEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_engineDspEnabled.store(enabled != 0);
+    LOGI("EngineDspEnabled %s", enabled ? "ON (creative DSP active)" : "OFF (bit-perfect passthrough)");
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeIsEngineDspEnabled(JNIEnv *env, jobject thiz) {
+    return g_engineDspEnabled.load();
+}
+
+// 【V9.01】DTS 环绕独立开关（DAC 模块子开关）。只翻转 g_dtsSubEnabled（与 g_msEnabled 正交），
+// 曲线载入（nativeSetMsStage）只动 g_msEnabled，二者 AND 门实现"子开关强制覆盖"。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDtsEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_dtsSubEnabled.store(enabled != 0, std::memory_order_relaxed);
+    LOGI("DtsEnabled %s", enabled ? "ON" : "OFF");
+}
+
+// 【第2步·隔离探针】HRIR 卷积真双耳渲染 使能开关（独立通路，与 DTS 互斥）。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfProbeEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_hrtfProbeEnabled.store(enabled != 0, std::memory_order_relaxed);
+    g_hrtfProbe.reset();
+    LOGI("HrtfProbe %s (auto-cycle 5 dirs)", enabled ? "ON" : "OFF");
+}
+
+// 锁定方向：0=前 1=后 2=左 3=右 4=上；-1=自动轮播。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfProbeDir(JNIEnv *env, jobject thiz, jint dir) {
+    g_hrtfProbe.setDirection((int)dir);
+    LOGI("HrtfProbe dir=%d", (int)dir);
+}
+
+// 【真·双耳环绕】HRIR 多虚拟音箱 upmix 总开关（替换 DTS 头戴环绕）。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfSpatialEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_hrtfSpatialEnabled.store(enabled != 0, std::memory_order_relaxed);
+    g_hrtfSurround.reset();
+    LOGI("HrtfSpatial %s (multi-speaker HRIR upmix, replaces DTS)", enabled ? "ON" : "OFF");
+}
+
+// 声场朝向：yaw=水平旋转(±180°)、pitch=俯仰(±90°)。拖动手柄据此旋转整圈虚拟音箱。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfFieldOrientation(JNIEnv *env, jobject thiz, jfloat yaw, jfloat pitch) {
+    g_hrtfSurround.setFieldOrientation(yaw, pitch);
+    LOGI("HrtfFieldOrientation yaw=%.1f pitch=%.1f", yaw, pitch);
+}
+
+// 【V9.01】AutoEQ 独立开关（DAC 模块子开关）。只翻转 g_autoEqSubEnabled（与 g_autoEqEnabled 正交）。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEqEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_autoEqSubEnabled.store(enabled != 0, std::memory_order_relaxed);
+    LOGI("AutoEqEnabled %s", enabled ? "ON" : "OFF");
+}
+
+// 【V9.01】MSEB 独立开关（DAC 模块子开关）。只翻转 g_msebSubEnabled（与 g_mseb10Enabled 正交）。
+// 曲线载入（nativeSetMseb10Band）只动 g_mseb10Enabled，本开关作为上层手动总闸，
+// 与曲线内容标志 AND 门实现"子开关 ON 才生效、OFF 即使有曲线也强制静默"。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMsebEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_msebSubEnabled.store(enabled != 0, std::memory_order_relaxed);
+    LOGI("MsebEnabled %s", enabled ? "ON" : "OFF");
 }
 
 

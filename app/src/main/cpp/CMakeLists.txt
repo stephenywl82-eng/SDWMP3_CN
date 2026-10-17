@@ -9,6 +9,8 @@ set_target_properties(oboe PROPERTIES
 
 add_library(oboe_bridge SHARED
     oboe_bridge.cpp
+    hrtf_probe.cpp
+    hrtf_surround.cpp
     usb_audio_driver.cpp
     usb_audio_jni.cpp
     flac_decoder_jni.cpp
@@ -62,6 +64,19 @@ target_compile_definitions(rubberband PRIVATE USE_PTHREADS HAVE_KISSFFT kiss_fft
 target_compile_options(rubberband PRIVATE -O2 -fexceptions -frtti)
 # RB 内部需要 RTTI/异常；上游用 std::thread（无 pthread 依赖）
 set_target_properties(rubberband PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+
+# 【V9.02 修复】USB DAC 重启崩溃根因（tombstone_08: nativeUsbStart -> std::terminate -> SIGABRT）。
+# UsbAudioDriver::start() 内 std::thread 构造在 24bit alt 切换的重启路径上抛出 std::system_error，
+# 而 nativeUsbStart 这个 extern "C" JNI 入口没有 try/catch，异常冒泡出原生边界进入 ART 的 C
+# 调用帧触发 std::terminate()。build_so_v8118.ps1 当前已默认开启异常（早期 -fno-exceptions
+# 已移除），故真正修复在 usb_audio_jni.cpp / usb_audio_driver.cpp 的 try/catch 兜底。
+# 此处 per-file 再显式打开异常与 RTTI，作为防御：即便将来全局脚本回退到 -fno-exceptions，
+# 这两个会起线程 / 做 JNI 入口的文件仍能正常抛捕而不致整进程崩溃。
+set_source_files_properties(
+    usb_audio_driver.cpp
+    usb_audio_jni.cpp
+    PROPERTIES COMPILE_FLAGS "-fexceptions -frtti"
+)
 
 # ALAC decoder uses multi-char constants ('alac', 'frma') — silence the warning
 set_source_files_properties(

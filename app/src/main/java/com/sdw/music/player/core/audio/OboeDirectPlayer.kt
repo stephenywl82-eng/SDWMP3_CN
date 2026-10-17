@@ -1,6 +1,8 @@
 package com.sdw.music.player
 
 import android.content.Context
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.util.Log
 
 /**
@@ -224,6 +226,18 @@ class OboeDirectPlayer(private val context: Context) {
     private external fun nativeSetDiagVerbose(on: Boolean)
     // [V8.119] 原声直通：整条 DSP（EQ/限幅/softClip/dither...）全部旁路，原始 PCM 直出
     private external fun nativeSetDirectPassthrough(enabled: Boolean)
+    // 【V9.01】引擎 DSP 主开关（DAC 模块"启用引擎 DSP"）：false = 创意 DSP 整链旁路（bit-perfect 直通）
+    private external fun nativeSetEngineDspEnabled(enabled: Boolean)
+    private external fun nativeIsEngineDspEnabled(): Boolean
+    // 【V9.01】DAC 模块子开关：MSEB / AutoEQ / DTS 环绕 各自独立的使能翻转
+    private external fun nativeSetMsebEnabled(enabled: Boolean)
+    private external fun nativeSetAutoEqEnabled(enabled: Boolean)
+    private external fun nativeSetDtsEnabled(enabled: Boolean)
+    // 【第2步·隔离探针】HRIR 卷积真双耳渲染（独立通路，与 DTS 互斥，默认关）
+    private external fun nativeSetHrtfProbeEnabled(enabled: Boolean)
+    private external fun nativeSetHrtfProbeDir(dir: Int)   // 0前1后2左3右4上 / -1自动
+    private external fun nativeSetHrtfSpatialEnabled(enabled: Boolean)   // 真·双耳环绕（替换 DTS）
+    private external fun nativeSetHrtfFieldOrientation(yaw: Float, pitch: Float)  // 声场朝向（拖动手柄）
     // 【V8.313】左右声道平衡：-1=全左 / 0=居中 / +1=全右，native 侧走恒功率声像曲线
     private external fun nativeSetStereoBalance(bal: Float)
     // 【V8.177】自动增益（AGC）独立开关：native 里 g_agcEnabled 默认 false，
@@ -237,11 +251,17 @@ class OboeDirectPlayer(private val context: Context) {
     private external fun nativeReopenOutputOnRouteReady()
     private external fun nativeIsDcBlockEnabled(): Boolean
     private external fun nativeGetDspChainState(): IntArray  // [V8.124] DSP 链 enable bitmask
+    // 【V9.08】蓝牙输出时由 Kotlin 侧探测并强制 Shared 模式（native 全局 g_preferSharedMode）。
+    private external fun nativeSetPreferSharedMode(prefer: Boolean)
 
     // 【V7.30】Brand Presets移植
 
     fun open(filePath: String): Boolean {
         Log.i(TAG, "Opening: $filePath")
+        // 【V9.08】开流前先按当前输出设备决定共享模式：蓝牙 → 强制 Shared，
+        // 让耳机走与普通播放器一致的 A2DP 主从拓扑（避免 Exclusive AAudio 触发 TWS
+        // 主从翻转、单边耳机掉电异常）；有线/扬声器 → 允许 Exclusive 以保留 Bit-Perfect。
+        applyBluetoothSafeSharingMode()
         // 【V8.183】切歌时把仍占着 incoming 槽的旧 B 轨一并收掉。
         // 上一轮 crossfade 被手动切歌打断时不一定走到 stopIncoming()，残留的解码线程
         // 会继续往 ringB 写 PCM 并占着 codec/extractor；下次 crossfade 一开混，
@@ -294,6 +314,25 @@ class OboeDirectPlayer(private val context: Context) {
             onError?.invoke(e.message ?: "Unknown error")
             return false
         }
+    }
+
+    /**
+     * 【V9.08】探测当前音频输出是否为蓝牙；若是则强制 Shared 共享模式，
+     * 使 TWS 耳机沿用与普通播放器一致的 A2DP 主从拓扑，避免单边掉电异常。
+     * 有线/扬声器则允许 Exclusive（Bit-Perfect）。结果记入日志便于排查。
+     */
+    fun applyBluetoothSafeSharingMode() {
+        val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        val isBt = am?.getDevices(AudioManager.GET_DEVICES_OUTPUTS)?.any { d ->
+            d.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP ||
+            d.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO ||
+            d.type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
+            d.type == AudioDeviceInfo.TYPE_BLE_SPEAKER
+        } ?: false
+        try { nativeSetPreferSharedMode(isBt) } catch (e: Throwable) {
+            Log.w(TAG, "applyBluetoothSafeSharingMode: ${e.message}")
+        }
+        Log.i(TAG, "Bluetooth-safe sharing mode: preferShared=$isBt")
     }
 
     /**
@@ -1167,6 +1206,64 @@ class OboeDirectPlayer(private val context: Context) {
     fun setDirectPassthrough(enabled: Boolean) {
         try { nativeSetDirectPassthrough(enabled) } catch (e: Throwable) {
             Log.e(TAG, "setDirectPassthrough error: ${e.message}")
+        }
+    }
+
+    // 【V9.01】引擎 DSP 主开关（DAC 模块"启用引擎 DSP"）
+    fun setEngineDspEnabled(enabled: Boolean) {
+        try { nativeSetEngineDspEnabled(enabled) } catch (e: Throwable) {
+            Log.e(TAG, "setEngineDspEnabled error: ${e.message}")
+        }
+    }
+
+    fun isEngineDspEnabled(): Boolean {
+        return try { nativeIsEngineDspEnabled() } catch (_: Throwable) { true }
+    }
+
+    // 【V9.01】DAC 模块子开关：MSEB 整链使能（翻转 g_mseb10Enabled）
+    fun setMsebEnabled(enabled: Boolean) {
+        try { nativeSetMsebEnabled(enabled) } catch (e: Throwable) {
+            Log.e(TAG, "setMsebEnabled error: ${e.message}")
+        }
+    }
+
+    // 【V9.01】DAC 模块子开关：AutoEQ 耳机修正使能（翻转 g_autoEqEnabled）
+    fun setAutoEqEnabled(enabled: Boolean) {
+        try { nativeSetAutoEqEnabled(enabled) } catch (e: Throwable) {
+            Log.e(TAG, "setAutoEqEnabled error: ${e.message}")
+        }
+    }
+
+    // 【V9.01】DAC 模块子开关：DTS 环绕（M/S 处理块）使能（翻转 g_msEnabled）
+    fun setDtsEnabled(enabled: Boolean) {
+        try { nativeSetDtsEnabled(enabled) } catch (e: Throwable) {
+            Log.e(TAG, "setDtsEnabled error: ${e.message}")
+        }
+    }
+
+    // 【第2步·隔离探针】HRIR 卷积真双耳渲染 使能（验证用，不影响现有 DTS）
+    fun setHrtfProbeEnabled(enabled: Boolean) {
+        try { nativeSetHrtfProbeEnabled(enabled) } catch (e: Throwable) {
+            Log.e(TAG, "setHrtfProbeEnabled error: ${e.message}")
+        }
+    }
+    // 锁定方向：0=前 1=后 2=左 3=右 4=上；-1=自动轮播
+    fun setHrtfProbeDir(dir: Int) {
+        try { nativeSetHrtfProbeDir(dir) } catch (e: Throwable) {
+            Log.e(TAG, "setHrtfProbeDir error: ${e.message}")
+        }
+    }
+
+    // 【真·双耳环绕】HRIR 多虚拟音箱 upmix 总开关（替换 DTS 头戴环绕）。
+    fun setHrtfSpatialEnabled(enabled: Boolean) {
+        try { nativeSetHrtfSpatialEnabled(enabled) } catch (e: Throwable) {
+            Log.e(TAG, "setHrtfSpatialEnabled error: ${e.message}")
+        }
+    }
+    // 声场朝向：yaw=水平旋转(±180°)、pitch=俯仰(±90°)。
+    fun setHrtfFieldOrientation(yaw: Float, pitch: Float) {
+        try { nativeSetHrtfFieldOrientation(yaw, pitch) } catch (e: Throwable) {
+            Log.e(TAG, "setHrtfFieldOrientation error: ${e.message}")
         }
     }
 

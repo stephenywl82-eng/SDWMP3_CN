@@ -2352,8 +2352,14 @@ private var xfadeBChorusMs = -1L
     // =====================================================================
     // 【USB DAC 独占控制器区】controller 生命周期 / dacHealthRunnable 看门狗 / usbDacCallback 热插拔 / wake lock / claim
     // =====================================================================
-    private var usbDacController: UsbDacPlaybackController? = null
+    @Volatile private var usbDacController: UsbDacPlaybackController? = null
     private var dacPlayGeneration: Int = 0  // [V4.0.1] invalidate stale onCompletion
+    // 【V9.02 续】DAC 初始化「在途合并」闸门：background 化后，快速连点 / 重复回调会在极短窗口内
+    // 触发两次完整 open()+play()+DSP 重发（双 controller 会话），既重复耗时又造成 16↔24 协商抖动爆音。
+    // dacInitInFlight 保证同一时刻只有一路 DAC 初始化在跑；dacInitPendingIndex 缓存最后连点的目标，
+    // 当前路结束后补跑（last-wins），避免双播/卡顿。
+    @Volatile private var dacInitInFlight: Boolean = false
+    @Volatile private var dacInitPendingIndex: Int = -1
     private var dacWakeLock: PowerManager.WakeLock? = null  // [V4.0.2] prevent CPU deep-sleep in Doze mode
 
     // 
@@ -2375,6 +2381,8 @@ private var xfadeBChorusMs = -1L
                 it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO
             }
             if (anyBt) refreshBtPreEmphasis()
+            // 【V9.08】蓝牙接入：强制 Shared 模式，避免 TWS 单边掉电
+            if (anyBt) oboeDirectPlayer?.applyBluetoothSafeSharingMode()
             if (oboeSuppressUsbRestart) return  // Oboe already running, don&apos;t restart
             val hasUsbDac = addedDevices.any { d ->
                 d.type == AudioDeviceInfo.TYPE_USB_HEADSET ||
@@ -2419,6 +2427,8 @@ private var xfadeBChorusMs = -1L
         if (now - lastBtRouteReopenMs >= 400L && isOboeDirectMode() && oboeDirectPlayer?.isPlaying == true) {
             lastBtRouteReopenMs = now
             Log.i(TAG, "BT removed: proactively reopening Oboe output on default route")
+            // 【V9.08】回到默认路由（有线/扬声器）→ 允许 Exclusive（Bit-Perfect）
+            oboeDirectPlayer?.applyBluetoothSafeSharingMode()
             this@MusicService.xfadeHandler.post { oboeDirectPlayer?.reopenOutputOnRouteReady() }
         }
     }
@@ -3063,17 +3073,39 @@ private var xfadeBChorusMs = -1L
             if (audioFocusListener == null) {
                 audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
                     when (focusChange) {
-                        AudioManager.AUDIOFOCUS_LOSS,
-                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                        AudioManager.AUDIOFOCUS_LOSS -> {
+                            // 【V9.09】永久丢焦（被别的 app 抢占）：Oboe 直出不响应系统焦点栈，
+                            // 若不手动停止会陷入「已释放焦点却仍在播放」的异常态。这里真正停掉 Oboe
+                            // 直出，但不 abandon（保留焦点槽位），等系统回发 GAIN 时自动恢复。
                             hasAudioFocus = false
                             val svc = instance
-                            if (svc != null && !svc.isOboeDirectMode()) {
-                                svc.pause()
-                                android.util.Log.d("MusicService", "Audio focus lost, pausing (ExoPlayer mode)")
+                            if (svc?.isOboeDirectMode() == true) {
+                                svc.oboeDirectPlayer?.let { p ->
+                                    if (p.isPlaying) {
+                                        p.pause()
+                                        svc.oboePlayWhenReady = false
+                                        // notifyPlayStateChanged 是 companion object 成员，
+                                        // 须以 MusicService. 限定调用，不能以 svc.(MusicService 实例) 调用
+                                        MusicService.notifyPlayStateChanged(false)
+                                    }
+                                }
+                                svc.wasPlayingBeforeFocusLoss = true
+                                android.util.Log.d("MusicService", "Audio focus lost (permanent), paused Oboe direct output")
                             } else {
-                                // Oboe mode: don't pause (Oboe streams bypass AudioFocus)
-                                svc?.wasPlayingBeforeFocusLoss = true
-                                android.util.Log.d("MusicService", "Audio focus lost, ignoring (Oboe mode)")
+                                svc?.pause()
+                                android.util.Log.d("MusicService", "Audio focus lost (permanent), pausing")
+                            }
+                        }
+                        AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                            // 瞬时丢焦（通知/导航播报等）：Oboe 直出不暂停，避免每次提示都卡顿；
+                            // 保持播放、不改动播放状态，等 GAIN 回发即可继续。
+                            hasAudioFocus = false
+                            val svc = instance
+                            if (svc?.isOboeDirectMode() != true) {
+                                svc?.pause()
+                                android.util.Log.d("MusicService", "Audio focus lost (transient), pausing")
+                            } else {
+                                android.util.Log.d("MusicService", "Audio focus lost (transient), keeping Oboe playback")
                             }
                         }
                         AudioManager.AUDIOFOCUS_GAIN -> {
@@ -3757,6 +3789,21 @@ private var xfadeBChorusMs = -1L
             // 旧代码用局部 var dacStreaming 手工推断「play 是否需要 startStreaming」，
             // 8.21 曾漏置导致 keep-claim 噪音/卡死。现在所有分支都保证走到 play() 时
             // native 流未启，streamAlreadyRunning 恒 false，推断逻辑整体删除。
+            // 【V9.02 修复】原 USB DAC 重初始化（claim / open / play）全在主线程同步执行，
+            // 阻塞 UI → 反复 "Input dispatching timed out" ANR。照搬 Oboe 路径(V7.123)做法，
+            // 把这一段重活整体挪到后台线程（串行锁复用 oboeSwitchLock），主线程只保留轻量通知。
+            // 【V9.02 续】DAC 初始化「在途合并」闸门：同一时刻只允许一路 DAC 初始化在跑，
+            // 连点/重复回调只保留最后一首（dacInitPendingIndex），当前路结束后补跑，杜绝双播/卡顿/爆音。
+            if (dacInitInFlight) {
+                dacInitPendingIndex = index
+                DebugLog.add(TAG, "playSong[$index]: DAC init in-flight, coalesced as pending (last wins)")
+                return
+            }
+            dacInitInFlight = true
+            Thread {
+                try {
+                synchronized(oboeSwitchLock) {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
             val dacClaimed = UsbDacManager.isClaimed()
             val dacRunning = UsbDacManager.isStreaming()
             // [2026-09-10 C] Deep prebuffer on cross-rate restart: a full release+reclaim
@@ -3774,8 +3821,8 @@ private var xfadeBChorusMs = -1L
                 val is44kFamily = srcRate in setOf(44100, 88200, 176400, 352800)
                 if (dacProfile.lacks44k1Clock && is44kFamily) {
                     DebugLog.add(TAG, "playSong[$index]: DAC ${dacProfile.name} lacks 44.1k clock, route to ExoPlayer")
-                    playSongFallbackExo(index, songs)
-                    return
+                    handler.post { playSongFallbackExo(index, songs) }
+                    return@Thread
                 }
                 DebugLog.add(TAG, "playSong[$index]: claiming DAC sr=$srcRate bits=${dacProfile.wireBits}")
                 if (!UsbDacManager.claimAndStart(device, srcRate, 2, dacProfile.wireBits)) {
@@ -3783,9 +3830,8 @@ private var xfadeBChorusMs = -1L
                     // Salt Player fallback: Oboe without setDeviceId, kernel USB driver auto-routes
                     getSharedPreferences("settings", MODE_PRIVATE).edit().putString("audio_output", "AAudio (Direct)").apply()
                     refreshOboeModeCache()
-                    playSongOboeDirect(index, songs)
-                    notifySongChanged(songs[index])
-                    return
+                    handler.post { playSongOboeDirect(index, songs); notifySongChanged(songs[index]) }
+                    return@Thread
                 }
                 DebugLog.add(TAG, "playSong[$index]: DAC claimed, waiting for controller prebuffer")
             } else if (dacRunning) {
@@ -3798,8 +3844,8 @@ private var xfadeBChorusMs = -1L
                     DebugLog.add(TAG, "playSong[$index]: DAC ${dacProfile.name} lacks 44.1k clock, route to ExoPlayer")
                     releaseUsbDacController()
                     UsbDacManager.stopAndRelease()
-                    playSongFallbackExo(index, songs)
-                    return
+                    handler.post { playSongFallbackExo(index, songs) }
+                    return@Thread
                 }
                 val rateChanged = (oldRate > 0 && newRate > 0 && newRate != oldRate)
                 if (rateChanged) {
@@ -3817,9 +3863,8 @@ private var xfadeBChorusMs = -1L
                         DebugLog.add(TAG, "playSong[$index]: cross-rate reclaim FAIL, fallback Oboe system-route (Salt Player style)")
                         getSharedPreferences("settings", MODE_PRIVATE).edit().putString("audio_output", "AAudio (Direct)").apply()
                         refreshOboeModeCache()
-                        playSongOboeDirect(index, songs)
-                        notifySongChanged(songs[index])
-                        return
+                        handler.post { playSongOboeDirect(index, songs); notifySongChanged(songs[index]) }
+                        return@Thread
                     }
                 } else {
                     // 【V8.21 fix】手动切歌 same-rate keep-claim：stopMonitor() 内部已 pauseStream
@@ -3894,46 +3939,85 @@ private var xfadeBChorusMs = -1L
                                   am.getStreamMaxVolume(AudioManager.STREAM_MUSIC).toFloat()
                         UsbDacManager.setVolume(pct)
                     }
-                    // Restore MSEB on DAC path (reclaim/切歌后 native EQ 会丢失，重设一次)
-                    if (MsebCalculator.isEnabled(this@MusicService)) {
-                        val msebParams = MsebCalculator.load(this@MusicService)
-                        if (!msebParams.isFlat) {
-                            UsbDacManager.setDspEnabled(true)
-                            UsbDacManager.setMseb10Band(
-                                MsebCalculator.calculateGains(msebParams),
-                                MsebCalculator.BAND_FREQS,
-                                MsebCalculator.BAND_QS
-                            )
-                            dspEqEnabled = true
-                        }
-                    }
-                    // 【V8.19】DTS 环绕独立开关恢复（native 声场状态在重新打开 DAC 后会丢）
-                    if (MsebCalculator.isDtsEnabled(this@MusicService)) {
-                        val (ss, img) = MsebCalculator.dtsStageParams(this@MusicService)
-                        UsbDacManager.setMsStage(ss, img)
-                    }
-                    // [V8.119] DAC 重开后重发宽裕余量档与原声直通（native 状态会丢）
-                    refreshWideHeadroom()
-                    refreshDirectPassthrough()
-                    refreshAgc()                  // 【V8.177】DAC 重开后重发 AGC 档
-                    refreshXfadeBassSwap()        // 【V8.220】DAC 重开后重发低频交接档
-                    refreshStereoBalance()       // 【V8.313】重开后重发声道平衡（否则回到居中）
-        refreshXfadeThreeBand()       // 【V8.246】DAC 重开后重发三段频交接档
-                    applyBeatmatchEngine()        // 【V8.222】DAC 重开后重发变速引擎档
-                    applyLiveFx()   // 【V8.150】DAC 重开后重发 Live FX 总线设置
+                    // 【V9.02 续】切歌 / DAC 重开后把 native DSP 状态整条重发（集中到 restoreDacDspState，
+                    // reclaim / 切歌后 native 系数会整条丢失，仅恢复子开关不恢复 EQ 预设 → 预设静默失效）。
+                    restoreDacDspState()
                     currentSong.let { song -> MusicService.currentSong = song; currentIndex = index }
-                    notifyPlayStateChanged(true)
-                    updateNotification()
-                    notifySongChanged(songs[index])
-                    return
+                    handler.post {
+                        notifyPlayStateChanged(true)
+                        updateNotification()
+                        notifySongChanged(songs[index])
+                    }
+                    return@Thread
                 } else { DebugLog.add(TAG, "USB DAC: controller.open FAIL, fallback Exo") }
             }
         }
+        } finally {
+            // 【V9.02 续】在途合并收口：本路 DAC 初始化无论成功/失败/fallback 都释放闸门，
+            // 并补跑用户最新连点目标（last-wins），避免同窗口内多路重初始化造成的卡顿/爆音。
+            dacInitInFlight = false
+            val pend = dacInitPendingIndex
+            dacInitPendingIndex = -1
+            if (pend >= 0) {
+                DebugLog.add(TAG, "playSong: DAC init finished, launching coalesced pending=$pend")
+                playSong(pend)
+            }
+        }
+            }.apply { name = "UsbDacInit" }.start()
+            return
+        }
 
-        // 
-        // Always Oboe/AAudio Direct - no ExoPlayer fallback
+        // Non-exclusive fallback: Oboe/AAudio Direct - no ExoPlayer fallback
         playSongOboeDirect(index, songs)
         notifySongChanged(songs[index])
+    }
+
+    /**
+     * 【V9.02 续】DAC 独占切歌 / 重开后，把 native DSP 状态整条重发一遍。
+     * 顺序与原成功路径一致：先 MSEB（10 段）→ DTS 声场 → 各 refresh* 子开关 →
+     * EqualizerManager 预设 → AGC / 低频交接 / 声道平衡 / 三段交接 / 变速 / Live FX。
+     * 集中到此处，避免 playSong 成功路径被一长串 refresh* 撑散、且保证 DAC 重开后不漏发。
+     */
+    private fun restoreDacDspState() {
+        // Restore MSEB on DAC path (reclaim/切歌后 native EQ 会丢失，重设一次)
+        if (MsebCalculator.isEnabled(this)) {
+            val msebParams = MsebCalculator.load(this)
+            if (!msebParams.isFlat) {
+                UsbDacManager.setDspEnabled(true)
+                UsbDacManager.setMseb10Band(
+                    MsebCalculator.calculateGains(msebParams),
+                    MsebCalculator.BAND_FREQS,
+                    MsebCalculator.BAND_QS
+                )
+                dspEqEnabled = true
+            }
+        }
+        // 【V8.19】DTS 环绕独立开关恢复（native 声场状态在重新打开 DAC 后会丢）
+        if (MsebCalculator.isDtsEnabled(this)) {
+            val (ss, img) = MsebCalculator.dtsStageParams(this)
+            UsbDacManager.setMsStage(ss, img)
+        }
+        // [V8.119] DAC 重开后重发宽裕余量档与原声直通（native 状态会丢）
+        refreshWideHeadroom()
+        refreshDirectPassthrough()
+        refreshEngineDspEnabled()    // 【V9.01】DAC 重开后重发引擎 DSP 主开关
+        // 【V9.01】DAC 重开后重发 5 个子开关（Bass Swap 由 refreshXfadeBassSwap 覆盖）
+        refreshMsebEnabled()
+        refreshLimiterEnabled()
+        refreshDtsEnabled()
+        refreshAutoEqEnabled()
+        refreshHrtfProbeEnabled()
+        refreshParametricEqEnabled()
+        // 【V9.01 修复】DAC 重开后重发 5 段 EQ 品牌预设：native DSP 系数在重开时会
+        // 整条丢失，仅恢复子开关而不恢复 EQ 预设 → 此前选好的预设静默失效（"开了预设没感觉"）。
+        com.sdw.music.player.EqualizerManager.restoreSettings(this)
+        com.sdw.music.player.core.audio.ParametricEqManager.restoreSettings(this)  // 【V9.0x】DAC 重开后重发手动 PEQ（native biquad 银行会丢）
+        refreshAgc()                  // 【V8.177】DAC 重开后重发 AGC 档
+        refreshXfadeBassSwap()        // 【V8.220】DAC 重开后重发低频交接档
+        refreshStereoBalance()       // 【V8.313】重开后重发声道平衡（否则回到居中）
+        refreshXfadeThreeBand()       // 【V8.246】DAC 重开后重发三段频交接档
+        applyBeatmatchEngine()        // 【V8.222】DAC 重开后重发变速引擎档
+        applyLiveFx()   // 【V8.150】DAC 重开后重发 Live FX 总线设置
     }
 
     fun playSongById(songId: Long, allSongs: List<Song>) {
@@ -4051,6 +4135,19 @@ private var xfadeBChorusMs = -1L
                 _mark("refreshWideHeadroom")
                 refreshDirectPassthrough()   // [V8.119] 播放器重建后重发原声直通档
                 _mark("refreshDirectPassthrough")
+                refreshEngineDspEnabled()     // 【V9.01】播放器重建后重发引擎 DSP 主开关
+                _mark("refreshEngineDspEnabled")
+                // 【V9.01】播放器重建后重发 5 个子开关（Bass Swap 由 refreshXfadeBassSwap 覆盖）
+                refreshMsebEnabled()
+                refreshLimiterEnabled()
+                refreshDtsEnabled()
+                refreshAutoEqEnabled()
+                refreshHrtfProbeEnabled()
+                refreshParametricEqEnabled()
+                // 【V9.01 修复】播放器重建后重发 5 段 EQ 品牌预设：native DSP 系数在重建时会
+                // 整条丢失，仅恢复子开关而不恢复 EQ 预设 → 此前选好的预设静默失效（"开了预设没感觉"）。
+                com.sdw.music.player.EqualizerManager.restoreSettings(this@MusicService)
+                com.sdw.music.player.core.audio.ParametricEqManager.restoreSettings(this@MusicService)  // 【V9.0x】播放器重建后重发手动 PEQ（native biquad 银行会丢）
                 refreshAgc()                 // 【V8.177】播放器重建后重发 AGC 档
                 _mark("refreshAgc")
                 refreshXfadeBassSwap()       // 【V8.220】播放器重建后重发低频交接档
@@ -4066,7 +4163,7 @@ private var xfadeBChorusMs = -1L
                 // 【V8.424】过渡采样音效功能已整体删除，重建时不再重发音效包
                 // 【V8.170】播放器重建后重发响度归一化（新 player 的 native 增益回到 1.0）
                 val normDb = refreshNormalization()
-                Log.i(TAG, "NormGain: ${currentSong?.title} -> %.2f dB".format(normDb))
+                Log.i(TAG, "NormGain: ${currentSong?.title} -> ${"%.2f".format(normDb)} dB")
                 _mark("refreshNormalization")
 
                 Log.i(TAG, "Oboe: Exclusive mode (bg thread)")
@@ -4477,6 +4574,14 @@ private var xfadeBChorusMs = -1L
         Log.i(TAG, "DirectPassthrough ${if (enabled) "ON" else "OFF"}")
     }
 
+    // 【V9.01】引擎 DSP 主开关（DAC 模块"启用引擎 DSP"）：双路下发 Oboe/蓝牙链 + USB DAC 链。
+    // false = 创意 DSP（Bass Swap/MSEB/DTS/Limiter/AutoEQ 等）整链旁路，仅保留音量/DJ混音/硬钳。
+    fun applyEngineDspEnabled(enabled: Boolean) {
+        oboeDirectPlayer?.setEngineDspEnabled(enabled)
+        UsbDacManager.setEngineDspEnabled(enabled)
+        Log.i(TAG, "EngineDspEnabled ${if (enabled) "ON" else "OFF (bit-perfect passthrough)"}")
+    }
+
     /**
      * 【V8.313】左右声道平衡下发。bal: -1=全左 / 0=居中 / +1=全右。
      * native 侧走恒功率声像曲线。只作用于普通播放输出（含 stem 混音后的总线），
@@ -4592,6 +4697,78 @@ private var xfadeBChorusMs = -1L
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
         applyDirectPassthrough(prefs.getBoolean("direct_passthrough", false))
     }
+
+    // 【V9.01】播放器重建 / 服务重连后按 pref 重发引擎 DSP 主开关
+    fun refreshEngineDspEnabled() {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        applyEngineDspEnabled(prefs.getBoolean("engine_dsp_enabled", true))
+    }
+
+    // ───── 【V9.01】DAC 模块 5 个子开关：每个效果独立使能，主开关关闭时整链已旁路 ─────
+    // 低频交接（Bass Swap）：仅 Oboe 链的 DJ 交接效果，USB DAC 链不涉及 → 只下发 Oboe。
+    fun applyBassSwapEnabled(enabled: Boolean) {
+        oboeDirectPlayer?.setXfadeBassSwap(enabled)
+        Log.i(TAG, "BassSwapEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+    // MSEB 主观维度 EQ：双路下发 Oboe + USB DAC。
+    fun applyMsebEnabled(enabled: Boolean) {
+        oboeDirectPlayer?.setMsebEnabled(enabled)
+        UsbDacManager.setMsebEnabled(enabled)
+        Log.i(TAG, "MsebEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+    // 多段限幅（Limiter）：仅 Oboe 链有独立限幅器，USB DAC 链走自身收尾硬钳 → 只下发 Oboe。
+    fun applyLimiterEnabled(enabled: Boolean) {
+        oboeDirectPlayer?.setMultiBandLimiterEnabled(enabled)
+        Log.i(TAG, "LimiterEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+    // DTS 环绕（M/S 处理块）：双路下发 Oboe + USB DAC。
+    fun applyDtsEnabled(enabled: Boolean) {
+        oboeDirectPlayer?.setDtsEnabled(enabled)
+        UsbDacManager.setDtsEnabled(enabled)
+        Log.i(TAG, "DtsEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+    // 【第2步·隔离探针】HRTF 双耳渲染探针：仅 Oboe 链，与 DTS/M-S 互斥，USB DAC 链不接。
+    fun applyHrtfProbeEnabled(enabled: Boolean) {
+        oboeDirectPlayer?.setHrtfProbeEnabled(enabled)
+        Log.i(TAG, "HrtfProbeEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+    // 探针方向：-1=自动轮播；0=前 1=后 2=左 3=右 4=上
+    fun applyHrtfProbeDir(dir: Int) {
+        oboeDirectPlayer?.setHrtfProbeDir(dir)
+        Log.i(TAG, "HrtfProbeDir $dir")
+    }
+    // 【真·双耳环绕】HRIR 多虚拟音箱 upmix 总开关（替换 DTS），仅 Oboe 链。
+    fun applyHrtfSpatialEnabled(enabled: Boolean) {
+        oboeDirectPlayer?.setHrtfSpatialEnabled(enabled)
+        Log.i(TAG, "HrtfSpatialEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+    // 声场朝向：yaw=水平旋转(±180°)、pitch=俯仰(±90°)。
+    fun applyHrtfFieldOrientation(yaw: Float, pitch: Float) {
+        oboeDirectPlayer?.setHrtfFieldOrientation(yaw, pitch)
+        Log.i(TAG, "HrtfFieldOrientation yaw=$yaw pitch=$pitch")
+    }
+    // AutoEQ 耳机修正：双路下发 Oboe + USB DAC。
+    fun applyAutoEqEnabled(enabled: Boolean) {
+        oboeDirectPlayer?.setAutoEqEnabled(enabled)
+        UsbDacManager.setAutoEqEnabled(enabled)
+        Log.i(TAG, "AutoEqEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+
+    // 【V9.01】播放器重建 / 服务重连后按 pref 重发 5 个子开关
+    fun refreshBassSwapEnabled() = applyBassSwapEnabled(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("crossfade_bass_swap", true))
+    fun refreshMsebEnabled() = applyMsebEnabled(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("mseb_enabled", true))
+    fun refreshLimiterEnabled() = applyLimiterEnabled(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("limiter_enabled", true))
+    fun refreshDtsEnabled() = applyDtsEnabled(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("dts_enabled", true))
+    fun refreshHrtfProbeEnabled() = applyHrtfProbeEnabled(MsebCalculator.isHrtfProbeEnabled(this)).also {
+        applyHrtfProbeDir(MsebCalculator.getHrtfProbeDir(this))
+    }
+    fun refreshAutoEqEnabled() = applyAutoEqEnabled(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("autoeq_enabled", true))
+    // 手动参数 EQ（Parametric EQ）：受 DSP 引擎主开关旁路，双路下发 Oboe + USB DAC。
+    fun applyParametricEqEnabled(enabled: Boolean) {
+        com.sdw.music.player.core.audio.ParametricEqManager.setEnabled(this, enabled)
+        Log.i(TAG, "ParametricEqEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+    fun refreshParametricEqEnabled() = applyParametricEqEnabled(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("parametric_eq_enabled", false))
 
     /** 应用 MSEB 10 段 EQ — 根据当前播放模式路由到 Oboe 或 USB DAC 链路（共用同一套 Biquad） */
     fun applyMsebEq(gainsDb: FloatArray, freqsHz: FloatArray?, qValues: FloatArray?) {
@@ -4752,7 +4929,7 @@ private var xfadeBChorusMs = -1L
         }
         val cfg = LoudnessNormalizer.load(this)
         val db = LoudnessNormalizer.gainFor(path, cfg)
-        Log.i(TAG, "NormGain: enabled=${cfg.enabled} mode=${cfg.mode.name} db=%.2f src=${LoudnessNormalizer.source(path)} ($path)".format(db))
+        Log.i(TAG, "NormGain: enabled=${cfg.enabled} mode=${cfg.mode.name} db=${"%.2f".format(db)} src=${LoudnessNormalizer.source(path)} ($path)")
         applyNormalization(db)
         return db
     }
@@ -5735,7 +5912,7 @@ private var xfadeBChorusMs = -1L
                     if (!curPath.isNullOrBlank() && curPath == path) {
                         val db = refreshNormalization()
                         val cfg = com.sdw.music.player.core.audio.LoudnessNormalizer.load(this@MusicService)
-                        Log.i(TAG, "NormGain(rescan): %.2f dB enabled=${cfg.enabled} src=${com.sdw.music.player.core.audio.LoudnessNormalizer.source(path)} (${f.name})".format(db))
+                        Log.i(TAG, "NormGain(rescan): ${"%.2f".format(db)} dB enabled=${cfg.enabled} src=${com.sdw.music.player.core.audio.LoudnessNormalizer.source(path)} (${f.name})")
                     }
                 }
                 settled = true

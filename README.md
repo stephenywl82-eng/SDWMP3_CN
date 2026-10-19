@@ -178,7 +178,23 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 ## 许可
 
-自用 / 本地分发。含 `MANAGE_EXTERNAL_STORAGE` 权限（用于歌词/封面写入共享存储），若上架 Google Play 需评估审核风险。
+本项目自身代码以 **Apache License 2.0** 发布，完整文本见根目录 [`LICENSE`](LICENSE)。
+
+当前用途为自用 / 本地分发，含 `MANAGE_EXTERNAL_STORAGE` 权限（用于歌词/封面写入共享存储），若上架 Google Play 需评估审核风险。
+
+### 第三方组件许可
+
+仓库内打包的第三方开源组件保留各自原有许可，不随本项目 Apache-2.0 而改变：
+
+| 组件 | 用途 | 许可 |
+|------|------|------|
+| Rubber Band Library（`app/src/main/cpp/rubberband/`） | 时间拉伸 / 变速不变调 | **GPL-2.0**（版权方另售商业许可） |
+| Oboe（`app/src/main/cpp/oboe/`） | Google 低延迟音频引擎 | Apache-2.0 |
+| Apple ALAC（`app/src/main/cpp/alac/`） | ALAC 解码 | Apache-2.0 |
+| dr_flac / dr_wav | FLAC / WAV 解码 | 公有领域（public domain / MIT-0） |
+| kissfft、Speex（rubberband 内置） | FFT / 残响等 | BSD-3-Clause |
+
+> ⚠️ **GPL 注意**：Rubber Band Library 以 **GPL-2.0** 发布，并已被 native 链接进 APK。若你重新分发包含该组件的应用，则该部分须遵守 GPL 的 copyleft 义务（提供对应源码等）。如不愿受 GPL 约束，可移除该组件，或向版权方购买商业许可（breakfastquay.com）。
 
 ---
 

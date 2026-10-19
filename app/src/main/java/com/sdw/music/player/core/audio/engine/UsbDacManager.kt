@@ -42,6 +42,12 @@ object UsbDacManager {
     private var lastFindDacsTime = 0L
     @Volatile private var dumpedDeviceId = -1
 
+    // [P1 adaptive-DAC] descriptor-derived capability snapshot for the currently
+    // claimed DAC. Filled right after nativeClaim succeeds, consumed by
+    // DacProfile.find() so per-model hand-writing becomes unnecessary.
+    @Volatile var activeDescriptor: DacDescriptor? = null
+    fun getActiveDescriptor(): DacDescriptor? = activeDescriptor
+
     private data class PendingClaim(
         val device: UsbDevice,
         val sampleRate: Int,
@@ -206,6 +212,17 @@ object UsbDacManager {
         )
         DebugLog.add(TAG, "claim: nativeClaim vid=${device.vendorId.toString(16)} pid=${device.productId.toString(16)} ep=0x${epInfo.address.toString(16)} mps=${epInfo.maxPacketSize} uac2=${epInfo.isUac2} iface=$targetIfaceNum → $result")
         if (result) {
+            // 【P1 自适应 DAC】claim 后 native 已完成 descriptor 解析，把自动探测结果取回，
+            // 后续 DacProfile.find() 用它合并出 wireBits / 硬件音量 FU / 44.1k 支持，
+            // 标准兼容 DAC 无需手写任何条目即可「插上就用」。
+            try {
+                activeDescriptor = nativeGetDescriptorProfile()?.let { DacDescriptor.parse(it) }
+                DebugLog.add(TAG, "claim: descriptor profile ${activeDescriptor ?: "(none)"}")
+            } catch (e: Throwable) {
+                DebugLog.add(TAG, "claim: descriptor parse failed: ${e.message}")
+                activeDescriptor = null
+            }
+
             // 【FU 覆盖】Kotlin 层 DacProfile 是单一数据源；固件不实现 GET_MIN/GET_MAX 的怪 DAC
             // 在 native 通用探测失败后，由这里注入 Salt-verified 的 Feature Unit 参数。
             val profile = DacProfile.find(device.vendorId, device.productId)
@@ -264,6 +281,7 @@ object UsbDacManager {
     fun stopAndRelease() {
         pendingClaim = null
         activeSampleRate = 0; activeBits = 0
+        activeDescriptor = null
         if (isNativeLoaded) {
             // [fix] use-after-free：FLAC 硬解线程 decodeLoop 可能仍持裸指针 drv 在 pushPcm，
             // 若直接 nativeRelease()（native 层 delete gUsbDriver）会导致 use-after-free 崩溃。
@@ -842,6 +860,8 @@ object UsbDacManager {
     private external fun nativeGetDetailedInfo(): String?
     private external fun nativeGetSupportedRates(): String?
     private external fun nativeGetStats(): String?
+    // [P1 adaptive-DAC] descriptor-derived capability snapshot (wireBits / FU / 44.1k)
+    private external fun nativeGetDescriptorProfile(): String?
     private external fun nativeGetDebugLog(): String?
     private external fun nativeClearDebugLog()
     private external fun nativeSetVolume(volume: Float)

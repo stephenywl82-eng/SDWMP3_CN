@@ -1,5 +1,24 @@
 # 更新日志 Changelog
 
+## 9.19 (2026-10-18 起)
+
+> `versionName` 9.19 / `versionCode` 919。本版把环绕方案从「DTS（M/S 参数化近似）」升级为**实测双耳 HRIR 空间化**，并完成仓库整理与播放核心分包重构。
+
+### 新增
+- **HRIR 空间化（真·双耳环绕，替换 DTS）**：虚拟 5.1 环（FL/FR/C/SL/SR）各走一路 Resonance 式分块 FFT **HRIR 卷积器**，求和到左右耳；数据来自 IRCAM LISTEN IRC_1002_C 实测集（187 方向 × 256 taps @ 48 kHz），做方向插值（`hrtf_surround.cpp` + `hrtf_data.h` 由 `gen_hrtf_data.py` 生成，`liboboe_bridge.so` 已重编进 arm64-v8a）。
+- **可拖动 3D 声场**：MSEB 页面新增声场拖盘（水平 = 方位 azimuth、垂直 = 俯仰 elevation），驱动 `hrtf_field_yaw` / `hrtf_field_pitch`；并带房间混响（`hrtf_reverb_enabled`）与近/远距离（`hrtf_field_distance`）。
+- **仓库整理 + core/audio 分包重构**：播放核心拆到 `core/audio`（含 `dsp/` 子包），并把用户设备的实际设置**固化**为全新安装默认（见 `docs/default_settings.md`）。
+
+### 优化
+- 移除 `MusicService` 中 4 个零调用死方法、standby-bucket 空骨架（轻量清理）。
+- 响度归一默认注释修正（默认关闭 / OFF，勿改回 true）。
+
+### 说明
+- **HRIR 空间化与 DTS 环绕互斥**：同一时刻只能开一个环绕模式（另含 5 点 HRTF 探针，三者互斥）。DTS 环绕（M/S）作为旧路径仍保留可切换；新方案在听感上更贴近真实声场，**推荐优先使用**。
+- 环绕 / 双耳相关开关持久化在 `SharedPreferences`（`mseb` 存储）：`hrtf_spatial_enabled` / `hrtf_field_yaw` / `hrtf_field_pitch` / `hrtf_reverb_enabled` / `hrtf_field_distance`，与既有 `dts_enabled` / `dts_surround` / `dts_height` 并存。
+
+---
+
 ## 9.0 (2026-10-12)
 
 ### 新增

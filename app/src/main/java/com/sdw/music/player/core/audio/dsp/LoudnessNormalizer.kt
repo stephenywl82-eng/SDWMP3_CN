@@ -88,7 +88,8 @@ object LoudnessNormalizer {
             target = if (oldDb == 0f) TARGET_DEFAULT else BASE_LUFS + oldDb
         }
         Config(
-            // 【V8.515-P0a】首次使用（pref 无 K_ENABLED）默认开启；显式关过则尊重 false。
+            // 【V8.515-P0a】响度归一默认关闭（OFF）：pref 无 K_ENABLED 时取 false。
+            //   用户设备设置导出(loudness_norm.enabled=false)确认为关 → 全新安装即关，勿改回 true。
             enabled = p.getBoolean(K_ENABLED, false),
             mode = Mode.entries.firstOrNull { it.key == modeIdx } ?: Mode.AUTO,
             targetLufs = target

@@ -1,6 +1,10 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
 
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.dsp.EqualizerManager
+import com.sdw.music.player.core.audio.dsp.MsebCalculator
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.metadata.SongSpecReader
 
 import androidx.compose.material3.ExperimentalMaterial3Api
 
@@ -87,6 +91,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import android.os.Build
+import android.os.Bundle
 import android.content.res.Configuration
 import android.content.Context
 import androidx.compose.ui.unit.dp
@@ -102,13 +107,11 @@ import com.sdw.music.player.ui.components.LyricViewCompose
 import com.sdw.music.player.LyricLine
 import com.sdw.music.player.LrcParser
 import com.sdw.music.player.BpmKeyCache
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.MemoryManager
 import android.os.PowerManager
 import android.os.SystemClock
 import com.sdw.music.player.ui.theme.*
 
-import com.sdw.music.player.EqualizerManager
 import com.sdw.music.player.ui.components.PlayerVisualMode
 import com.sdw.music.player.ui.components.VuMeter
 import com.sdw.music.player.ui.components.VuMeterStyle
@@ -161,6 +164,9 @@ fun PlayerScreen(
     onNavigateToLyrics: () -> Unit,
     onToggleFavorite: () -> Unit,
     onShare: () -> Unit,
+    // 【Lyrico 联动】三点菜单「用 Lyrico 编辑」返回后的回调（携带 result extras）；由调用方接到 VM
+    // 的 onExternalTagEditReturned，就地刷新封面/标签（含从被改写文件重新抽封面，绕过平台 albumart 缓存）
+    onLyricoExternalEditReturned: (songId: Long, filePath: String, extras: Bundle?) -> Unit = { _, _, _ -> },
     onToggleEqualizer: () -> Unit,
     onDeleteSong: () -> Unit,
     onNavigateToAlbum: (albumName: String) -> Unit = {},
@@ -255,8 +261,9 @@ fun PlayerScreen(
             }
         }
     }
-    // Re-resolve when song changes
-    LaunchedEffect(state.currentSongId) {
+    // Re-resolve when song changes, OR when the cover URI changes for the same song
+    // (e.g. Lyrico edited the cover and we pushed a fresh URI into currentSongAlbumArt).
+    LaunchedEffect(state.currentSongId, state.currentSongAlbumArt) {
         val next = resolveCoverUri()
         if (next != null) preheatCoverImages(next)
         coverUri = next
@@ -266,7 +273,7 @@ fun PlayerScreen(
     // 【V8.357】Which surface are we on? DJ off -> plain player, no ⚡ / ⏭ buttons,
     // hard cuts only. DJ on -> DJ player. Two separate UIs, not one shared UI.
     val djEnabled = rememberDjEnabled(context)
-    var crossfadeInfo by remember { mutableStateOf(com.sdw.music.player.MusicService.CrossfadeUiInfo()) }
+    var crossfadeInfo by remember { mutableStateOf(com.sdw.music.player.core.audio.playback.MusicService.CrossfadeUiInfo()) }
     // 【V8.428】原来这里有一个独立的 60ms 轮询环（外加下面 bandLevels 的 60Hz 环、
     // 两处 50ms 装饰动画、VuMeter 自己的 60fps 帧时钟）。现已全部并入下方**唯一**的
     // 统一 ticker（PlayerUiTicker，100ms 一帧），一帧只重组一次。
@@ -308,15 +315,15 @@ fun PlayerScreen(
     // （只有下一轮 PRELOADING 才会整体重建）。DONE 且封面 URI 已切到 B 轨 = 过渡真的结束了，
     // 这里必须当 IDLE 看：否则配色会一直锁在预读的 B 主色上、换碟动画（instantCoverSwitch）
     // 也被永久关掉 —— 表现就是「交叉切歌后卡住，颜色不跟着新歌走」。
-    val xfadeSettled = xfadeUiState == com.sdw.music.player.MusicService.XfadeUiState.DONE &&
+    val xfadeSettled = xfadeUiState == com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.DONE &&
             crossfadeNextArt?.isNotBlank() == true && coverUri == crossfadeNextArt
-    val xfadeStateEff = if (xfadeSettled) com.sdw.music.player.MusicService.XfadeUiState.IDLE else xfadeUiState
-    val xfadeActive = xfadeStateEff == com.sdw.music.player.MusicService.XfadeUiState.ACTIVE
+    val xfadeStateEff = if (xfadeSettled) com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.IDLE else xfadeUiState
+    val xfadeActive = xfadeStateEff == com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.ACTIVE
     // 叠加层显示条件：只在 ACTIVE/DONE 阶段显示（PRELOADING 时 crossfade 还没开始，B 不能提前盖住 A）
     // 【V8.208】外加"交接完成后的宽限期"：settled 时 xfadeStateEff 已经是 IDLE，得单独放行，
     // 否则叠加层会在主封面还没画上的那一帧就被撤掉（见下方 overlayRelease）。
-    val xfadeOverlayVisible = (xfadeStateEff == com.sdw.music.player.MusicService.XfadeUiState.ACTIVE
-            || xfadeStateEff == com.sdw.music.player.MusicService.XfadeUiState.DONE
+    val xfadeOverlayVisible = (xfadeStateEff == com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.ACTIVE
+            || xfadeStateEff == com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.DONE
             || xfadeSettled)
             && crossfadeNextArt?.isNotBlank() == true
     // 【V8.208】撤叠加层的时机从"封面 URI 一切到 B 就撤"改成"再挂 150ms 再撤"。
@@ -343,14 +350,22 @@ fun PlayerScreen(
     // 【V8.205】封面取色直接搬进 UI 会刺眼：取色算法挑的就是封面最艳那几档（S≈0.9~1.0），
     // 同一支色同时喂给 VU 柱、歌词 glow、歌名、按键。这里统一收敛一次 —— 色相不动，
     // 只压饱和度和明度，省得每一处调用点各写一遍 clamp。
-    val vuCoverColors = CoverTone.calmAll(
-        when {
-            coverPaletteFresh -> state.coverColors
-            xfadeStateEff != com.sdw.music.player.MusicService.XfadeUiState.IDLE &&
-                crossfadeNextCoverColors.any { it != 0 } -> crossfadeNextCoverColors
-            else -> state.coverColors
-        }
-    )
+    // 【V8.490 回归修复】原先这里每次组合都 new 出一个 List 传给 LiveVuMeter，
+    // 成为重组风暴的源头之一：PlayerScreen 每帧重排时 vuCoverColors 都是新对象，
+    // VuMeter 的 remember(coverColors, accentColor) 跟着每帧重算、狂打 SDW_VuColor 日志。
+    // 用 remember 包住，只有取色 / 转场输入真正变化时才重建，稳定对象引用。
+    val vuCoverColors = remember(
+        coverPaletteFresh, xfadeStateEff, crossfadeNextCoverColors, state.coverColors
+    ) {
+        CoverTone.calmAll(
+            when {
+                coverPaletteFresh -> state.coverColors
+                xfadeStateEff != com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.IDLE &&
+                    crossfadeNextCoverColors.any { it != 0 } -> crossfadeNextCoverColors
+                else -> state.coverColors
+            }
+        )
+    }
     // 【V8.190】真机诊断：柱子颜色 ≠ 封面色时，看这里就知道 coverColors 到底是什么。
     // 歌曲或调色板变化时打一次：coverColors 5 档 hex + vuCoverColors 最终采用值 + accent。
     LaunchedEffect(coverUri, state.coverColors, state.accentColor) {
@@ -367,7 +382,7 @@ fun PlayerScreen(
     // 【V8.187】真机诊断：交叉淡化结算那一刻，VU 表用的是谁的调色板。
     // 打不出"颜色不对"的根因时，看这几行就知道是"新调色板没到手"还是"预读提错图"。
     LaunchedEffect(crossfadeInfo.state, coverPaletteFresh, coverUri) {
-        if (crossfadeInfo.state != com.sdw.music.player.MusicService.XfadeUiState.DONE) return@LaunchedEffect
+        if (crossfadeInfo.state != com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.DONE) return@LaunchedEffect
         android.util.Log.d(
             "SDW_XfadeColor",
             "xfade DONE: fresh=$coverPaletteFresh stateColors=${state.coverColors.size} " +
@@ -397,7 +412,7 @@ fun PlayerScreen(
     // 背景/VU/文字会先闪回 A 轨旧色（或主题色）再跳一次 —— 换个更长的窗口兜住。
     var accentHoldWindow by remember { mutableStateOf(false) }
     LaunchedEffect(xfadeStateEff) {
-        if (xfadeStateEff != com.sdw.music.player.MusicService.XfadeUiState.IDLE) {
+        if (xfadeStateEff != com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.IDLE) {
             coverSwitchInstant = true
             accentHoldWindow = true
         } else {
@@ -416,7 +431,7 @@ fun PlayerScreen(
     // 【V8.208】交接刚结算、新歌主色还没到手的那一小段（用 accentHoldWindow，约 1.2s）
     // 继续挂 B 轨预读色 —— B 色本来就是这首歌的主色，接着用不会错，比闪回旧色好看得多。
     val xfadeTargetAccent = when {
-        xfadeStateEff != com.sdw.music.player.MusicService.XfadeUiState.IDLE && crossfadeNextAccent != 0L ->
+        xfadeStateEff != com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.IDLE && crossfadeNextAccent != 0L ->
             Color(crossfadeNextAccent)
         accentHoldWindow && !accentFresh && crossfadeNextAccent != 0L -> Color(crossfadeNextAccent)
         else -> null
@@ -454,13 +469,13 @@ fun PlayerScreen(
     }
 
     // 【V8.21】歌曲规格懒显示（Spec 对象 → 分段着色）：FLAC · 24bit · 96kHz · 4609kbps
-    var songSpec by remember { mutableStateOf<com.sdw.music.player.core.audio.SongSpecReader.Spec?>(null) }
+    var songSpec by remember { mutableStateOf<com.sdw.music.player.core.audio.metadata.SongSpecReader.Spec?>(null) }
     LaunchedEffect(currentSong?.id) {
         val song = currentSong
         songSpec = null
         if (song != null) {
             songSpec = withContext(Dispatchers.IO) {
-                com.sdw.music.player.core.audio.SongSpecReader.specFor(song)
+                com.sdw.music.player.core.audio.metadata.SongSpecReader.specFor(song)
             }
         }
     }
@@ -554,14 +569,21 @@ fun PlayerScreen(
     // 也就是完全没转 —— 用户看到的"一直在抖、不旋转"就是它。
     // 现在改成按帧积分推进：没有可取消的长动画，状态抖动打断不了，暂停即从原角度冻住。
     val rotation = remember { Animatable(0f) }
+    // 【V8.492 转场减负】转场（飞入/飞出）期间冻结封面旋转：共享元素封面的 graphics-layer
+    // 变换优化要求封面在飞行中保持「稳定」、不要每帧重组。否则 rotation.snapTo 每帧改
+    // rotation.value → effectiveRotation 每帧变 → 整个 PlayerScreen + 四个 PlayerCoverArt
+    // 每帧重组 → 共享封面节点每帧重排重绘，直接抵消共享转场的层变换加速（飞入/飞出都卡，
+    // 和 VU 无关）。封面正在飞，暂停旋转几百 ms 用户无感。
     val rotateNow by rememberUpdatedState(isPlaying && screenOn)
+    val coverInTransition by rememberUpdatedState(sharedCoverState?.isAnimating == true)
     LaunchedEffect(Unit) {
         var lastT = 0L
         while (true) {
-            if (!rotateNow) {
-                // 暂停/熄屏：不跑帧循环（省电）；醒来时清掉时间基准，避免一次补上一大截角度
+            if (!rotateNow || coverInTransition) {
+                // 暂停/熄屏/转场：不跑帧循环（省电 + 让出主线程给飞行动画）；
+                // 醒来/转场结束清掉时间基准，避免一次补上一大截角度
                 lastT = 0L
-                kotlinx.coroutines.delay(400)
+                kotlinx.coroutines.delay(120)
                 continue
             }
             // withFrameMillis 的 lambda 不是 suspend（只有 withFrameMillis 自己是），
@@ -580,18 +602,18 @@ fun PlayerScreen(
     var eqPresetName by remember { mutableStateOf<String?>(null) }
     var msebActive by remember { mutableStateOf(false) }
     // 【V8.19】DTS 环绕（M/S 声场）独立快捷开关状态
-    var dtsOn by remember { mutableStateOf(com.sdw.music.player.MsebCalculator.isDtsEnabled(context)) }
+    var dtsOn by remember { mutableStateOf(com.sdw.music.player.core.audio.dsp.MsebCalculator.isDtsEnabled(context)) }
     var vuSessionId by remember { mutableIntStateOf(audioSessionId) }
 
     /** 【V8.19】DTS 环绕快捷开关：开→应用声场/结像（无滑块设置时用内置默认环绕），关→旁路 */
     fun toggleDts() {
         val ctx = context
-        val newOn = !com.sdw.music.player.MsebCalculator.isDtsEnabled(ctx)
-        com.sdw.music.player.MsebCalculator.setDtsEnabled(ctx, newOn)
+        val newOn = !com.sdw.music.player.core.audio.dsp.MsebCalculator.isDtsEnabled(ctx)
+        com.sdw.music.player.core.audio.dsp.MsebCalculator.setDtsEnabled(ctx, newOn)
         dtsOn = newOn
-        val svc = com.sdw.music.player.MusicService.instance
+        val svc = com.sdw.music.player.core.audio.playback.MusicService.instance
         if (newOn) {
-            val (ss, img) = com.sdw.music.player.MsebCalculator.dtsStageParams(ctx)
+            val (ss, img) = com.sdw.music.player.core.audio.dsp.MsebCalculator.dtsStageParams(ctx)
             svc?.applyMsStage(ss, img)
         } else {
             svc?.resetMsStage()
@@ -606,7 +628,7 @@ fun PlayerScreen(
     fun toggleDirectPassthrough() {
         val newOn = !directPassthrough
         settingsPrefs.edit().putBoolean("direct_passthrough", newOn).apply()
-        com.sdw.music.player.MusicService.instance?.applyDirectPassthrough(newOn)
+        com.sdw.music.player.core.audio.playback.MusicService.instance?.applyDirectPassthrough(newOn)
         directPassthrough = newOn
     }
 
@@ -616,7 +638,7 @@ fun PlayerScreen(
     fun toggleAgc() {
         val newOn = !agcOn
         settingsPrefs.edit().putBoolean("agc_enabled", newOn).apply()
-        com.sdw.music.player.MusicService.instance?.applyAgc(newOn)
+        com.sdw.music.player.core.audio.playback.MusicService.instance?.applyAgc(newOn)
         agcOn = newOn
     }
 
@@ -647,10 +669,10 @@ fun PlayerScreen(
             }
             try {
                 // Native DSP EQ state (AAudio Direct, no ExoPlayer)
-                val svc = com.sdw.music.player.MusicService.instance
+                val svc = com.sdw.music.player.core.audio.playback.MusicService.instance
                 // 【V7.200】MSEB active → show real-time tone summary instead of fixed "MSEB"
-                msebActive = com.sdw.music.player.MsebCalculator.isEnabled(context)
-                dtsOn = com.sdw.music.player.MsebCalculator.isDtsEnabled(context)
+                msebActive = com.sdw.music.player.core.audio.dsp.MsebCalculator.isEnabled(context)
+                dtsOn = com.sdw.music.player.core.audio.dsp.MsebCalculator.isDtsEnabled(context)
                 // 【V8.177】在设置页改过直通后回到播放页，菜单状态要跟着变（同一个 pref）
                 directPassthrough = settingsPrefs.getBoolean("direct_passthrough", false)
                 agcOn = settingsPrefs.getBoolean("agc_enabled", false)
@@ -659,11 +681,11 @@ fun PlayerScreen(
                 eqPresetName = when {
                     msebActive -> {
                         // 【V8.20】优先显示应用中的预设名（Vocal Sweet / Bass Monster / 自定义…）
-                        val pn = com.sdw.music.player.MsebCalculator.getPresetName(context)
+                        val pn = com.sdw.music.player.core.audio.dsp.MsebCalculator.getPresetName(context)
                         if (pn.isNotEmpty()) pn
                         else {
-                            val desc = com.sdw.music.player.MsebCalculator.describe(
-                                com.sdw.music.player.MsebCalculator.load(context))
+                            val desc = com.sdw.music.player.core.audio.dsp.MsebCalculator.describe(
+                                com.sdw.music.player.core.audio.dsp.MsebCalculator.load(context))
                             // 【V8.184】胶囊宽度有限，描述最多带 2 个特征词（describe 本身已限制 3 个）
                             if (desc.startsWith("Flat") || desc == "Light touch") "MSEB"
                             else "MSEB · " + desc.split(" · ").take(2).joinToString(" · ")
@@ -769,9 +791,25 @@ fun PlayerScreen(
             } catch (_: Exception) { }
         }
 
+        var vuFreezeStartMs = 0L
         while (isActive) {
             crossfadeInfo = MusicService.instance?.crossfadeUiInfo
                 ?: MusicService.CrossfadeUiInfo()
+            // 【V8.490】转场（进/出播放页的共享元素动画）进行中：暂停 60fps 跟帧重活，
+            // 把主线程让给转场本身。否则 VU 环每帧抢 Choreographer 回调，转场掉帧卡顿。
+            // 【自恢复兜底】isAnimating 偶尔复位不及时（SharedCoverOverlay 的 reset 在动画被打断 /
+            // 拖拽取消 / 部分导航路径不一定触发），用超时强制恢复，避免 VU 被永久冻结。
+            val animating = sharedCoverState?.isAnimating == true
+            if (animating) {
+                if (vuFreezeStartMs == 0L) vuFreezeStartMs = System.currentTimeMillis()
+                if (System.currentTimeMillis() - vuFreezeStartMs < 1000L) {
+                    delay(16)
+                    continue
+                }
+                // 超时：即便 isAnimating 没复位也强制恢复 VU，保底不卡死。
+            } else {
+                vuFreezeStartMs = 0L
+            }
             val playing = isPlayingState
             if (uiActiveState && playing) {
                 // VU 跟帧走：60Hz 推频段（仅 VU Canvas 读，红绘不重排，保平滑）；
@@ -872,7 +910,20 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
 
     // 播放器页固定深色配色：无论全局切浅色还是深色，播放器内部始终走深色（含文字）
     MaterialTheme(colorScheme = SDWDarkColorScheme) {
-    Box(modifier = Modifier.fillMaxSize()) {
+    // 【V9.02 防误触】返回（出播放页）转场期间播放页仍在顶层逐渐淡出，此刻点击会打在播放页控件
+    // （如中央播放/暂停键）上造成误触发。isAnimating 在转场期间为真，故在此期间吞掉播放页所有指针
+    // 事件；转场结束播放页被销毁后列表立即正常可点，无残留副作用。
+    val coverAnimating = sharedCoverState?.isAnimating == true
+    val blockInputDuringTransition = if (coverAnimating) {
+        Modifier.pointerInput(Unit) {
+            awaitPointerEventScope {
+                while (true) {
+                    awaitPointerEvent().changes.forEach { it.consume() }
+                }
+            }
+        }
+    } else Modifier
+    Box(modifier = Modifier.fillMaxSize().then(blockInputDuringTransition)) {
         // Cover color blurred background
         if (coverColorBgEnabled) {
             // 【V8.178】直接用外层门控后的 coverUri（原来这里局部重定义了一个没过
@@ -892,14 +943,37 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 if (next != null) preheatCoverImages(next)
                 bgShownUri = next
             }
+            // 【V8.490·自恢复】转场进行中冻结全屏模糊 + 墨滴（让 GPU/主线程给飞行动画），
+            // 但 isAnimating 偶尔复位不及时（见 VU 环注释），故用超时兜底：最多冻 1000ms
+            // 强制恢复，避免背景永久无模糊 / 墨滴永久消失。
+            var blurFrozen by remember { mutableStateOf(false) }
+            LaunchedEffect(sharedCoverState?.isAnimating) {
+                if (sharedCoverState?.isAnimating == true) {
+                    blurFrozen = true
+                    delay(1000L)
+                    blurFrozen = false
+                } else {
+                    blurFrozen = false
+                }
+            }
             if (bgShownUri?.isNotBlank() == true) {
                 // 封面模糊背景：小半径模糊保留图案轮廓，高透明度让颜色充分透出
                 // 【V8.5】整体过渡：uri 变化时 Crossfade 600ms 淡入淡出，避免背景瞬切
+                // 【V8.490】转场（进/出播放页）期间把模糊半径降到 0：全屏 blur 是 GPU 大头，
+                // 飞入/飞出动画每帧都要重跑一遍全屏模糊 shader，GPU 被占满导致转场掉帧
+                // （跟 VU 表无关，关了 VU 也卡）。转场结束再恢复 40.dp，边缘仅一次性重模糊。
+                // 40.dp 比原 28.dp 更糊，减少封面图案透出、让歌词更清晰（见下方中心压暗层）。
+                // 【V8.492 转场减负】转场期间直接不挂 blur 层：blur(0.dp) 仍会强制全屏离屏
+                // 渲染（每帧分配 offscreen layer + 跑一遍 blur shader），和共享元素 overlay
+                // 抢合成带宽 → 转场掉帧。blurFrozen 时退化成「裸」Modifier（只留 scale），
+                // 飞完再挂回 40.dp，边缘一次性重模糊用户无感。
+                val bgBoxModifier = if (blurFrozen) {
+                    Modifier.fillMaxSize().scale(1.35f)
+                } else {
+                    Modifier.fillMaxSize().scale(1.35f).blur(40.dp)
+                }
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .scale(1.35f)
-                        .blur(28.dp),
+                    modifier = bgBoxModifier,
                     contentAlignment = Alignment.Center
                 ) {
                     Crossfade(
@@ -932,19 +1006,25 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawRect(
                     Brush.verticalGradient(
-                        0.0f to Color.Black.copy(alpha = 0.55f),
-                        0.20f to Color.Black.copy(alpha = 0.10f),
-                        0.50f to Color.Black.copy(alpha = 0.03f),
-                        0.82f to Color.Black.copy(alpha = 0.15f),
-                        1.0f to Color.Black.copy(alpha = 0.55f)
+                        0.0f to Color.Black.copy(alpha = 0.60f),
+                        0.20f to Color.Black.copy(alpha = 0.30f),
+                        0.50f to Color.Black.copy(alpha = 0.22f),
+                        0.82f to Color.Black.copy(alpha = 0.35f),
+                        1.0f to Color.Black.copy(alpha = 0.60f)
                     )
                 )
             }
-            // 【V8.37】扰动晕开层：低 alpha 墨滴在模糊背景上缓慢流动（仅 cover_color_bg 开启时叠加）
-            InkBloomOverlay(accentColor = accentColor)
+            // 【V8.490】扰动晕开层：低 alpha 墨滴在模糊背景上缓慢流动（仅 cover_color_bg 开启时叠加）。
+            // 转场进行中冻结它——墨滴漂移极慢（26~44s 周期），转场那几百 ms 里重绘完全是浪费，
+            // 还会和转场抢主线程/合成带宽，直接跳过。
+            if (!blurFrozen) {
+                InkBloomOverlay(accentColor = accentColor)
+            }
         }
         // Edge light — 只保留方案 B（脉冲光带），随机呼吸效果
-        if (!isFoldable && edgeLightEnabled) {
+        // 【V8.492 转场减负】转场（飞入/飞出）期间跳过：脉冲光带用 infiniteRepeatable 每帧重组，
+        // 飞行那几百 ms 里和共享元素抢主线程/合成带宽 → 掉帧。封面在飞，省掉这圈光带无感。
+        if (!isFoldable && edgeLightEnabled && sharedCoverState?.isAnimating != true) {
             EdgePulseBand(
                 coverColors = vuCoverColors,
                 accentColor = accentColor
@@ -952,7 +1032,7 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
         }
 
         // 【V8.182 过渡可视化】DJ 交叉淡化进行中：进度 + A/B 两轨电平，过渡结束自动收起
-        if (crossfadeInfo.state == com.sdw.music.player.MusicService.XfadeUiState.ACTIVE &&
+        if (crossfadeInfo.state == com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.ACTIVE &&
             crossfadeInfo.xfProgress > 0f
         ) {
             XfadeVisualizer(
@@ -988,6 +1068,7 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
         // V8.8 outer-screen compact rules.
         if (isRazrOuter) {
             PortraitLayout(
+                isAnimating = sharedCoverState?.isAnimating == true,
                 wordByWord = wordByWordOn,
                 immersive = immersivePlayer,
                 hideSongInfo = hideSongInfo,
@@ -1054,7 +1135,8 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 onToggleInlineLyrics = ::toggleInlineLyrics,
                 onNavigateToMseb = onNavigateToMseb,
                 songSpec = songSpec,
-                bottomAutoHide = bottomAutoHide
+                bottomAutoHide = bottomAutoHide,
+                onLyricoExternalEditReturned = onLyricoExternalEditReturned
             )
         } else if (isLandscape && isFoldable) {
             FoldableLayout(
@@ -1115,10 +1197,12 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 onToggleInlineLyrics = ::toggleInlineLyrics,
                 onNavigateToMseb = onNavigateToMseb,
                 songSpec = songSpec,
-                bottomAutoHide = bottomAutoHide
+                bottomAutoHide = bottomAutoHide,
+                onLyricoExternalEditReturned = onLyricoExternalEditReturned
             )
         } else if (isLandscape) {
             LandscapeLayout(
+                isAnimating = sharedCoverState?.isAnimating == true,
                 wordByWord = wordByWordOn,
                 lyricsLines = lyricsLines,
                 currentLyricIdx = currentLyricIdx,
@@ -1182,10 +1266,12 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 onToggleInlineLyrics = ::toggleInlineLyrics,
                 onNavigateToMseb = onNavigateToMseb,
                 songSpec = songSpec,
-                bottomAutoHide = bottomAutoHide
+                bottomAutoHide = bottomAutoHide,
+                onLyricoExternalEditReturned = onLyricoExternalEditReturned
             )
         } else {
             PortraitLayout(
+                isAnimating = sharedCoverState?.isAnimating == true,
                 wordByWord = wordByWordOn,
                 immersive = immersivePlayer,
                 hideSongInfo = hideSongInfo,
@@ -1252,7 +1338,8 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 onToggleInlineLyrics = ::toggleInlineLyrics,
                 onNavigateToMseb = onNavigateToMseb,
                 songSpec = songSpec,
-                bottomAutoHide = bottomAutoHide
+                bottomAutoHide = bottomAutoHide,
+                onLyricoExternalEditReturned = onLyricoExternalEditReturned
             )
         }
 
@@ -1430,9 +1517,11 @@ private fun FoldableLayout(coverUri: String?,
     inlineLyrics: Boolean = true,
     onToggleInlineLyrics: () -> Unit = {},
     // 【V8.21】歌曲规格显示（分段着色）
-    songSpec: com.sdw.music.player.core.audio.SongSpecReader.Spec? = null,
+    songSpec: com.sdw.music.player.core.audio.metadata.SongSpecReader.Spec? = null,
     /** 底部四键自动隐藏控制器（null = 四键常驻）。 */
-    bottomAutoHide: BottomAutoHide? = null
+    bottomAutoHide: BottomAutoHide? = null,
+    // 【Lyrico 联动】三点菜单「用 Lyrico 编辑」返回后的回调，透传给 PlayerTopBar
+    onLyricoExternalEditReturned: (songId: Long, filePath: String, extras: Bundle?) -> Unit = { _, _, _ -> }
 ) {
     // [V8.99] Insets parity with PortraitLayout: this page has no Scaffold, so the
     // navigation-bar inset must be consumed here or bottom-anchored controls sit under
@@ -1454,6 +1543,10 @@ private fun FoldableLayout(coverUri: String?,
                 onDismissMenu = onDismissMenu,
                 onNavigateBack = onNavigateBack,
                 onDelete = onDeleteSong,
+                currentSongPath = state.currentSongFilePath,
+                onLyricoEditReturned = { extras ->
+                    onLyricoExternalEditReturned(state.currentSongId, state.currentSongFilePath, extras)
+                },
                 onAddToPlaylist = onAddToPlaylist,
                 onSleepTimer = onSleepTimer,
                 onNavigateToQueue = onNavigateToQueue,
@@ -1566,13 +1659,6 @@ private fun FoldableLayout(coverUri: String?,
             }
 
             // Bottom: controls
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb, visible = !immersive)
-            }
             Spacer(Modifier.height(4.dp))
             DacInfoBar(accentColor, textAccentColor, isPlaying,
                 onClick = onNavigateToAudioDiagnostic,
@@ -1717,14 +1803,16 @@ private fun LiveVuMeter(
     modifier: Modifier = Modifier,
     style: VuMeterStyle,
     accentColor: Color,
-    coverColors: List<Int>
+    coverColors: List<Int>,
+    /** 转场进行中：让 VU 60fps 帧时钟让位给共享元素转场（见 VuMeter）。 */
+    isAnimating: Boolean = false
 ) {
     val bl = bandLevelsState.value
     VuMeter(
         sub = bl.sub, bass = bl.bass, mid = bl.mid, high = bl.high, rms = bl.rms,
         bandsL = bl.bandsL, bandsR = bl.bandsR,
         isActive = isActive, style = style, accentColor = accentColor,
-        coverColors = coverColors, modifier = modifier
+        coverColors = coverColors, modifier = modifier, isAnimating = isAnimating
     )
 }
 
@@ -1751,6 +1839,8 @@ private fun LandscapeLayout(coverUri: String?,
     visualMode: PlayerVisualMode,
     bandLevelsState: State<BandLevels>,
     vuStyleIdx: Int,
+    /** 转场（飞进/飞出）进行中：让 VU 60fps 帧时钟让位给共享元素转场（见 LiveVuMeter）。 */
+    isAnimating: Boolean = false,
     currentLyricLine: String?,
     // [V8.135] 播放界面逐字高亮（与全屏歌词页共用 lyric_word_by_word 开关）
     wordByWord: Boolean = false,
@@ -1802,9 +1892,11 @@ private fun LandscapeLayout(coverUri: String?,
     inlineLyrics: Boolean = true,
     onToggleInlineLyrics: () -> Unit = {},
     // 【V8.21】歌曲规格显示（分段着色）
-    songSpec: com.sdw.music.player.core.audio.SongSpecReader.Spec? = null,
+    songSpec: com.sdw.music.player.core.audio.metadata.SongSpecReader.Spec? = null,
     /** 底部四键自动隐藏控制器（null = 四键常驻）。 */
-    bottomAutoHide: BottomAutoHide? = null
+    bottomAutoHide: BottomAutoHide? = null,
+    // 【Lyrico 联动】三点菜单「用 Lyrico 编辑」返回后的回调，透传给 PlayerTopBar
+    onLyricoExternalEditReturned: (songId: Long, filePath: String, extras: Bundle?) -> Unit = { _, _, _ -> }
 ) {
     // 【V8.380】DJ 模式不再走独立界面。
     // 之前给 DJ 做了横屏卡片 / 竖屏卡片 / 彩虹频谱 / 整曲波形 / 切片 / BPM 读数，
@@ -1833,6 +1925,10 @@ private fun LandscapeLayout(coverUri: String?,
                 onDismissMenu = onDismissMenu,
                 onNavigateBack = onNavigateBack,
                 onDelete = onDeleteSong,
+                currentSongPath = state.currentSongFilePath,
+                onLyricoEditReturned = { extras ->
+                    onLyricoExternalEditReturned(state.currentSongId, state.currentSongFilePath, extras)
+                },
                 onAddToPlaylist = onAddToPlaylist,
                 onSleepTimer = onSleepTimer,
                 onNavigateToQueue = onNavigateToQueue,
@@ -1913,7 +2009,7 @@ private fun LandscapeLayout(coverUri: String?,
                 Spacer(Modifier.height(8.dp))
             // VU 表/ 整曲波形 — compact in landscape
             if (visualMode.showVu) {
-                LiveVuMeter(bandLevelsState = bandLevelsState, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, coverColors = vuCoverColors, modifier = Modifier.padding(horizontal = 8.dp).heightIn(max = 50.dp))
+                LiveVuMeter(bandLevelsState = bandLevelsState, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, coverColors = vuCoverColors, isAnimating = isAnimating, modifier = Modifier.padding(horizontal = 8.dp).heightIn(max = 50.dp))
                 Spacer(Modifier.height(6.dp))
             }
             if (visualMode.showWave) {
@@ -1930,13 +2026,6 @@ private fun LandscapeLayout(coverUri: String?,
                     }
                 )
                 Spacer(Modifier.height(6.dp))
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb, visible = !immersive)
             }
             DacInfoBar(accentColor, textAccentColor, isPlaying,
                 onClick = onNavigateToAudioDiagnostic,
@@ -2080,6 +2169,8 @@ private fun PortraitLayout(coverUri: String?,
     visualMode: PlayerVisualMode,
     bandLevelsState: State<BandLevels>,
     vuStyleIdx: Int,
+    /** 转场（飞进/飞出）进行中：让 VU 60fps 帧时钟让位给共享元素转场（见 LiveVuMeter）。 */
+    isAnimating: Boolean = false,
     currentLyricLine: String?,
     lyricsLines: List<LyricLine>,
     currentLyricIdx: Int,
@@ -2132,9 +2223,11 @@ private fun PortraitLayout(coverUri: String?,
     inlineLyrics: Boolean = true,
     onToggleInlineLyrics: () -> Unit = {},
     // 【V8.21】歌曲规格显示（分段着色）
-    songSpec: com.sdw.music.player.core.audio.SongSpecReader.Spec? = null,
+    songSpec: com.sdw.music.player.core.audio.metadata.SongSpecReader.Spec? = null,
     /** 底部四键自动隐藏控制器（null = 四键常驻）。 */
-    bottomAutoHide: BottomAutoHide? = null
+    bottomAutoHide: BottomAutoHide? = null,
+    // 【Lyrico 联动】三点菜单「用 Lyrico 编辑」返回后的回调，透传给 PlayerTopBar
+    onLyricoExternalEditReturned: (songId: Long, filePath: String, extras: Bundle?) -> Unit = { _, _, _ -> }
 ) {
     val hPadding = if (isRazrOuter) 12.dp else if (isCompact) 24.dp else 48.dp
     val infoPadding = if (isRazrOuter) 14.dp else if (isCompact) 20.dp else 32.dp
@@ -2151,6 +2244,10 @@ private fun PortraitLayout(coverUri: String?,
             onDismissMenu = onDismissMenu,
             onNavigateBack = onNavigateBack,
             onDelete = onDeleteSong,
+            currentSongPath = state.currentSongFilePath,
+            onLyricoEditReturned = { extras ->
+                onLyricoExternalEditReturned(state.currentSongId, state.currentSongFilePath, extras)
+            },
             onAddToPlaylist = onAddToPlaylist,
             onSleepTimer = onSleepTimer,
             onNavigateToQueue = onNavigateToQueue,
@@ -2354,7 +2451,7 @@ private fun PortraitLayout(coverUri: String?,
 
         // VU 表 / 整曲波形
         if (!isRazrOuter && visualMode.showVu) {
-                LiveVuMeter(bandLevelsState = bandLevelsState, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, coverColors = vuCoverColors, modifier = Modifier.padding(horizontal = infoPadding))
+                LiveVuMeter(bandLevelsState = bandLevelsState, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, coverColors = vuCoverColors, isAnimating = isAnimating, modifier = Modifier.padding(horizontal = infoPadding))
             Spacer(Modifier.height(6.dp))
         }
         if (!isRazrOuter && visualMode.showWave) {
@@ -2372,17 +2469,7 @@ private fun PortraitLayout(coverUri: String?,
             Spacer(Modifier.height(6.dp))
         }
 
-        // EQ label
-        if (!isRazrOuter) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.Center,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                PlayerEqLabel(eqPresetName, accentColor, textAccentColor, onClick = onNavigateToMseb, visible = !immersive)
-            }
             Spacer(Modifier.height(8.dp))
-        }
 
         // V3.3.4: DAC info capsule (visible only in USB DAC exclusive mode)
         if (!isRazrOuter) {
@@ -2645,24 +2732,32 @@ private fun EdgePulseBand(
         val w = size.width; val h = size.height
         if (w <= 50f || h <= 50f) return@Canvas
         val minDim = minOf(w, h)
-        val tk = minDim * 0.014f          // 线宽基准
-        val inset = minDim * 0.008f
-        // 圆角：屏幕物理玻璃圆角(68px)偏方、旧值(0.14=170px)太圆不贴合，取 0.085 折中
-        val ringCorner = minDim * 0.085f
-        // Geometry only changes on resize/rotation; rebuild the android path then and
-        // reuse it on every other frame instead of allocating a fresh Path each draw.
-        // 【V8.381 横屏修复】闸门必须包含 w/h：90° 旋转时 minDim 不变 ->
-        // 仅靠 cornerKey 不会触发重建，路径停留在上一朝向的形状。
-        if (ringCorner != cache.cornerKey || w != cache.wKey || h != cache.hKey) {
-            val ringRect = Rect(inset, inset, w - inset, h - inset)
+        val tk = minDim * 0.010f          // 线宽基准（比原 0.014 更细）
+        val inset = minDim * 0.010f
+        // 【V8.113+】只保留两条长边、删除两条短边：
+        // 竖屏（高≥宽）长边为左右两条竖边；横屏长边为上下两条横边。
+        // 软头（Cap.ROUND）让长边两端柔和收尾，不再画圆角整框。
+        val longVertical = h >= w
+        // 几何仅在尺寸/旋转变化时重建，其余帧复用同一条 Path。
+        // 闸门用 w/h：90° 旋转时 minDim 不变，仅靠 cornerKey 不会触发重建。
+        if (w != cache.wKey || h != cache.hKey) {
             ringPathAndroid.reset()
-            ringPathAndroid.addRoundRect(
-                android.graphics.RectF(ringRect.left, ringRect.top, ringRect.right, ringRect.bottom),
-                ringCorner, ringCorner, android.graphics.Path.Direction.CW
-            )
-            cache.cornerKey = ringCorner
+            if (longVertical) {
+                // 左右两条长竖边
+                ringPathAndroid.moveTo(inset, inset)
+                ringPathAndroid.lineTo(inset, h - inset)
+                ringPathAndroid.moveTo(w - inset, inset)
+                ringPathAndroid.lineTo(w - inset, h - inset)
+            } else {
+                // 上下两条长横边
+                ringPathAndroid.moveTo(inset, inset)
+                ringPathAndroid.lineTo(w - inset, inset)
+                ringPathAndroid.moveTo(inset, h - inset)
+                ringPathAndroid.lineTo(w - inset, h - inset)
+            }
             cache.wKey = w
             cache.hKey = h
+            cache.cornerKey = -1f
         }
 
         val breatheAmp = breathe.coerceIn(0f, 1f)
@@ -2692,13 +2787,13 @@ private fun EdgePulseBand(
             sweepMatrix.setRotate(angle, cx, cy)
             grad.setLocalMatrix(sweepMatrix)
 
-            glowPaint.strokeWidth = tk * 3.6f
+            glowPaint.strokeWidth = tk * 3.0f
             glowPaint.shader = grad
             glowPaint.alpha = (breatheAmp * 255).toInt().coerceIn(0, 255)
             if (glowPaint.maskFilter == null) {
                 glowPaint.maskFilter = BlurMaskFilter(tk * 1.8f, BlurMaskFilter.Blur.NORMAL)
             }
-            corePaint.strokeWidth = tk * 1.1f
+            corePaint.strokeWidth = tk * 0.9f
             corePaint.shader = grad
             corePaint.alpha = (breatheAmp * 255).toInt().coerceIn(0, 255)
 

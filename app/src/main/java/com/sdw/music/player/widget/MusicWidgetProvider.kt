@@ -1,4 +1,5 @@
 package com.sdw.music.player.widget
+import com.sdw.music.player.core.audio.playback.MusicService
 
 import android.app.PendingIntent
 import android.appwidget.AppWidgetManager
@@ -11,7 +12,6 @@ import android.widget.RemoteViews
 import com.sdw.music.player.MainActivity
 import com.sdw.music.player.R
 import com.sdw.music.player.SongRepository
-import com.sdw.music.player.MusicService
 import android.os.Handler
 import android.os.Looper
 import kotlin.concurrent.thread

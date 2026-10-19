@@ -310,7 +310,7 @@ int detectFromFileFd(const char* path, int fd, int64_t offset, int64_t length, b
 extern "C" {
 
 JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpm(
+Java_com_sdw_music_player_core_audio_analysis_BpmScanner_nativeDetectBpm(
         JNIEnv* env, jclass clazz, jfloatArray jSamples, jint sampleRate) {
     if (!jSamples || sampleRate <= 0) return -1;
     jsize n = env->GetArrayLength(jSamples);
@@ -344,7 +344,7 @@ Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpm(
 }
 
 JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpmFromFd(
+Java_com_sdw_music_player_core_audio_analysis_BpmScanner_nativeDetectBpmFromFd(
         JNIEnv* env, jclass clazz, jstring jPath, jint fd, jlong offset, jlong length) {
     const char* path = nullptr;
     if (jPath) path = env->GetStringUTFChars(jPath, nullptr);
@@ -355,7 +355,7 @@ Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpmFromFd(
 }
 
 JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpmFromFile(
+Java_com_sdw_music_player_core_audio_analysis_BpmScanner_nativeDetectBpmFromFile(
         JNIEnv* env, jclass clazz, jstring jPath) {
     if (!jPath) return -1;
     const char* path = env->GetStringUTFChars(jPath, nullptr);
@@ -368,7 +368,7 @@ Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpmFromFile(
 
 // 【v8.157】扩展版：返回 int[]{bpm, firstBeatMs, confPct}
 JNIEXPORT jintArray JNICALL
-Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpmFromFdEx(
+Java_com_sdw_music_player_core_audio_analysis_BpmScanner_nativeDetectBpmFromFdEx(
         JNIEnv* env, jclass clazz, jstring jPath, jint fd, jlong offset, jlong length) {
     const char* path = nullptr;
     if (jPath) path = env->GetStringUTFChars(jPath, nullptr);
@@ -389,7 +389,7 @@ Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpmFromFdEx(
 }
 
 JNIEXPORT jintArray JNICALL
-Java_com_sdw_music_player_core_audio_BpmScanner_nativeDetectBpmFromFileEx(
+Java_com_sdw_music_player_core_audio_analysis_BpmScanner_nativeDetectBpmFromFileEx(
         JNIEnv* env, jclass clazz, jstring jPath) {
     if (!jPath) return nullptr;
     const char* path = env->GetStringUTFChars(jPath, nullptr);

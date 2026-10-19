@@ -1,4 +1,9 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.dsp.LoudnessNormalizer
+import com.sdw.music.player.core.audio.analysis.MediaProbe
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.engine.OboeDirectPlayer
+import com.sdw.music.player.core.audio.engine.UsbDacManager
 
 import android.media.AudioDeviceInfo
 import com.sdw.music.player.ui.components.SDWTopBar
@@ -32,8 +37,6 @@ import androidx.compose.ui.unit.dp
 import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.res.stringResource
-import com.sdw.music.player.MusicService
-import com.sdw.music.player.OboeDirectPlayer
 import com.sdw.music.player.R
 import com.sdw.music.player.ui.theme.*
 import com.sdw.music.player.ui.components.glassSurface
@@ -156,13 +159,13 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
             } == true
 
             // V3.3.4: USB DAC exclusive live params
-            isUsbDacMode = try { com.sdw.music.player.core.audio.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
+            isUsbDacMode = try { com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
             if (isUsbDacMode) {
-                dacStreamRate = try { com.sdw.music.player.core.audio.UsbDacManager.queryActiveSampleRate() } catch (_: Throwable) { 0 }
-                dacStreamBits = try { com.sdw.music.player.core.audio.UsbDacManager.queryActiveBits() } catch (_: Throwable) { 0 }
-                dacName = try { com.sdw.music.player.core.audio.UsbDacManager.getDacDisplayName() } catch (_: Throwable) { "USB DAC" }
-                dacStats = try { com.sdw.music.player.core.audio.UsbDacManager.getStats() ?: "" } catch (_: Throwable) { "" }
-                dacSupportedRates = try { com.sdw.music.player.core.audio.UsbDacManager.getSupportedRates() } catch (_: Throwable) { "" }
+                dacStreamRate = try { com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveSampleRate() } catch (_: Throwable) { 0 }
+                dacStreamBits = try { com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveBits() } catch (_: Throwable) { 0 }
+                dacName = try { com.sdw.music.player.core.audio.engine.UsbDacManager.getDacDisplayName() } catch (_: Throwable) { "USB DAC" }
+                dacStats = try { com.sdw.music.player.core.audio.engine.UsbDacManager.getStats() ?: "" } catch (_: Throwable) { "" }
+                dacSupportedRates = try { com.sdw.music.player.core.audio.engine.UsbDacManager.getSupportedRates() } catch (_: Throwable) { "" }
             }
 
             // Track audio focus changes without requesting focus
@@ -795,9 +798,17 @@ private fun SignalPathCard(oboe: OboeDirectPlayer?) {
     var clipCount by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
         while (true) {
-            val liveOboe = MusicService.instance?.getOboePlayer()
-            dspChain = liveOboe?.getDspChainState() ?: IntArray(16)
-            clipCount = liveOboe?.getClipCount() ?: 0
+            val svc = MusicService.instance
+            if (svc?.isDacActive() == true) {
+                // 【V9.01】USB DAC 独占路径：Oboe 为 null，改读 UsbDacManager 的链状态，
+                // 否则 dspChain 全 0 会被误判为「原声直通」。
+                dspChain = UsbDacManager.getDspChainState()
+                clipCount = 0
+            } else {
+                val liveOboe = svc?.getOboePlayer()
+                dspChain = liveOboe?.getDspChainState() ?: IntArray(16)
+                clipCount = liveOboe?.getClipCount() ?: 0
+            }
             delay(250L)
         }
     }
@@ -938,25 +949,25 @@ private data class NormInfo(
 )
 
 private fun readNormInfo(context: android.content.Context, path: String?): NormInfo {
-    val cfg = com.sdw.music.player.core.audio.LoudnessNormalizer.load(context)
+    val cfg = com.sdw.music.player.core.audio.dsp.LoudnessNormalizer.load(context)
     if (path.isNullOrBlank()) {
         return NormInfo("—", cfg.enabled, cfg.mode.name, cfg.targetLufs, context.getString(R.string.diag_norm_no_track), 0f, 0f, 0f, "—")
     }
-    val tag = com.sdw.music.player.core.audio.LoudnessNormalizer.debugTag(path)
+    val tag = com.sdw.music.player.core.audio.dsp.LoudnessNormalizer.debugTag(path)
     val bits = mutableListOf<String>()
     tag?.trackGainDb?.let { bits.add("track ${"%.1f".format(it)}dB") }
     tag?.albumGainDb?.let { bits.add("album ${"%.1f".format(it)}dB") }
     tag?.trackPeak?.let { bits.add("peak ${"%.3f".format(it)}") }
     tag?.lufs?.let { bits.add("LUFS ${"%.1f".format(it)}") }
-    val computed = com.sdw.music.player.core.audio.LoudnessNormalizer.gainFor(path, cfg)
-    val svc = com.sdw.music.player.MusicService.instance
-    val dac = try { com.sdw.music.player.core.audio.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
+    val computed = com.sdw.music.player.core.audio.dsp.LoudnessNormalizer.gainFor(path, cfg)
+    val svc = com.sdw.music.player.core.audio.playback.MusicService.instance
+    val dac = try { com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
     return NormInfo(
-        title = com.sdw.music.player.MusicService.currentSong?.title ?: path.substringAfterLast('/'),
+        title = com.sdw.music.player.core.audio.playback.MusicService.currentSong?.title ?: path.substringAfterLast('/'),
         enabled = cfg.enabled,
         mode = when (cfg.mode) {
-            com.sdw.music.player.core.audio.LoudnessNormalizer.Mode.TRACK -> context.getString(R.string.settings_loudness_mode_track)
-            com.sdw.music.player.core.audio.LoudnessNormalizer.Mode.ALBUM -> context.getString(R.string.settings_loudness_mode_album)
+            com.sdw.music.player.core.audio.dsp.LoudnessNormalizer.Mode.TRACK -> context.getString(R.string.settings_loudness_mode_track)
+            com.sdw.music.player.core.audio.dsp.LoudnessNormalizer.Mode.ALBUM -> context.getString(R.string.settings_loudness_mode_album)
             else -> context.getString(R.string.settings_loudness_mode_auto)
         },
         targetLufs = cfg.targetLufs,
@@ -980,7 +991,7 @@ private fun LoudnessNormCard() {
             val song = MusicService.currentSong
             val path = song?.filePath?.takeIf { it.isNotBlank() }
                 ?: song?.path?.takeIf { it.startsWith("/") }
-            val dac = try { com.sdw.music.player.core.audio.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
+            val dac = try { com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
             if (path != lastPath) {
                 lastPath = path
                 tick = 0
@@ -1045,10 +1056,10 @@ private fun LoudnessNormCard() {
                 CapRow(stringResource(R.string.diag_norm_cur_track), i.title)
                 CapRow(stringResource(R.string.settings_loudness_mode), i.mode)
                 CapRow(stringResource(R.string.settings_loudness_target),
-                    if (i.targetLufs == com.sdw.music.player.core.audio.LoudnessNormalizer.TARGET_AUTO)
+                    if (i.targetLufs == com.sdw.music.player.core.audio.dsp.LoudnessNormalizer.TARGET_AUTO)
                         stringResource(R.string.diag_auto_lufs).format(
-                            com.sdw.music.player.core.audio.LoudnessNormalizer.effectiveTarget(
-                                com.sdw.music.player.core.audio.LoudnessNormalizer.load(context)))
+                            com.sdw.music.player.core.audio.dsp.LoudnessNormalizer.effectiveTarget(
+                                com.sdw.music.player.core.audio.dsp.LoudnessNormalizer.load(context)))
                     else "%.1f LUFS".format(i.targetLufs))
                 CapRow(stringResource(R.string.diag_norm_metadata), i.tagText)
                 CapRow(stringResource(R.string.diag_norm_computed), "${"%.2f".format(i.computedDb)} dB")
@@ -1415,7 +1426,7 @@ private fun inferFromOboeMode(oboePlayer: Any?): Pair<String, String> {
 private fun extractSampleRateFromFile(path: String): Int {
     return try {
         // 【V8.429】收敛到单线程闸门（诊断页与播放页会同时探测；native abort 详见 MediaProbe）
-        com.sdw.music.player.core.audio.MediaProbe.onProbeThread {
+        com.sdw.music.player.core.audio.analysis.MediaProbe.onProbeThread {
             val extractor = MediaExtractor()
             try {
                 extractor.setDataSource(path)

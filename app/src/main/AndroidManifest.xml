@@ -28,6 +28,13 @@
         <!-- 【V8.276】显式声明插件包名：刚装好 / 进程被杀时包处于 stopped 态，
              按 action 查询可能查不到，显式声明包名可保证始终可见。 -->
         <package android:name="com.sdw.stem.plugin" />
+        <!-- 【Lyrico 联动】声明 Lyrico 包名（含 debug 版）与其 EDIT_TAG action，
+             否则 Android 11+ 包可见性限制会让 resolveActivity 恒返回 null，误报"未安装 Lyrico"。 -->
+        <package android:name="com.lonx.lyrico" />
+        <package android:name="com.lonx.lyrico.debug" />
+        <intent>
+            <action android:name="com.lonx.lyrico.action.EDIT_TAG" />
+        </intent>
         <intent>
             <action android:name="com.sdw.music.player.action.STEM_PLUGIN" />
         </intent>
@@ -79,7 +86,7 @@
         </activity>
 
         <service
-            android:name=".MusicService"
+            android:name="com.sdw.music.player.core.audio.playback.MusicService"
             android:exported="true"
             android:foregroundServiceType="mediaPlayback">
             <intent-filter>
@@ -116,7 +123,7 @@
         </receiver>
 
         <receiver
-            android:name=".MediaButtonReceiver"
+            android:name="com.sdw.music.player.core.audio.playback.MediaButtonReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="com.sdw.music.player.PLAY" />

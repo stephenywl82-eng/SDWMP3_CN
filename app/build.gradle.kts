@@ -23,8 +23,8 @@ android {
         applicationId = "com.sdw.music.player.cn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 901
-        versionName = "9.01"    // 【V9.01】切歌"哒"声修复：B 进场 23ms 音频坑 + A 退场 7% 变速弹回（versionCode 901）
+        versionCode = 919
+        versionName = "9.19"    // 【V9.19】修扫描「永远卡在一处」：① readFlacVorbisComments 加退化护栏（blockType=0&dataLength=0&非末块→break，防损坏/全零 FLAC 死循环）；② probeDurationMs 改用独立线程+8s 硬超时（MediaMetadataRetriever.setDataSource 对特殊字符路径/损坏文件会原生挂死、无取消手段，旧实现走 MediaProbe 单线程会拖垮整轮扫描）；③ 扫描循环对 probeDurationMs 与 readBpmAndKey 各加 8s withTimeoutOrNull 兜底+记日志。纯 Kotlin 改动，不碰 .so；蓝牙/环绕修复与 V9.18 引擎不变。
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -64,7 +64,10 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = true
-            isShrinkResources = true
+            // 【V9.01】关闭资源收缩：R8 收缩器在激进优化下会把部分只被 Compose stringResource 引用的
+            // 多语言字符串（如 settings_engine_dsp / settings_dac_mseb 的 values-zh 变体）误判为不可达而裁掉，
+            // 仅保留英文默认，导致中文缺失。关掉资源收缩可保住全部 locale 字符串（仅 APK 略增，对本播放器无碍）。
+            isShrinkResources = false
             signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 getDefaultProguardFile("proguard-android.txt"),

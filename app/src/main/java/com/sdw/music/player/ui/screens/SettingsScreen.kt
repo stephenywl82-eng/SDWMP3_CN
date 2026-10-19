@@ -1,7 +1,15 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.analysis.BpmScanner
+import com.sdw.music.player.core.audio.dsp.LoudnessNormalizer
+import com.sdw.music.player.core.audio.dsp.MasterSyncShadow
+import com.sdw.music.player.core.audio.dsp.MsebCalculator
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.engine.OboeDirectPlayer
+import com.sdw.music.player.core.audio.engine.UsbDacManager
 import com.sdw.music.player.core.util.floatValue
 
 import androidx.activity.compose.rememberLauncherForActivityResult
+import com.sdw.music.player.ui.components.ExpressiveSwitch
 import com.sdw.music.player.ui.components.SDWDivider
 import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.activity.result.contract.ActivityResultContracts
@@ -51,10 +59,7 @@ import com.sdw.music.player.core.backup.SettingsBackup
 import com.sdw.music.player.R
 import com.sdw.music.player.AppLanguageManager
 import com.sdw.music.player.WallpaperManager
-import com.sdw.music.player.core.audio.LoudnessNormalizer
-import com.sdw.music.player.core.audio.UsbDacManager
 // 【V8.219】SfxPackManager import 已随"DJ 音效插件"区块移除
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.ui.theme.*
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.components.springPress
@@ -312,7 +317,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 // 【DJ 单开关整合】隐藏的高级开关：默认收起，仅调试时可展开其余 DJ 子项
                 // 注意：此处位于 LazyListScope（非 @Composable 上下文），不能用 remember；
                 // 用普通 val 直接读 pref，切换后由 bump()/refreshTrigger 触发重组成效。
-                val devShowDjAdvanced = settingsPrefs.getBoolean("dev_show_dj_advanced", false)
+                val devShowDjAdvanced = settingsPrefs.getBoolean("dev_show_dj_advanced", true)
 
                 item { SettingsGroupLabel(stringResource(R.string.settings_section_playback)) }
                 if (devShowDjAdvanced) {
@@ -333,6 +338,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             else offLabel,
                             checked = cfEnabled,
                             inCard = true,
+                            enabled = !usbExclusiveEnabled,
                             onCheckedChange = { enabled ->
                                 cfEnabled = enabled
                                 settingsPrefs.edit().putBoolean("crossfade_enabled", enabled).apply()
@@ -417,7 +423,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                     masterSync = on
                                     settingsPrefs.edit().putBoolean("crossfade_master_sync", on).apply()
                                     // 立刻生效，不等服务重启
-                                    com.sdw.music.player.MasterSyncShadow.enabled = on
+                                    com.sdw.music.player.core.audio.dsp.MasterSyncShadow.enabled = on
                                     bump()
                                 }
                             )
@@ -501,7 +507,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             // 乐句=djay Automix 式 8 小节乐句切入。
                             val landingMode = settingsPrefs.getString("crossfade_landing_mode", null) ?: run {
                                 val m = when {
-                                    settingsPrefs.getBoolean("crossfade_automix", false) -> "phrase"
+                                    settingsPrefs.getBoolean("crossfade_automix", true) -> "phrase"
                                     settingsPrefs.getBoolean("crossfade_smart_align", true) -> "beat"
                                     else -> "standard"
                                 }
@@ -566,7 +572,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                     detectTapGestures(
                                         onLongPress = {
                                             if (djEnabled) {
-                                                val next = !settingsPrefs.getBoolean("dev_show_dj_advanced", false)
+                                                val next = !settingsPrefs.getBoolean("dev_show_dj_advanced", true)
                                                 settingsPrefs.edit().putBoolean("dev_show_dj_advanced", next).apply()
                                                 bump()
                                             }
@@ -582,6 +588,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                        else offLabel,
                             checked = djEnabled,
                             inCard = true,
+                            enabled = !usbExclusiveEnabled,
                             onCheckedChange = { enabled ->
                                 djEnabled = enabled
                                 // 【DJ 单开关整合】唯一主控：开=全栈 djay Automix（含交叉淡化总开关），
@@ -599,6 +606,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 bump()
                             }
                         )
+                        }
+                        if (usbExclusiveEnabled) {
+                            SDWDivider()
+                            SettingsNoteRow(text = stringResource(R.string.settings_dac_exclusive_disables_crossfade_dj))
                         }
                         // 【V8.271】仅过渡时生效（默认开）：效果只在过渡窗口挂上，普通播放保持干净音质
                         if (djEnabled && devShowDjAdvanced) {
@@ -643,7 +654,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         // ======================================================================
                         if (djEnabled && devShowDjAdvanced) {
                         var threeBandOn by remember(refreshTrigger) {
-                            mutableStateOf(settingsPrefs.getBoolean("crossfade_threeband", true))
+                            mutableStateOf(settingsPrefs.getBoolean("crossfade_threeband", false))
                         }
                         // 【V8.248】原「Automix 智能衔接」独立开关已并入上面的「落点模式→乐句」，
                         // 旧键 crossfade_automix 由 MusicService.landingModeOf 一次性迁移，此处不再展示。
@@ -658,7 +669,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         // 默认只露出 5 个主开关（实时效果 / 仅过渡时生效 / 智能选曲 / FX 类型 / 深度），
                         // 低频交接、三段频、变速、采样音效、全库分析收进这里。
                         var djAdvanced by remember(refreshTrigger) {
-                            mutableStateOf(settingsPrefs.getBoolean("settings_dj_advanced", false))
+                            mutableStateOf(settingsPrefs.getBoolean("settings_dj_advanced", true))
                         }
                         SDWDivider()
                         Row(
@@ -870,7 +881,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 checked = analysisRunning,
                                 inCard = true,
                                 onCheckedChange = { enabled ->
-                                    com.sdw.music.player.MusicService.instance?.setBackfillForce(enabled)
+                                    com.sdw.music.player.core.audio.playback.MusicService.instance?.setBackfillForce(enabled)
                                 }
                             )
                         }
@@ -1538,6 +1549,19 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 onCheckedChange = { enabled ->
                                     usbExclusiveEnabled = enabled
                                     settingsPrefs.edit().putBoolean("usb_exclusive", enabled).apply()
+                                    // 【V9.01】DAC 独占模式与交叉淡化 / DJ 过渡互斥：独占总闸开启时，
+                                    // USB DAC 走单流 bit-perfect 路径，无混音 / 交叉淡化能力 → 自动关闭二者并停掉引擎。
+                                    if (enabled) {
+                                        settingsPrefs.edit()
+                                            .putBoolean("crossfade_enabled", false)
+                                            .putBoolean("crossfade_dj_enabled", false)
+                                            .apply()
+                                        MusicService.instance?.setCrossfadeEnabled(false)
+                                        MusicService.instance?.applyLiveFx()
+                                        MusicService.instance?.refreshXfadeBassSwap()
+                                        MusicService.instance?.refreshXfadeThreeBand()
+                                        MusicService.instance?.applyBeatmatchEngine()
+                                    }
                                     bump()
                                 }
                             )
@@ -1577,6 +1601,112 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             }
 
                         }
+                    }
+                }
+
+                // 【V9.01】创意 DSP 开关（引擎 DSP 主开关 + 5 个子开关）置于「USB DAC 独占」模块下。
+                // 原声直通（direct_passthrough）最高优先级：开启后本组全部失效。
+                val dacLockedByPassthrough = settingsPrefs.getBoolean("direct_passthrough", false)
+                if (dacLockedByPassthrough) {
+                    item {
+                        Text(
+                            stringResource(R.string.settings_dac_locked_by_passthrough),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+                item {
+                    SettingsCard {
+                        val engineDspEnabled = remember(refreshTrigger) { settingsPrefs.getBoolean("engine_dsp_enabled", true) }
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "engine_dsp_enabled",
+                            defaultValue = true, icon = Icons.Default.Tune,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_engine_dsp),
+                            subtitleOn = stringResource(R.string.settings_engine_dsp_on),
+                            subtitleOff = stringResource(R.string.settings_engine_dsp_off),
+                            note = stringResource(R.string.settings_engine_dsp_note),
+                            onChange = { enabled -> MusicService.instance?.applyEngineDspEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "crossfade_bass_swap",
+                            defaultValue = true, icon = Icons.Default.GraphicEq,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_bass_swap),
+                            subtitleOn = stringResource(R.string.settings_dac_bass_swap_on),
+                            subtitleOff = stringResource(R.string.settings_dac_bass_swap_off),
+                            onChange = { enabled -> MusicService.instance?.applyBassSwapEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "mseb_enabled",
+                            defaultValue = true, icon = Icons.Default.Equalizer,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_mseb),
+                            subtitleOn = stringResource(R.string.settings_dac_mseb_on),
+                            subtitleOff = stringResource(R.string.settings_dac_mseb_off),
+                            onChange = { enabled -> MusicService.instance?.applyMsebEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "limiter_enabled",
+                            defaultValue = true, icon = Icons.Default.LineWeight,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_limiter),
+                            subtitleOn = stringResource(R.string.settings_dac_limiter_on),
+                            subtitleOff = stringResource(R.string.settings_dac_limiter_off),
+                            onChange = { enabled -> MusicService.instance?.applyLimiterEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        // 【V8.690 修复】DTS 开关改为读写 "mseb" pref（与 DSP 界面 MsebScreen 同源）。
+                        // 旧实现读写 "settings" 的同名字段——两个 UI 各写各的永远不通，且
+                        // 播放器重建时旧 refreshDtsEnabled 也只认 "settings"，导致"开了没效果"。
+                        // key 恰好同为 "dts_enabled"，defaultValue 对齐 MsebCalculator 的 false。
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump,
+                            prefs = context.getSharedPreferences("mseb", android.content.Context.MODE_PRIVATE),
+                            key = "dts_enabled",
+                            defaultValue = false, icon = Icons.Default.SurroundSound,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_dts),
+                            subtitleOn = stringResource(R.string.settings_dac_dts_on),
+                            subtitleOff = stringResource(R.string.settings_dac_dts_off),
+                            onChange = { enabled ->
+                                val svc = MusicService.instance
+                                svc?.applyDtsEnabled(enabled)
+                                // 与 MsebScreen.toggleDts 等价：开时下发完整 M/S 曲线，关时 reset
+                                if (enabled) {
+                                    val p = MsebCalculator.load(context)
+                                    val ex = MsebCalculator.getDtsStageEx(context)
+                                    svc?.applyMsStage(p.soundstage, p.imaging, ex.surround, ex.height)
+                                } else {
+                                    svc?.resetMsStage()
+                                }
+                            }
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "autoeq_enabled",
+                            defaultValue = true, icon = Icons.Default.Headphones,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_autoeq),
+                            subtitleOn = stringResource(R.string.settings_dac_autoeq_on),
+                            subtitleOff = stringResource(R.string.settings_dac_autoeq_off),
+                            onChange = { enabled -> MusicService.instance?.applyAutoEqEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "parametric_eq_enabled",
+                            defaultValue = false, icon = Icons.Default.Speed,
+                            enabled = !dacLockedByPassthrough && engineDspEnabled,
+                            title = stringResource(R.string.settings_dac_parametric_eq),
+                            subtitleOn = stringResource(R.string.settings_dac_parametric_eq_on),
+                            subtitleOff = stringResource(R.string.settings_dac_parametric_eq_off),
+                            onChange = { enabled -> MusicService.instance?.applyParametricEqEnabled(enabled) }
+                        )
                     }
                 }
 
@@ -1678,7 +1808,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                         com.sdw.music.player.SongRepository.rescanFromMediaStore(appCtx)
                                         val all = com.sdw.music.player.SongRepository.getSongs()
                                         // 【v8.21】默认非强制：跳过已缓存歌曲，扫一半中断下次接着扫
-                                        val detected = com.sdw.music.player.core.audio.BpmScanner.scanLibrary(appCtx, all, forceRescan = false) { done, total, _ ->
+                                        val detected = com.sdw.music.player.core.audio.analysis.BpmScanner.scanLibrary(appCtx, all, forceRescan = false) { done, total, _ ->
                                             // 回调在 IO 线程，直接写 Compose 状态（mutableStateOf 线程安全，自动调度重组）
                                             scanDone = done
                                             scanTotal = total
@@ -1713,7 +1843,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                     com.sdw.music.player.BpmKeyCache.init(appCtx)
                                     com.sdw.music.player.SongRepository.rescanFromMediaStore(appCtx)
                                     val all = com.sdw.music.player.SongRepository.getSongs()
-                                    val detected = com.sdw.music.player.core.audio.BpmScanner.scanLibrary(appCtx, all, forceRescan = true) { done, total, _ ->
+                                    val detected = com.sdw.music.player.core.audio.analysis.BpmScanner.scanLibrary(appCtx, all, forceRescan = true) { done, total, _ ->
                                         scanDone = done
                                         scanTotal = total
                                     }
@@ -2125,6 +2255,81 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 )
                             }
                         }
+                    }
+                }
+
+                // 【V9.10】艺人头像（多源：本地文件夹 / Wikimedia / Last.fm），默认开
+                item {
+                    var showLastFmKey by remember { mutableStateOf(false) }
+                    var keyDraft by remember {
+                        mutableStateOf(uiPrefs.getString("lastfm_api_key", "") ?: "")
+                    }
+                    SettingsPrefSwitch(
+                        refreshKey = refreshTrigger,
+                        bump = bump,
+                        prefs = uiPrefs,
+                        key = "artist_avatar_enabled",
+                        icon = Icons.Default.Person,
+                        defaultValue = true,
+                        title = stringResource(R.string.settings_artist_avatar),
+                        subtitleOn = stringResource(R.string.settings_artist_avatar_on),
+                        subtitleOff = stringResource(R.string.settings_artist_avatar_off),
+                        note = stringResource(R.string.settings_artist_avatar_note)
+                    )
+                    val src = uiPrefs.getString("artist_avatar_source", "auto") ?: "auto"
+                    SettingsChipGroup(
+                        label = stringResource(R.string.settings_artist_avatar_source),
+                        options = listOf(
+                            "auto" to stringResource(R.string.settings_artist_avatar_source_auto),
+                            "netease" to stringResource(R.string.settings_artist_avatar_source_netease),
+                            "qq" to stringResource(R.string.settings_artist_avatar_source_qq),
+                            "wikimedia" to stringResource(R.string.settings_artist_avatar_source_wikimedia),
+                            "lastfm" to stringResource(R.string.settings_artist_avatar_source_lastfm),
+                            "local" to stringResource(R.string.settings_artist_avatar_source_local)
+                        ),
+                        selectedKey = src,
+                        onSelect = {
+                            uiPrefs.edit().putString("artist_avatar_source", it).apply()
+                            bump()
+                        }
+                    )
+                    if (src == "lastfm" || src == "auto") {
+                        SettingsItem(
+                            icon = Icons.Default.Lock,
+                            title = stringResource(R.string.settings_lastfm_key),
+                            subtitle = if (keyDraft.isBlank())
+                                stringResource(R.string.settings_lastfm_key_hint)
+                            else "••••••••",
+                            inCard = true,
+                            onClick = { showLastFmKey = true }
+                        )
+                    }
+                    if (showLastFmKey) {
+                        AlertDialog(
+                            onDismissRequest = { showLastFmKey = false },
+                            title = { Text(stringResource(R.string.settings_lastfm_key)) },
+                            text = {
+                                OutlinedTextField(
+                                    value = keyDraft,
+                                    onValueChange = { keyDraft = it },
+                                    label = { Text(stringResource(R.string.settings_lastfm_key_hint)) },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    uiPrefs.edit().putString("lastfm_api_key", keyDraft.trim()).apply()
+                                    showLastFmKey = false
+                                    bump()
+                                }) { Text(stringResource(android.R.string.ok)) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showLastFmKey = false }) {
+                                    Text(stringResource(android.R.string.cancel))
+                                }
+                            }
+                        )
                     }
                 }
 
@@ -2661,29 +2866,26 @@ private fun SettingsSwitchItem(
     subtitle: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
-    inCard: Boolean = false
+    inCard: Boolean = false,
+    enabled: Boolean = true
 ) {
+    val dim = if (enabled) 1f else 0.38f
     Row(
         modifier = Modifier
             .settingsShell(inCard)
             .padding(horizontal = 16.dp, vertical = if (inCard) 8.dp else 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = dim), modifier = Modifier.size(22.dp))
         Spacer(Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = MaterialTheme.colorScheme.onBackground, style = MaterialTheme.typography.bodyLarge)
-            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.bodySmall)
+            Text(title, color = MaterialTheme.colorScheme.onBackground.copy(alpha = dim), style = MaterialTheme.typography.bodyLarge)
+            Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = dim), style = MaterialTheme.typography.bodySmall)
         }
-        Switch(
+        ExpressiveSwitch(
             checked = checked,
-            onCheckedChange = onCheckedChange,
-            colors = SwitchDefaults.colors(
-                checkedThumbColor = MaterialTheme.colorScheme.primary,
-                checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
-                uncheckedThumbColor = Color.White,
-                uncheckedTrackColor = Color(0xFF3A3A3E)
-            )
+            enabled = enabled,
+            onCheckedChange = onCheckedChange
         )
     }
 }
@@ -2723,6 +2925,7 @@ private fun SettingsPrefSwitch(
      */
     note: String? = null,
     defaultValue: Boolean = false,
+    enabled: Boolean = true,
     onChange: ((Boolean) -> Unit)? = null
 ) {
     var checked by remember(refreshKey) { mutableStateOf(prefs.getBoolean(key, defaultValue)) }
@@ -2733,10 +2936,11 @@ private fun SettingsPrefSwitch(
             subtitle = if (checked) subtitleOn else subtitleOff,
             checked = checked,
             inCard = true,
-            onCheckedChange = { enabled ->
-                checked = enabled
-                prefs.edit().putBoolean(key, enabled).apply()
-                onChange?.invoke(enabled)
+            enabled = enabled,
+            onCheckedChange = { value ->
+                checked = value
+                prefs.edit().putBoolean(key, value).apply()
+                onChange?.invoke(value)
                 bump()
             }
         )

@@ -117,7 +117,7 @@ static void flacMetaCallback(void* pUserData, drflac_metadata* pMetadata) {
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacOpen(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacOpen(
     JNIEnv* env, jobject /*this*/, jstring jpath) {
 
     // Stop previous if any
@@ -169,7 +169,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacOpen(
 }
 
 JNIEXPORT jintArray JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacInfo(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacInfo(
     JNIEnv* env, jobject /*this*/) {
 
     jintArray result = env->NewIntArray(4);
@@ -186,7 +186,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacInfo(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacStart(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacStart(
     JNIEnv* /*env*/, jobject /*this*/) {
 
     if (!gFlac) {
@@ -215,7 +215,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacStart(
 }
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacPause(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacPause(
     JNIEnv* /*env*/, jobject /*this*/, jboolean paused) {
 
     gPaused = paused;
@@ -223,7 +223,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacPause(
 }
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacSeek(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacSeek(
     JNIEnv* /*env*/, jobject /*this*/, jlong ms) {
 
     gSeekTargetMs = ms;
@@ -232,7 +232,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacSeek(
 }
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacStop(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacStop(
     JNIEnv* /*env*/, jobject /*this*/) {
 
     gRunning = false;
@@ -250,13 +250,13 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacStop(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacIsEos(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacIsEos(
     JNIEnv* /*env*/, jobject /*this*/) {
     return gEos ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacPositionMs(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacPositionMs(
     JNIEnv* /*env*/, jobject /*this*/) {
     auto* drv = sdw_getUsbDriver();
     if (!drv || !gFlac) {
@@ -270,7 +270,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacPositionMs(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacGaplessSeek(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacGaplessSeek(
     JNIEnv* env, jobject /*this*/, jstring jpath, jlong targetSample) {
 
     const char* path = env->GetStringUTFChars(jpath, nullptr);
@@ -322,7 +322,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacGaplessSeek(
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacTotalSamples(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacTotalSamples(
     JNIEnv* /*env*/, jobject /*this*/) {
     return gTotalPcmFrames.load();
 }
@@ -331,7 +331,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacTotalSamples(
 // 返回 UTF-8 jstring；无内嵌歌词时返回 null。
 // 独立 open/close，不触碰解码状态（gFlac 等），线程安全。
 JNIEXPORT jstring JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeFlacReadLyrics(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacReadLyrics(
     JNIEnv* env, jobject /*this*/, jstring jpath) {
 
     const char* path = env->GetStringUTFChars(jpath, nullptr);

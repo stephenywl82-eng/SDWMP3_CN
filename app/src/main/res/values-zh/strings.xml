@@ -855,6 +855,14 @@
     <string name="mseb_hrtf_spatial">HRIR 空间化</string>
     <string name="mseb_hrtf_spatial_desc">真实测量 HRIR 多虚拟音箱双耳环绕，替换 DTS</string>
     <string name="mseb_hrtf_spatial_hint">拖动声场：水平转方位、垂直调俯仰</string>
+    <string name="mseb_hrtf_field_readout">方位 %1$d° · 俯仰 %2$d°</string>
+    <string name="mseb_hrtf_field_reset">重置</string>
+    <string name="mseb_hrtf_reverb">房间混响</string>
+    <string name="mseb_hrtf_reverb_desc">加入录音棚/音乐厅的空间回响（早期反射+混响尾音）</string>
+    <string name="mseb_hrtf_distance">距离</string>
+    <string name="mseb_hrtf_distance_desc">近场增强 + 距离衰减——声源可近可远，立体感更强</string>
+    <string name="mseb_hrtf_distance_near">近</string>
+    <string name="mseb_hrtf_distance_far">远</string>
     <string name="mseb_device_auto">设备自适应校准</string>
     <string name="mseb_device_auto_desc">按当前耳机 / 解码器自动套用对应修正</string>
     <!-- 【V8.170】V8.170 新模块端点标签 -->

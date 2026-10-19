@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.ScannerDiag" parent="android:Theme.Material.NoActionBar">
+        <item name="android:colorBackground">#0e0e12</item>
+        <item name="android:textColor">#e6e6e6</item>
+        <item name="android:windowBackground">#0e0e12</item>
+    </style>
+</resources>

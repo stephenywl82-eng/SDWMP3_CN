@@ -7909,6 +7909,8 @@ public:
 
 
     float loCoeff = 0.0f, hiCoeff = 0.0f, aCoeff = 0.0f, haasCoeff = 0.0f;
+    float midLpState = 0.0f;   // 中置/单声道去相关：低通 mid 的状态
+    float midLpCoeff = 0.0f;   // 其低通系数(~3.5kHz)
 
 
 
@@ -7977,6 +7979,7 @@ public:
 
 
         aCoeff    = onePoleCoeff(sr, X_HI_HZ);
+        midLpCoeff = onePoleCoeff(sr, X_HI_HZ);   // 与侧信号一致，~3.5kHz 低通
 
 
 
@@ -8072,7 +8075,7 @@ public:
 
 
 
-        loState = hiState = aState = haasState = 0.0f;
+        loState = hiState = aState = haasState = midLpState = 0.0f;
 
 
 
@@ -8176,7 +8179,10 @@ public:
 
 
 
-        float ambSrc = side - aLp;
+        // 中置/单声道内容也参与包裹：把低通后的 mid(去相关)混入环绕素材。
+        // 否则多数人声居中 → side≈0 → 环绕几乎无料可加 → 听感"开/关没区别"。
+        midLpState += midLpCoeff * (mid - midLpState);
+        float ambSrc = (side - aLp) + 0.45f * midLpState;
 
 
 
@@ -8292,11 +8298,9 @@ public:
 
 
 
-        float wDirect = 0.35f + 0.65f * cfg.height;
-
-
-
-        float wOppo   = 0.65f - 0.35f * cfg.height;
+        float ild     = 0.10f + 0.35f * cfg.height;
+        float wDirect = 0.50f + ild;   // 同侧耳(直接场)权重
+        float wOppo   = 0.50f - ild;   // 对侧耳(头影)权重
 
 
 
@@ -8336,15 +8340,15 @@ public:
 
 
 
-        float rearL = early + earL * wDirect + earR * wOppo;
+        const float SURROUND_GAIN = 1.5f;   // 放大包裹场，使 DTS 开/关差异明显可闻
 
+        float rearL = SURROUND_GAIN * (early + earL * wDirect + earR * wOppo);
 
-
-        float rearR = early + earR * wDirect + earL * wOppo;
-
-
+        float rearR = SURROUND_GAIN * (early + earR * wDirect + earL * wOppo);
 
         float su = cfg.surround;
+        // DTS 总开关：关闭时把环绕贡献直接清零（仅保留 M/S 宽度），开关真正生效
+        if (!g_dtsSubEnabled.load(std::memory_order_relaxed)) su = 0.0f;
 
 
 
@@ -8376,7 +8380,9 @@ public:
 
 
 
-            const float trim = 1.0f / (1.0f + 0.35f * su);
+            // 弱修正(旧 0.35→0.12)：仅留少量余量给下游 limiter，
+            // 不再刻意做"透明"，让 DTS 开/关的响度与包裹感差异清晰可闻。
+            const float trim = 1.0f / (1.0f + 0.12f * su);
 
 
 
@@ -10851,6 +10857,28 @@ static inline float softClip(float x) {
 
 }
 
+// 【V8.630】链末端峰值闸门（bus soft limiter）：
+// HRIR 出口已有自己的 softLimit(hrtf_surround.cpp)，但本链在其后还有多级会"重新制造峰值"的
+// 处理：瞬态整形(×1.5 boost, 见 20737)、空间混响湿声叠加(20865)、A2DP 预补偿(5kHz+ boost,
+// 20933)、DJ SFX 混合层(20969)。这些 boost 原先全部指望末端 look-ahead limiter 收尾，而它
+// 要压 >6dB 时低频(60Hz 周期 16.7ms >> 5ms 前瞻窗)跟不上 → 残余破音（用户实测"还是破"）。
+// 故在所有 boost/叠加之后、Multi-Band Limiter 与 TerminalLimiterNode 之前统一收峰：
+// 阈值 0.80 以下增益恒 1（音乐主体/响度不受影响），超阈值增益按 tanh 平滑下降（T 处一阶
+// 连续，无拐角、无 flat-top），收敛到 C。C 必须低于末端 TerminalLimiterNode 内部 softClip
+// 的拐点（宽裕档 0.92 / 传统档 0.667 / 夜间 0.5）——否则 0.92 以下的每个峰仍会被末端
+// softClip 波形整形（代码注释原话："每一记鼓点、每一个人声峰值都被整形 → 鼓点破音 +
+// 人声电音感"）。取 C=0.90 覆盖默认宽裕档（0.90<0.92 末端零塑性）；若用户在设置里关闭
+// "宽裕余量"（传统档拐点 0.667），需另行下调。
+static inline float busSoftLimit(float x) {
+    const float T = 0.80f;
+    const float C = 0.90f;
+    const float a = fabsf(x);
+    if (a <= T) return x;
+    const float room = C - T;
+    const float y = T + room * tanhf((a - T) / room);
+    return x >= 0.0f ? y : -y;
+}
+
 
 
 
@@ -12574,7 +12602,10 @@ static inline bool dspHasActiveEffects() {
         || g_crossfeedEnabled.load(std::memory_order_relaxed)
         || g_transientEnabled.load(std::memory_order_relaxed)
         || g_compressorEnabled.load(std::memory_order_relaxed)
-        || g_agcEnabled.load(std::memory_order_relaxed);
+        || g_agcEnabled.load(std::memory_order_relaxed)
+        || g_dtsSubEnabled.load(std::memory_order_relaxed)        // 【修复】DTS 虚拟环绕单独开启也应激活 DSP 块
+        || g_hrtfSpatialEnabled.load(std::memory_order_relaxed)   // 【修复】真·双耳环绕(HRIR upmix)单独开启必须激活 DSP 块
+        || g_hrtfProbeEnabled.load(std::memory_order_relaxed);    // 【修复】HRIR 探针单独开启必须激活 DSP 块
 }
 
 
@@ -20969,6 +21000,12 @@ public:
 
 
 
+                // 【V8.630】链末端峰值闸门：收编瞬态整形(×1.5)/空间混响湿声/A2DP预补偿/DJ SFX
+                // 在 HRIR 出口之后重新制造的峰值，使末端 MBL+look-ahead limiter 结构上零动作。
+                sL = busSoftLimit(sL);
+
+                if (stereo) sR = busSoftLimit(sR);
+
                 g_mbLimiter.write(sL, stereo ? sR : sL);
 
 
@@ -25710,7 +25747,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeOpen(JNIEnv *env, jobject thiz,
 
 
 
@@ -27284,7 +27321,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeOpenFd(JNIEnv *env, jobject thiz,
 
 
 
@@ -29049,7 +29086,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativePlay(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativePlay(JNIEnv *env, jobject thiz) {
 
 
 
@@ -29230,7 +29267,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativePause(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativePause(JNIEnv *env, jobject thiz) {
 
 
 
@@ -29278,7 +29315,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResume(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResume(JNIEnv *env, jobject thiz) {
 
 
 
@@ -29338,7 +29375,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSeekTo(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSeekTo(JNIEnv *env, jobject thiz,
 
 
 
@@ -30000,7 +30037,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStop(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStop(JNIEnv *env, jobject thiz) {
 
 
 
@@ -30024,7 +30061,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStopSoft(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStopSoft(JNIEnv *env, jobject thiz) {
 
 
 
@@ -30076,7 +30113,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeOpenIncomingFd(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeOpenIncomingFd(JNIEnv *env, jobject thiz,
 
 
 
@@ -34479,7 +34516,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativePreScanPath(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativePreScanPath(JNIEnv *env, jobject thiz,
 
 
 
@@ -34555,7 +34592,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, jobject thiz, jint durationMs, jint bStartMs,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStartCrossfade(JNIEnv *env, jobject thiz, jint durationMs, jint bStartMs,
 
 
 
@@ -35650,7 +35687,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDjExtras(JNIEnv* env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDjExtras(JNIEnv* env, jobject thiz,
 
 
 
@@ -35732,7 +35769,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDjExtras(JNIEnv* env, jobjec
 // 【V8.500 ④】自动 Camelot 调性匹配：下发出轨(A) 音高平移半音数（keylock 分支生效）。
 // 范围夹 [-12, 12]；0 = 不变调。与 nativeSetDjExtras 分开，避免和手动 pitch 档位互相覆盖。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetKeyMatchSemi(JNIEnv* env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetKeyMatchSemi(JNIEnv* env, jobject thiz,
         jint semi) {
     int s = (int)semi;
     if (s > 12) s = 12;
@@ -35758,7 +35795,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetKeyMatchSemi(JNIEnv* env, jo
 static bool seekIncomingSlotSeek(bool toA, int64_t ms);
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSeekIncomingMs(JNIEnv *env, jobject thiz, jint ms) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSeekIncomingMs(JNIEnv *env, jobject thiz, jint ms) {
 
 
 
@@ -35865,7 +35902,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStopIncoming(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStopIncoming(JNIEnv *env, jobject thiz) {
 
 
 
@@ -35966,7 +36003,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetCrossfadeEffect(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetCrossfadeEffect(JNIEnv *env, jobject thiz,
 
 
 
@@ -36046,7 +36083,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetLiveFx(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetLiveFx(JNIEnv *env, jobject thiz,
 
 
 
@@ -36094,7 +36131,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetXfadeTemplate(
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetXfadeTemplate(
 
 
 
@@ -36170,7 +36207,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsActiveB(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsActiveB(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36187,7 +36224,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeIsActiveB(JNIEnv *env, jobject 
 
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsCrossfading(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsCrossfading(JNIEnv *env, jobject thiz) {
     return g_crossfadeActive.load();
 }
 
@@ -36207,7 +36244,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetXfadeLevel(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetXfadeLevel(JNIEnv *env, jobject thiz,
 
 
 
@@ -36287,7 +36324,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeCutCrossfadeShort(JNIEnv* env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeCutCrossfadeShort(JNIEnv* env, jobject thiz,
 
 
 
@@ -36387,7 +36424,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeReleaseInactive(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeReleaseInactive(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36548,7 +36585,7 @@ JNIEXPORT jlong JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetPositionMs(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetPositionMs(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36636,7 +36673,7 @@ JNIEXPORT jlong JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetDurationMs(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetDurationMs(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36672,7 +36709,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsEos(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsEos(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36720,7 +36757,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetSampleRate(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetSampleRate(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36744,7 +36781,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetChannelCount(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetChannelCount(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36768,7 +36805,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsExclusive(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsExclusive(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36792,7 +36829,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetPreferSharedMode(JNIEnv *env, jobject thiz, jboolean prefer) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetPreferSharedMode(JNIEnv *env, jobject thiz, jboolean prefer) {
 
 
 
@@ -36816,7 +36853,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsSharedMode(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsSharedMode(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36844,7 +36881,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDspEq(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDspEq(JNIEnv *env, jobject thiz,
 
 
 
@@ -36948,7 +36985,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetDspEq(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetDspEq(JNIEnv *env, jobject thiz) {
 
 
 
@@ -36980,7 +37017,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDspEnabled(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDspEnabled(JNIEnv *env, jobject thiz,
 
 
 
@@ -37127,7 +37164,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsDspEnabled(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsDspEnabled(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37151,7 +37188,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetSampleRateNative(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetSampleRateNative(JNIEnv *env, jobject thiz,
 
 
 
@@ -37179,7 +37216,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetSampleRateNative(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetSampleRateNative(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37203,7 +37240,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetOutputDeviceId(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetOutputDeviceId(JNIEnv *env, jobject thiz,
 
 
 
@@ -37243,7 +37280,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetClipRatio(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetClipRatio(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37275,7 +37312,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetClipCount(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetClipCount(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37295,7 +37332,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetTotalSamples(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetTotalSamples(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37315,7 +37352,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetClipStats(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetClipStats(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37347,7 +37384,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetRmsLevel(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetRmsLevel(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37367,7 +37404,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBandSub(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBandSub(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37383,7 +37420,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBandBass(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBandBass(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37399,7 +37436,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBandMid(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBandMid(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37415,7 +37452,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBandHigh(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBandHigh(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37434,7 +37471,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBandHigh(JNIEnv *env, jobjec
 JNIEXPORT jfloat JNICALL
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand0(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBand0(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37449,7 +37486,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand0(JNIEnv *env, jobject t
 
 JNIEXPORT jint JNICALL
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBandsB(JNIEnv *env, jobject thiz, jfloatArray out) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBandsB(JNIEnv *env, jobject thiz, jfloatArray out) {
 
 
 
@@ -37491,7 +37528,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand1(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBand1(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37507,7 +37544,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand2(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBand2(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37523,7 +37560,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand3(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBand3(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37539,7 +37576,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand4(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBand4(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37555,7 +37592,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand5(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBand5(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37571,7 +37608,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand6(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBand6(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37587,7 +37624,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetBand7(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetBand7(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37611,7 +37648,7 @@ JNIEXPORT jfloatArray JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetSpectrumL(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetSpectrumL(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37643,7 +37680,7 @@ JNIEXPORT jfloatArray JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetSpectrumR(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetSpectrumR(JNIEnv *env, jobject thiz) {
 
 
 
@@ -37715,7 +37752,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeReadBandLevels(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeReadBandLevels(JNIEnv *env, jobject thiz,
 
 
 
@@ -37823,7 +37860,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSfxSetPack(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSfxSetPack(JNIEnv *env, jobject thiz,
 
 
 
@@ -37851,7 +37888,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSfxTrigger(JNIEnv *env, jobject thiz, jstring trigger) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSfxTrigger(JNIEnv *env, jobject thiz, jstring trigger) {
 
 
 
@@ -37891,7 +37928,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSfxSetEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSfxSetEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -37935,7 +37972,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetXfadeBassSwap(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetXfadeBassSwap(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -37967,7 +38004,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetXfadeThreeBand(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetXfadeThreeBand(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -38007,7 +38044,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStemSetMode(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStemSetMode(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -38099,7 +38136,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStemReset(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStemReset(JNIEnv *env, jobject thiz) {
 
 
 
@@ -38147,7 +38184,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetStemFxTarget(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetStemFxTarget(JNIEnv *env, jobject thiz,
 
 
 
@@ -38199,7 +38236,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStemSetSrcRate(JNIEnv *env, jobject thiz, jint rate) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStemSetSrcRate(JNIEnv *env, jobject thiz, jint rate) {
 
 
 
@@ -38239,7 +38276,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeStemPush(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStemPush(JNIEnv *env, jobject thiz,
 
 
 
@@ -38339,7 +38376,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetBeatmatch(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetBeatmatch(JNIEnv *env, jobject thiz,
 
 
 
@@ -38510,7 +38547,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetPlTuning(JNIEnv* env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetPlTuning(JNIEnv* env, jobject thiz,
 
 
 
@@ -38587,14 +38624,14 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetPlTuning(JNIEnv* env, jobjec
 
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetPlAInitPhase(JNIEnv* env, jobject thiz, jfloat phase01) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetPlAInitPhase(JNIEnv* env, jobject thiz, jfloat phase01) {
     const float p = (float)phase01;
     g_bmPlAInitPhase.store((p >= 0.0f && p < 1.0f) ? p : -1.0f, std::memory_order_relaxed);
     LOGI("PL init phase: A=%.3f (%s)", (double)p, (p >= 0.0f && p < 1.0f) ? "from beatgrid" : "unknown->assume downbeat");
 }
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetPlInitPhase(JNIEnv* env, jobject thiz, jfloat phase01) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetPlInitPhase(JNIEnv* env, jobject thiz, jfloat phase01) {
 
 
 
@@ -38632,7 +38669,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetPlInitPhase(JNIEnv* env, job
 
 extern "C"
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDiagVerbose(JNIEnv *env, jobject thiz, jboolean on) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDiagVerbose(JNIEnv *env, jobject thiz, jboolean on) {
     // [V8.344] Runtime gate for the per-frame audio-callback diagnostics.
     // Off by default: those logs fire every callback inside their window and
     // __android_log_print on the realtime thread is an underrun source.
@@ -38649,7 +38686,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetBeatmatchEngine(JNIEnv *env, jobject thiz, jboolean rb) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetBeatmatchEngine(JNIEnv *env, jobject thiz, jboolean rb) {
 
 
 
@@ -38666,7 +38703,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetBeatmatchEngine(JNIEnv *env,
 // on=false：起步即锁定目标比率（过渡开头速度一次到位）。
 // 下次 crossfade arming 时读取，运行中的过渡不受影响。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetTempoRamp(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetTempoRamp(JNIEnv *env, jobject thiz,
                                                               jboolean on) {
     (void)env; (void)thiz;
     g_tempoRamp.store(on == JNI_TRUE, std::memory_order_relaxed);
@@ -38703,7 +38740,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDspEq5Band(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDspEq5Band(JNIEnv *env, jobject thiz,
 
 
 
@@ -38975,7 +39012,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMsebActive(JNIEnv *env, jobject thiz, jboolean active) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetMsebActive(JNIEnv *env, jobject thiz, jboolean active) {
 
 
 
@@ -39011,7 +39048,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMseb10Band(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetMseb10Band(JNIEnv *env, jobject thiz,
 
 
 
@@ -39329,7 +39366,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetMseb10Band(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetMseb10Band(JNIEnv *env, jobject thiz) {
 
 
 
@@ -39413,7 +39450,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMsStage(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetMsStage(JNIEnv *env, jobject thiz,
 
 
 
@@ -39485,7 +39522,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDtsStage(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDtsStage(JNIEnv *env, jobject thiz,
 
 
 
@@ -39553,7 +39590,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDtsBtProfile(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDtsBtProfile(JNIEnv *env, jobject thiz,
 
 
 
@@ -39645,7 +39682,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetMsStage(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetMsStage(JNIEnv *env, jobject thiz) {
 
 
 
@@ -39701,7 +39738,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetCrossfeed(JNIEnv *env, jobject thiz, jfloat amount) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetCrossfeed(JNIEnv *env, jobject thiz, jfloat amount) {
 
 
 
@@ -39749,7 +39786,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetCrossfeed(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetCrossfeed(JNIEnv *env, jobject thiz) {
 
 
 
@@ -39793,7 +39830,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetTransient(JNIEnv *env, jobject thiz, jfloat amount) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetTransient(JNIEnv *env, jobject thiz, jfloat amount) {
 
 
 
@@ -39841,7 +39878,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetTransient(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetTransient(JNIEnv *env, jobject thiz) {
 
 
 
@@ -39873,7 +39910,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetDspEq5Band(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetDspEq5Band(JNIEnv *env, jobject thiz) {
 
 
 
@@ -39993,7 +40030,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEq10Band(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetAutoEq10Band(JNIEnv *env, jobject thiz,
 
 
 
@@ -40331,7 +40368,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetAutoEq(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetAutoEq(JNIEnv *env, jobject thiz) {
 
 
 
@@ -40441,7 +40478,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAgcEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetAgcEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -40485,7 +40522,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAgcTarget(JNIEnv *env, jobject thiz, jfloat targetDb) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetAgcTarget(JNIEnv *env, jobject thiz, jfloat targetDb) {
 
 
 
@@ -40521,7 +40558,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetNightMode(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetNightMode(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -40545,7 +40582,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsNightMode(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsNightMode(JNIEnv *env, jobject thiz) {
 
 
 
@@ -40569,7 +40606,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetWideHeadroom(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetWideHeadroom(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -40605,7 +40642,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDirectPassthrough(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDirectPassthrough(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -40621,27 +40658,27 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDirectPassthrough(JNIEnv *en
 
 // 【V9.01】引擎 DSP 主开关（DAC 模块"启用引擎 DSP"）。false = 创意 DSP 整链旁路，仅保留音量/DJ混音/硬钳。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetEngineDspEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetEngineDspEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
     g_engineDspEnabled.store(enabled != 0);
     LOGI("EngineDspEnabled %s", enabled ? "ON (creative DSP active)" : "OFF (bit-perfect passthrough)");
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsEngineDspEnabled(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsEngineDspEnabled(JNIEnv *env, jobject thiz) {
     return g_engineDspEnabled.load();
 }
 
 // 【V9.01】DTS 环绕独立开关（DAC 模块子开关）。只翻转 g_dtsSubEnabled（与 g_msEnabled 正交），
 // 曲线载入（nativeSetMsStage）只动 g_msEnabled，二者 AND 门实现"子开关强制覆盖"。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDtsEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDtsEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
     g_dtsSubEnabled.store(enabled != 0, std::memory_order_relaxed);
     LOGI("DtsEnabled %s", enabled ? "ON" : "OFF");
 }
 
 // 【第2步·隔离探针】HRIR 卷积真双耳渲染 使能开关（独立通路，与 DTS 互斥）。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfProbeEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetHrtfProbeEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
     g_hrtfProbeEnabled.store(enabled != 0, std::memory_order_relaxed);
     g_hrtfProbe.reset();
     LOGI("HrtfProbe %s (auto-cycle 5 dirs)", enabled ? "ON" : "OFF");
@@ -40649,29 +40686,43 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfProbeEnabled(JNIEnv *env
 
 // 锁定方向：0=前 1=后 2=左 3=右 4=上；-1=自动轮播。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfProbeDir(JNIEnv *env, jobject thiz, jint dir) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetHrtfProbeDir(JNIEnv *env, jobject thiz, jint dir) {
     g_hrtfProbe.setDirection((int)dir);
     LOGI("HrtfProbe dir=%d", (int)dir);
 }
 
 // 【真·双耳环绕】HRIR 多虚拟音箱 upmix 总开关（替换 DTS 头戴环绕）。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfSpatialEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetHrtfSpatialEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
     g_hrtfSpatialEnabled.store(enabled != 0, std::memory_order_relaxed);
     g_hrtfSurround.reset();
     LOGI("HrtfSpatial %s (multi-speaker HRIR upmix, replaces DTS)", enabled ? "ON" : "OFF");
 }
 
+// 【真·双耳环绕】房间混响开关：在 HRIR 求和之后给 L/R 加预延迟+早期反射+扩散尾音（空气感）。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetHrtfReverbEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+    g_hrtfSurround.setReverbEnabled(enabled != 0);
+    LOGI("HrtfReverb %s (room reverb after HRIR sum)", enabled ? "ON" : "OFF");
+}
+
 // 声场朝向：yaw=水平旋转(±180°)、pitch=俯仰(±90°)。拖动手柄据此旋转整圈虚拟音箱。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetHrtfFieldOrientation(JNIEnv *env, jobject thiz, jfloat yaw, jfloat pitch) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetHrtfFieldOrientation(JNIEnv *env, jobject thiz, jfloat yaw, jfloat pitch) {
     g_hrtfSurround.setFieldOrientation(yaw, pitch);
     LOGI("HrtfFieldOrientation yaw=%.1f pitch=%.1f", yaw, pitch);
 }
 
+// 声场距离（米）：0.3=贴脸近场（强 ILD + 低频提升）、1.5=远场参考、>1.5 越远越轻。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetHrtfFieldDistance(JNIEnv *env, jobject thiz, jfloat distance) {
+    g_hrtfSurround.setFieldDistance(distance);
+    LOGI("HrtfFieldDistance %.2f m", distance);
+}
+
 // 【V9.01】AutoEQ 独立开关（DAC 模块子开关）。只翻转 g_autoEqSubEnabled（与 g_autoEqEnabled 正交）。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEqEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetAutoEqEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
     g_autoEqSubEnabled.store(enabled != 0, std::memory_order_relaxed);
     LOGI("AutoEqEnabled %s", enabled ? "ON" : "OFF");
 }
@@ -40680,7 +40731,7 @@ Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEqEnabled(JNIEnv *env, j
 // 曲线载入（nativeSetMseb10Band）只动 g_mseb10Enabled，本开关作为上层手动总闸，
 // 与曲线内容标志 AND 门实现"子开关 ON 才生效、OFF 即使有曲线也强制静默"。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMsebEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetMsebEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
     g_msebSubEnabled.store(enabled != 0, std::memory_order_relaxed);
     LOGI("MsebEnabled %s", enabled ? "ON" : "OFF");
 }
@@ -40703,7 +40754,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetStereoBalance(JNIEnv *env, jobject thiz, jfloat bal) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetStereoBalance(JNIEnv *env, jobject thiz, jfloat bal) {
 
 
 
@@ -40747,7 +40798,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetCompressorEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetCompressorEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -40779,7 +40830,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetCompressorParams(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetCompressorParams(JNIEnv *env, jobject thiz,
 
 
 
@@ -40859,7 +40910,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetSpaceReverbEnabled(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetSpaceReverbEnabled(JNIEnv *env, jobject thiz,
 
 
 
@@ -40891,7 +40942,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetSpaceReverbWet(JNIEnv *env, jobject thiz, jfloat wet) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetSpaceReverbWet(JNIEnv *env, jobject thiz, jfloat wet) {
 
 
 
@@ -40911,7 +40962,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetSpaceReverbShape(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetSpaceReverbShape(JNIEnv *env, jobject thiz,
 
 
 
@@ -40955,7 +41006,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDynamicEqEnabled(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDynamicEqEnabled(JNIEnv *env, jobject thiz,
 
 
 
@@ -40987,7 +41038,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDynamicEqDepth(JNIEnv *env, jobject thiz, jfloat depth) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDynamicEqDepth(JNIEnv *env, jobject thiz, jfloat depth) {
 
 
 
@@ -41011,7 +41062,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDynamicEqThreshold(JNIEnv *env, jobject thiz, jfloat thr) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDynamicEqThreshold(JNIEnv *env, jobject thiz, jfloat thr) {
 
 
 
@@ -41035,7 +41086,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetMultiBandLimiterEnabled(JNIEnv *env, jobject thiz,
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetMultiBandLimiterEnabled(JNIEnv *env, jobject thiz,
 
 
 
@@ -41067,7 +41118,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetAutoEqMix(JNIEnv *env, jobject thiz, jfloat mix) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetAutoEqMix(JNIEnv *env, jobject thiz, jfloat mix) {
 
 
 
@@ -41099,7 +41150,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetNormalizationGain(JNIEnv *env, jobject thiz, jfloat db) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetNormalizationGain(JNIEnv *env, jobject thiz, jfloat db) {
 
 
 
@@ -41143,7 +41194,7 @@ JNIEXPORT jfloat JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetNormalizationGain(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetNormalizationGain(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41171,7 +41222,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetLoudnessEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetLoudnessEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -41199,7 +41250,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetLoudnessIntensity(JNIEnv *env, jobject thiz, jfloat intensity) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetLoudnessIntensity(JNIEnv *env, jobject thiz, jfloat intensity) {
 
 
 
@@ -41231,7 +41282,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDitherEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDitherEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -41259,7 +41310,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetBtPreEmphasis(JNIEnv *env, jobject thiz, jboolean enabled, jfloat codecDb) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetBtPreEmphasis(JNIEnv *env, jobject thiz, jboolean enabled, jfloat codecDb) {
 
 
 
@@ -41299,7 +41350,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeReopenOutputOnRouteReady(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeReopenOutputOnRouteReady(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41343,7 +41394,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsBtPreEmphasisEnabled(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsBtPreEmphasisEnabled(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41363,7 +41414,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsDitherEnabled(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsDitherEnabled(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41387,7 +41438,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetDcBlockEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetDcBlockEnabled(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -41411,7 +41462,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsDcBlockEnabled(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsDcBlockEnabled(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41435,7 +41486,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetSilenceTest(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetSilenceTest(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -41459,7 +41510,7 @@ JNIEXPORT jlong JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetDspDisabledSamples(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetDspDisabledSamples(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41483,7 +41534,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeSetSineTest(JNIEnv *env, jobject thiz, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeSetSineTest(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -41511,7 +41562,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsSineTestRunning(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsSineTestRunning(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41535,7 +41586,7 @@ JNIEXPORT jlong JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetCallbackCount(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetCallbackCount(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41555,7 +41606,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetCallbackCount(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetCallbackCount(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41575,7 +41626,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetStreamError(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetStreamError(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41595,7 +41646,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsDecoderThreadRunning(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsDecoderThreadRunning(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41615,7 +41666,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetDecoderFramesOutput(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetDecoderFramesOutput(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41635,7 +41686,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetRingBufferFill(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetRingBufferFill(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41655,7 +41706,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeIsDecoderFloat(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeIsDecoderFloat(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41675,7 +41726,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetStreamSampleRate(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetStreamSampleRate(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41703,7 +41754,7 @@ JNIEXPORT jstring JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetSpeedDiag(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetSpeedDiag(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41755,7 +41806,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetOpenStep(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetOpenStep(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41775,7 +41826,7 @@ JNIEXPORT jint JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetOpenErrorCode(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetOpenErrorCode(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41799,7 +41850,7 @@ JNIEXPORT jlong JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetUnderrunCount(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetUnderrunCount(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41819,7 +41870,7 @@ JNIEXPORT void JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeResetUnderrunCount(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeResetUnderrunCount(JNIEnv *env, jobject thiz) {
 
 
 
@@ -41859,7 +41910,7 @@ JNIEXPORT jintArray JNICALL
 
 
 
-Java_com_sdw_music_player_OboeDirectPlayer_nativeGetDspChainState(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeGetDspChainState(JNIEnv *env, jobject thiz) {
 
 
 

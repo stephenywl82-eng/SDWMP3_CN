@@ -535,6 +535,17 @@
     <string name="mseb_dts_level_wide">寬場</string>
     <string name="mseb_dts_link_hint">編碼鏈路，環繞高頻已收斂；換用 LDAC / LHDC 可得到完整效果。</string>
     <string name="mseb_dts_desc">與播放頁三點選單、控制欄膠囊即時同步</string>
+    <!-- 【第2步·隔离探针】HRTF 双耳渲染探针 -->
+    <string name="mseb_hrtf_probe">HRTF 探針</string>
+    <string name="mseb_hrtf_probe_desc">診斷用雙耳渲染探針——合成 HRIR 捲積，營造前/後/左/右/上方位感</string>
+    <string name="mseb_hrtf_probe_dir_auto">自動</string>
+    <string name="mseb_hrtf_probe_dir_front">前</string>
+    <string name="mseb_hrtf_probe_dir_back">後</string>
+    <string name="mseb_hrtf_probe_dir_left">左</string>
+    <string name="mseb_hrtf_probe_dir_right">右</string>
+    <string name="mseb_hrtf_probe_dir_up">上</string>
+    <string name="mseb_dts_link_bt">藍牙</string>
+    <string name="mseb_dts_link_wired">有線</string>
     <string name="mseb_device_auto">裝置自適應校正</string>
     <string name="mseb_device_auto_desc">按當前耳機 / 解碼器自動套用對應修正</string>
     <!-- 【V8.170】V8.170 新模块端点标签 -->

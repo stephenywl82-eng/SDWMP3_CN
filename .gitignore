@@ -84,3 +84,18 @@ jni_backup*/
 _archive_*/
 autoeq_repo/
 autoeq_repo.bak/
+# vendored ALAC clone (nested .git repo, never commit)
+tools/experiments/alac_tmp_clone/
+
+# === V8.700 仓库卫生（2026-10-19）===
+# Native 构建目录（cpp_build_v8118b 为当前 nightly 增量构建目录，保留在磁盘但不入库）
+cpp_build_*/
+# 旧归档/分发（已移至 E:/SDWMP3_CN_ARCHIVES/）
+_archive_*/
+dist/
+release/
+apk_share/
+# tools/ 内的运行时副产物
+tools/logs/
+tools/misc/
+tools/outputs_apk/

@@ -372,6 +372,8 @@ internal class MixerBallistics {
 private fun VuMixer(sub: Float, bass: Float, mid: Float, high: Float,
                     bandsL: FloatArray, bandsR: FloatArray,
                     isActive: Boolean, accentColor: Color,
+                    /** 转场（飞进/飞出）进行中：VU 60fps 帧时钟让位给共享元素转场（见下方循环）。 */
+                    isAnimating: Boolean = false,
                     /** 【V8.176】封面调色板（Palette 提取的 5 档主色），柱子着色的真正来源。 */
                     coverColors: List<Int>,
                     modifier: Modifier) {
@@ -384,11 +386,15 @@ private fun VuMixer(sub: Float, bass: Float, mid: Float, high: Float,
     // 已按要求**恢复原样**：VU 表的平滑度优先于省电。
     var tick by remember { mutableLongStateOf(0L) }
     val activeNow by rememberUpdatedState(isActive)
+    val animatingNow by rememberUpdatedState(isAnimating)
     LaunchedEffect(Unit) {
         while (true) {
             // 空闲且峰值已衰减到底 → 停止 60fps 帧时钟，低频轮询等待重新激活（省电）
             val anyPeak = peaks.any { it > 0.04f }
-            if (!activeNow && !anyPeak) {
+            // 【转场减负】飞进/飞出（isAnimating）期间 VU 本就冻结（设计上转场时模糊 0dp、VU 暂停），
+            // 这里把 60fps 帧时钟让位给共享元素转场动画，避免主线程被 VU 每帧重组+Canvas 重绘抢走
+            // 导致转场掉帧卡顿。转场结束（isAnimating 复位）后自动恢复 60fps，正常播放时 VU 平滑度不受影响。
+            if ((!activeNow && !anyPeak) || animatingNow) {
                 kotlinx.coroutines.delay(120)
                 continue
             }
@@ -616,6 +622,8 @@ fun VuMeter(
     /** Oboe 里左右声道各自那条 8 段级联的输出，Mixer 柱的真数据源。 */
     bandsL: FloatArray = FloatArray(8), bandsR: FloatArray = FloatArray(8),
     isActive: Boolean,
+    /** 转场进行中：让 VU 60fps 帧时钟让位给共享元素转场（见 VuMixer）。 */
+    isAnimating: Boolean = false,
     modifier: Modifier = Modifier,
     style: VuMeterStyle = VuMeterStyle.MIXER,
     accentColor: Color = Color(0xFFFFA726),
@@ -624,6 +632,6 @@ fun VuMeter(
 ) {
     when (style) {
         VuMeterStyle.ANALOG_NEEDLE -> VuAnalogNeedles(sub, bass, mid, high, isActive, modifier, accentColor)
-        VuMeterStyle.MIXER         -> VuMixer(sub, bass, mid, high, bandsL, bandsR, isActive, accentColor, coverColors, modifier)
+        VuMeterStyle.MIXER         -> VuMixer(sub, bass, mid, high, bandsL, bandsR, isActive, accentColor, isAnimating = isAnimating, coverColors = coverColors, modifier = modifier)
     }
 }

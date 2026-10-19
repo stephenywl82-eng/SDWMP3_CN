@@ -1,10 +1,15 @@
 package com.sdw.music.player
+import com.sdw.music.player.core.audio.analysis.AudioAnalyzer
+import com.sdw.music.player.core.audio.metadata.FlacCoverReader
+import com.sdw.music.player.core.audio.metadata.LyricsEmbedder
+import com.sdw.music.player.core.audio.analysis.MediaProbe
+import com.sdw.music.player.core.audio.playback.PlayerConnection
+import com.sdw.music.player.core.audio.metadata.WavCoverReader
 
 import android.content.Context
 import android.net.Uri
 import android.provider.MediaStore
-import com.sdw.music.player.core.audio.WavCoverReader
-import com.sdw.music.player.core.audio.FlacCoverReader
+import com.sdw.music.player.core.audio.metadata.CoverArtStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -13,6 +18,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -420,31 +426,79 @@ object SongRepository {
             } catch (e: Exception) {
                 android.util.Log.w(TAG, "refreshArtAfterRewrite: scanFile failed: " + e.message)
             }
-            // ② re-extract the embedded picture into our own cache.
-            val ext = filePath.substringAfterLast('.', "").lowercase()
-            val uri = try {
-                when {
-                    ext == "flac" || ext == "fla" ->
-                        FlacCoverReader.coverUriForFile(context, filePath)
-                    ext == "wav" || ext == "wave" ->
-                        WavCoverReader.coverUriForFile(context, filePath)
-                    else -> null
-                }
-            } catch (e: Exception) {
-                null
+        // ② re-extract the embedded picture into our own cache.
+        val ext = filePath.substringAfterLast('.', "").lowercase()
+        val uri = try {
+            when {
+                ext == "flac" || ext == "fla" ->
+                    FlacCoverReader.coverUriForFile(context, filePath)
+                        ?: extractEmbeddedPicture(context, filePath)
+                ext == "wav" || ext == "wave" ->
+                    WavCoverReader.coverUriForFile(context, filePath)
+                        ?: extractEmbeddedPicture(context, filePath)
+                // 【封面回刷】MP3 / M4A / OGG / OPUS / AAC 等：用 MediaMetadataRetriever 抽出内嵌
+                // APIC 帧，写进 CoverArtStore（key 含 size+mtime → 每次文件被改写都得到新 URI），
+                // 这样 Coil 不会因 albumart URI 字符串不变而一直喂旧图。
+                else -> extractEmbeddedPicture(context, filePath)
             }
-            if (uri.isNullOrBlank()) return@withContext null
+        } catch (e: Exception) {
+            null
+        }
             // ③ write it back into the repository (editing does not change the song id).
+            // uri 为 null 表示文件已无内嵌封面（被删除）：照样清掉仓库里残留的旧 URI 并持久化，
+            // 否则下次启动/重扫又会从旧缓存把老封面顶回来。
             val idx = songs.indexOfFirst { it.filePath == filePath }
-            if (idx >= 0 && songs[idx].albumArtUri != uri) {
-                songs = songs.map { if (it.filePath == filePath) it.copy(albumArtUri = uri) else it }
-                dataVersion++
-                _foldersVersion.value++
-                saveSongsToDiskCache(songs)
-                android.util.Log.i(TAG, "refreshArtAfterRewrite: cover refreshed from container")
+            if (idx >= 0) {
+                // uri 为 null 表示封面已被删除：用空串清掉仓库残留（与扫描器"无封面=空 albumArtUri"约定一致），
+                // 否则下次启动/重扫又会从旧缓存把老封面顶回来。
+                val stored = uri ?: ""
+                if (songs[idx].albumArtUri != stored) {
+                    songs = songs.map { if (it.filePath == filePath) it.copy(albumArtUri = stored) else it }
+                    dataVersion++
+                    _foldersVersion.value++
+                    saveSongsToDiskCache(songs)
+                    android.util.Log.i(TAG, "refreshArtAfterRewrite: cover ${if (uri == null) "cleared (no embedded picture)" else "refreshed from container"}")
+                }
             }
             uri
         }
+
+    /**
+     * 抽出任意可识别音频文件的内嵌封面（MP3 / M4A / OGG / OPUS / AAC 等），写进 CoverArtStore
+     * 缓存并返回其内容 URI；无封面时返回 null。key 含 path+size+mtime，所以文件被 Lyrico 改写后
+     * 必然 miss 重抽、得到新 URI —— 这是让播放器即时显示新封面的关键（平台 albumart URI 改写后
+     * 字符串不变，Coil 会一直喂旧图）。
+     */
+    private fun extractEmbeddedPicture(context: Context, filePath: String): String? {
+        val file = java.io.File(filePath)
+        if (!file.isFile || file.length() == 0L) return null
+        val key = coverCacheKey(filePath, file.length(), file.lastModified())
+        CoverArtStore.uriFor(context, key)?.let { return it }
+        if (CoverArtStore.isKnownMissing(context, key)) return null
+        val bytes = try {
+            val mmr = android.media.MediaMetadataRetriever()
+            mmr.setDataSource(filePath)
+            val pic = mmr.embeddedPicture
+            mmr.release()
+            pic
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "extractEmbeddedPicture: MediaMetadataRetriever failed: " + e.message)
+            null
+        }
+        if (bytes == null) {
+            CoverArtStore.markMissing(context, key)
+            return null
+        }
+        return CoverArtStore.store(context, key, bytes)
+    }
+
+    private fun coverCacheKey(path: String, length: Long, mtime: Long): String {
+        val md = java.security.MessageDigest.getInstance("MD5")
+        val digest = md.digest("$path|$length|$mtime".toByteArray(Charsets.UTF_8))
+        val sb = StringBuilder(digest.size * 2)
+        for (b in digest) sb.append(String.format("%02x", b))
+        return sb.toString()
+    }
 
     fun getSongs(): List<Song> = songs
 
@@ -679,7 +733,9 @@ object SongRepository {
             var bpm = 0
             var key = ""
 
+            var blocksRead = 0
             while (true) {
+                if (++blocksRead > 64) break
                 val header = ByteArray(4)
                 if (raf.read(header) < 4) break
 
@@ -689,6 +745,11 @@ object SongRepository {
                 val dataLength = ((header[1].toInt() and 0xFF) shl 16) or
                         ((header[2].toInt() and 0xFF) shl 8) or
                         (header[3].toInt() and 0xFF)
+
+                // 【V9.19】退化护栏：损坏/全零填充的 FLAC 会出现「blockType=0 且 dataLength=0 且非末块」，
+                // 导致 skipBytes(0) 后无限读下一段零头 → 解析死循环、扫描永卡在这一首。
+                // 真·FLAC 必有 STREAMINFO（dataLength=34）且末块置 isLast，不会命中此分支。
+                if (blockType == 0 && dataLength == 0 && !isLast) break
 
                 if (blockType == 4) {
                     val data = ByteArray(dataLength)
@@ -1038,7 +1099,9 @@ object SongRepository {
                         var effDuration = duration
                         if (effDuration <= 0) {
                             val cachedDur = prevByPath[path]?.duration ?: 0L
-                            effDuration = if (cachedDur > 0) cachedDur else probeDurationMs(path)
+                            effDuration = if (cachedDur > 0) cachedDur else withTimeoutOrNull(8000L) {
+                                probeDurationMs(path)
+                            } ?: 0L
                         }
                         if (effDuration < minDurationSec * 1000L) continue
 
@@ -1093,7 +1156,12 @@ object SongRepository {
                             else -> if (ext.isNotEmpty()) ext.uppercase() else "AUDIO"
                         }
 
-                        var (bpm, songKey) = readBpmAndKey(path)
+                        var (bpm, songKey) = withTimeoutOrNull(8000L) {
+                            readBpmAndKey(path)
+                        } ?: run {
+                            android.util.Log.w(TAG, "scan: readBpmAndKey skipped (timeout) for $path")
+                            (0 to "")
+                        }
                         if (bpm <= 0 && songKey.isBlank()) {
                             BpmKeyCache.get(path)?.let { cached ->
                                 if (cached.first > 0) bpm = cached.first
@@ -1287,7 +1355,7 @@ object SongRepository {
         return try {
             // 【V8.429】收敛到单线程闸门（媒体库修复会并发扫大量文件，
             // 与其它探测交错拆卸内部 codec 会触发 native abort；详见 MediaProbe 类注释）。
-            com.sdw.music.player.core.audio.MediaProbe.onProbeThread {
+            com.sdw.music.player.core.audio.analysis.MediaProbe.onProbeThread {
                 val ex = android.media.MediaExtractor()
                 try {
                     ex.setDataSource(path)
@@ -1361,10 +1429,12 @@ object SongRepository {
      * 不会拖慢全盘遍历。读不到（DSD 等平台不支持）返回 0，调用方按「太短」排除。
      */
     private fun probeDurationMs(path: String): Long {
+        // 【V9.19】隔离线程 + 硬超时：MediaMetadataRetriever.setDataSource 在路径含特殊字符或文件
+        // 损坏时，原生层会直接挂死、永不返回，且无任何可取消手段；旧实现走 MediaProbe 单线程，
+        // 一旦卡住整个扫描停在这一首。这里改用一次性线程 + future.get 超时，挂死也只废掉这条
+        // 临时线程，扫描主流程靠扫描循环里的 withTimeoutOrNull 兜底继续推进。
         return try {
-            // 【V8.429】收敛到单线程闸门：媒体库修复会并发扫大量文件，
-            // 与其它探测交错拆卸内部 codec 会触发 native abort（详见 MediaProbe 类注释）。
-            com.sdw.music.player.core.audio.MediaProbe.onProbeThread {
+            val task = java.util.concurrent.FutureTask<Long> {
                 val mmr = android.media.MediaMetadataRetriever()
                 try {
                     mmr.setDataSource(path)
@@ -1375,6 +1445,14 @@ object SongRepository {
                 } finally {
                     try { mmr.release() } catch (_: Exception) {}
                 }
+            }
+            val thread = Thread(task, "probe-dur-timeout")
+            thread.start()
+            try {
+                task.get(8000L, java.util.concurrent.TimeUnit.MILLISECONDS)
+            } catch (_: Exception) {
+                android.util.Log.w(TAG, "probeDurationMs: timeout/aborted for $path")
+                0L
             }
         } catch (e: Exception) { 0L }
     }

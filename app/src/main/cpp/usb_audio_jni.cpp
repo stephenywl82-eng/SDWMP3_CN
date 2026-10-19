@@ -2,6 +2,7 @@
 #include <android/log.h>
 #include <cstring>
 #include <unistd.h>
+#include <exception>
 
 #include "usb_audio_driver.h"
 
@@ -28,14 +29,14 @@ extern "C" {
 // ── nativeUsbAvailable ───────────────────────────────────────────────────
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeUsbAvailable(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeUsbAvailable(JNIEnv*, jobject) {
     return JNI_TRUE;
 }
 
 // ── nativeClaim ──────────────────────────────────────────────────────────
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeClaim(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeClaim(
     JNIEnv* env, jobject /* thiz */,
     jint vid, jint pid, jint fd, jint address, jint maxPacketSize,
     jint interval, jboolean isUac2, jint ifaceNum) {
@@ -49,8 +50,17 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeClaim(
         return JNI_FALSE;
     }
 
-    bool ok = driver->open(dupFd, address, maxPacketSize, interval,
-                           isUac2 == JNI_TRUE, vid, pid, ifaceNum);
+    bool ok = false;
+    try {
+        ok = driver->open(dupFd, address, maxPacketSize, interval,
+                          isUac2 == JNI_TRUE, vid, pid, ifaceNum);
+    } catch (const std::exception& e) {
+        LOGE("nativeClaim: open EXCEPTION '%s' (vid=%04X pid=%04X) -> FAIL", e.what(), vid, pid);
+        return JNI_FALSE;
+    } catch (...) {
+        LOGE("nativeClaim: open UNKNOWN EXCEPTION (vid=%04X pid=%04X) -> FAIL", vid, pid);
+        return JNI_FALSE;
+    }
     LOGI("nativeClaim: vid=%04X pid=%04X fd=%d ep=0x%02X iface=%d -> %s",
          vid, pid, dupFd, address, ifaceNum, ok ? "OK" : "FAIL");
     return ok ? JNI_TRUE : JNI_FALSE;
@@ -59,22 +69,35 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeClaim(
 // ── nativeUsbStart ───────────────────────────────────────────────────────
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeUsbStart(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeUsbStart(
     JNIEnv*, jobject, jint sampleRate, jint channels, jint bitsPerSample) {
 
     auto* driver = getDriver();
     if (!driver) return JNI_FALSE;
 
-    bool ok = driver->start(sampleRate, channels, bitsPerSample);
-    LOGI("nativeUsbStart: sr=%d ch=%d bits=%d -> %s",
-         sampleRate, channels, bitsPerSample, ok ? "OK" : "FAIL");
-    return ok ? JNI_TRUE : JNI_FALSE;
+    // 【V9.02 修复】start() 内部（std::thread 构造 / 分配）可能抛 C++ 异常。
+    // oboe_bridge 全局 -fno-exceptions 下未捕获的异常会直接 std::terminate() 整进程崩溃
+    // （见 tombstone_08）。此处加 try/catch 兜底：失败时仅返回 JNI_FALSE 让 Kotlin 重试，
+    // 绝不让原生异常冒泡到 JVM 之外 abort 进程。
+    try {
+        bool ok = driver->start(sampleRate, channels, bitsPerSample);
+        LOGI("nativeUsbStart: sr=%d ch=%d bits=%d -> %s",
+             sampleRate, channels, bitsPerSample, ok ? "OK" : "FAIL");
+        return ok ? JNI_TRUE : JNI_FALSE;
+    } catch (const std::exception& e) {
+        LOGE("nativeUsbStart: EXCEPTION '%s' (sr=%d ch=%d bits=%d) -> return FAIL",
+             e.what(), sampleRate, channels, bitsPerSample);
+    } catch (...) {
+        LOGE("nativeUsbStart: UNKNOWN EXCEPTION (sr=%d ch=%d bits=%d) -> return FAIL",
+             sampleRate, channels, bitsPerSample);
+    }
+    return JNI_FALSE;
 }
 
 // ── nativePushPcm ────────────────────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativePushPcm(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativePushPcm(
     JNIEnv* env, jobject, jfloatArray data, jint frameCount) {
 
     auto* driver = getDriver();
@@ -91,7 +114,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativePushPcm(
 // ── nativeGetRingFill ─────────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetRingFill(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetRingFill(JNIEnv*, jobject) {
     auto* driver = getDriver();
     return driver ? driver->getRingFillFrames() : 0;
 }
@@ -99,7 +122,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetRingFill(JNIEnv*, jo
 // ── nativeStop ───────────────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeStop(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeStop(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->stop();
     LOGI("nativeStop");
@@ -108,7 +131,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeStop(JNIEnv*, jobject) 
 // ── nativeResetRingBuffer ───────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetRingBuffer(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeResetRingBuffer(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->resetRingBuffer();
     LOGI("nativeResetRingBuffer");
@@ -117,7 +140,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetRingBuffer(JNIEnv*
 // ── nativeStopThreadOnly ─────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeStopThreadOnly(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeStopThreadOnly(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->stopThreadOnly();
     LOGI("nativeStopThreadOnly");
@@ -126,7 +149,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeStopThreadOnly(JNIEnv*,
 // ── nativeRelease ────────────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeRelease(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeRelease(JNIEnv*, jobject) {
     if (gUsbDriver) {
         // 【方向1 二期】release 防御: 若流仍在跑或接口仍 claim, 先 stop() 再 delete。
         // 正常路径调用方已按 RELEASING 动作顺序先 join + nativeFlacStop + nativeStop;
@@ -148,7 +171,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeRelease(JNIEnv*, jobjec
 // ── nativeIsStreaming ──────────────────────────────────────────────────────
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeIsStreaming(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeIsStreaming(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (!driver) return JNI_FALSE;
     return driver->isStreaming() ? JNI_TRUE : JNI_FALSE;
@@ -157,7 +180,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeIsStreaming(JNIEnv*, jo
 // ── nativeIsClaimed ──────────────────────────────────────────────────────
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeIsClaimed(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeIsClaimed(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (!driver) return JNI_FALSE;
     return driver->isClaimed() ? JNI_TRUE : JNI_FALSE;
@@ -166,7 +189,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeIsClaimed(JNIEnv*, jobj
 // ── nativeGetUnderrunCount ───────────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetUnderrunCount(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetUnderrunCount(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (!driver) return 0;
     return driver->getUnderrunCount();
@@ -175,14 +198,14 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetUnderrunCount(JNIEnv
 // ── nativeGetCurrentSampleRate ───────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetCurrentSampleRate(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetCurrentSampleRate(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (!driver) return 0;
     return driver->getSampleRate();
 }
 
 JNIEXPORT jint JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetCurrentBits(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetCurrentBits(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (!driver) return 0;
     return driver->getBitsPerSample();
@@ -192,7 +215,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetCurrentBits(JNIEnv*,
 // ── nativeGetDacName ─────────────────────────────────────────────────────
 
 JNIEXPORT jstring JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetDacName(JNIEnv* env, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetDacName(JNIEnv* env, jobject) {
     auto* driver = getDriver();
     if (!driver) return env->NewStringUTF("No DAC");
     return env->NewStringUTF(driver->getDacName());
@@ -201,7 +224,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetDacName(JNIEnv* env,
 // ── nativeGetDetailedInfo ────────────────────────────────────────────────
 
 JNIEXPORT jstring JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetDetailedInfo(JNIEnv* env, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetDetailedInfo(JNIEnv* env, jobject) {
     auto* driver = getDriver();
     if (!driver) return env->NewStringUTF("No DAC connected");
     return env->NewStringUTF(driver->getDetailedInfo());
@@ -210,7 +233,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetDetailedInfo(JNIEnv*
 // ── nativeGetSupportedRates ──────────────────────────────────────────────
 
 JNIEXPORT jstring JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetSupportedRates(JNIEnv* env, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetSupportedRates(JNIEnv* env, jobject) {
     auto* driver = getDriver();
     if (!driver) return env->NewStringUTF("48000");
     return env->NewStringUTF(driver->getSupportedRates());
@@ -219,7 +242,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetSupportedRates(JNIEn
 // ── nativeGetStats ───────────────────────────────────────────────────────
 
 JNIEXPORT jstring JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetStats(JNIEnv* env, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetStats(JNIEnv* env, jobject) {
     auto* driver = getDriver();
     if (!driver) return env->NewStringUTF("No DAC");
 
@@ -242,7 +265,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetStats(JNIEnv* env, j
 // ── nativeSetVolume ──────────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetVolume(JNIEnv*, jobject, jfloat volume) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetVolume(JNIEnv*, jobject, jfloat volume) {
     auto* driver = getDriver();
     if (driver) driver->setVolume(volume);
 }
@@ -250,7 +273,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetVolume(JNIEnv*, jobj
 // ── nativeSetDitherEnabled ──────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDitherEnabled(JNIEnv*, jobject, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetDitherEnabled(JNIEnv*, jobject, jboolean enabled) {
     auto* driver = getDriver();
     if (driver) driver->setDitherEnabled(enabled == JNI_TRUE);
 }
@@ -261,7 +284,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDitherEnabled(JNIEnv
 // WIDE profile raises it to 0.92 so the chain stays linear up to -0.7 dBFS.
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetWideHeadroom(JNIEnv*, jobject, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetWideHeadroom(JNIEnv*, jobject, jboolean enabled) {
     auto* driver = getDriver();
     if (driver) driver->setWideHeadroom(enabled == JNI_TRUE);
     LOGI("nativeSetWideHeadroom: %s", enabled ? "ON (knee 0.92)" : "OFF (knee 2/3)");
@@ -270,10 +293,47 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetWideHeadroom(JNIEnv*
 // -- nativeSetDirectPassthrough [V8.119] ----------------------------------
 // 原声直通：DAC 链整条 DSP 旁路，ring 写原始解码 PCM。
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDirectPassthrough(JNIEnv*, jobject, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetDirectPassthrough(JNIEnv*, jobject, jboolean enabled) {
     auto* driver = getDriver();
     if (driver) driver->setDirectPassthrough(enabled == JNI_TRUE);
     LOGI("nativeSetDirectPassthrough: %s", enabled ? "ON (raw PCM)" : "OFF");
+}
+
+// -- nativeSetEngineDspEnabled [V9.01] ---------------------------------
+// 引擎 DSP 主开关（DAC 模块"启用引擎 DSP"）。false = 创意 DSP 整链旁路，仅保留音量/DJ混音/硬钳。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetEngineDspEnabled(JNIEnv*, jobject, jboolean enabled) {
+    auto* driver = getDriver();
+    if (driver) driver->setEngineDspEnabled(enabled == JNI_TRUE);
+    LOGI("nativeSetEngineDspEnabled: %s", enabled ? "ON (creative DSP active)" : "OFF (bit-perfect passthrough)");
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeIsEngineDspEnabled(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    return (driver && driver->isEngineDspEnabled()) ? JNI_TRUE : JNI_FALSE;
+}
+
+// -- [V9.01] DAC 模块子开关（MSEB / AutoEQ / DTS 环绕） ----------------------
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetMsebEnabled(JNIEnv*, jobject, jboolean enabled) {
+    auto* driver = getDriver();
+    if (driver) driver->setMsebEnabled(enabled == JNI_TRUE);
+    LOGI("nativeSetMsebEnabled: %s", enabled ? "ON" : "OFF");
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetAutoEqEnabled(JNIEnv*, jobject, jboolean enabled) {
+    auto* driver = getDriver();
+    if (driver) driver->setAutoEqEnabled(enabled == JNI_TRUE);
+    LOGI("nativeSetAutoEqEnabled: %s", enabled ? "ON" : "OFF");
+}
+
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetDtsEnabled(JNIEnv*, jobject, jboolean enabled) {
+    auto* driver = getDriver();
+    if (driver) driver->setDtsEnabled(enabled == JNI_TRUE);
+    LOGI("nativeSetDtsEnabled: %s", enabled ? "ON" : "OFF");
 }
 
 // -- nativeSetSoftStartEnabled -------------------------------------------------
@@ -282,7 +342,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDirectPassthrough(JN
 // is only given up when the user explicitly enables it.
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetSoftStartEnabled(JNIEnv*, jobject, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetSoftStartEnabled(JNIEnv*, jobject, jboolean enabled) {
     UsbAudioDriver* d = getDriver();
     if (!d) return;
     d->setSoftStartEnabled(enabled == JNI_TRUE);
@@ -294,7 +354,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetSoftStartEnabled(JNI
 // after nativeClaim succeeds. Native built-in open() quirk init already ran;
 // this *overrides* it for known DACs (single source of truth = DacProfile.kt).
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetQuirkOverride(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetQuirkOverride(
     JNIEnv*, jobject, jint urbPackets, jint ctlMsgDelayUs, jint ifaceDelayUs,
     jboolean forceIfaceReset, jboolean forceUac1, jboolean skipSetCur) {
     auto* driver = getDriver();
@@ -306,7 +366,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetQuirkOverride(
 // ── nativeSetFeatureUnitOverride ─────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetFeatureUnitOverride(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetFeatureUnitOverride(
     JNIEnv*, jobject, jint unitId, jint channel, jint channels,
     jfloat minDb, jfloat maxDb, jfloat resDb) {
     auto* driver = getDriver();
@@ -316,7 +376,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetFeatureUnitOverride(
 // ── nativeSetDspEnabled ──────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDspEnabled(JNIEnv*, jobject, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetDspEnabled(JNIEnv*, jobject, jboolean enabled) {
     auto* driver = getDriver();
     if (driver) driver->setDspEnabled(enabled == JNI_TRUE);
 }
@@ -324,7 +384,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDspEnabled(JNIEnv*, 
 // ── nativeSetDspEq5Band ──────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDspEq5Band(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetDspEq5Band(
     JNIEnv* env, jobject, jfloatArray gainsDb, jfloatArray freqsHz) {
     auto* driver = getDriver();
     if (!driver) return;
@@ -340,7 +400,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetDspEq5Band(
 // ── nativeResetDspEq5Band ────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetDspEq5Band(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeResetDspEq5Band(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->resetDspEq5Band();
 }
@@ -348,7 +408,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetDspEq5Band(JNIEnv*
 // ── nativeSetMseb10Band ────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetMseb10Band(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetMseb10Band(
     JNIEnv* env, jobject, jfloatArray gainsDb, jfloatArray freqsHz, jfloatArray qValues) {
     auto* driver = getDriver();
     if (!driver) return;
@@ -366,7 +426,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetMseb10Band(
 // ── nativeResetMseb10Band ───────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetMseb10Band(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeResetMseb10Band(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->resetMseb10Band();
 }
@@ -374,7 +434,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetMseb10Band(JNIEnv*
 // ── nativeSetAutoEq10Band ─────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetAutoEq10Band(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetAutoEq10Band(
     JNIEnv* env, jobject, jfloatArray gainsDb, jfloatArray freqsHz, jfloatArray qValues, jintArray filterTypes, jfloat preampDb) {
     auto* driver = getDriver();
     if (!driver) return;
@@ -394,7 +454,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetAutoEq10Band(
 // ── nativeResetAutoEq ─────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetAutoEq(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeResetAutoEq(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->resetAutoEq();
 }
@@ -402,7 +462,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetAutoEq(JNIEnv*, jo
 // ── nativeSetMsStage ───────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetMsStage(JNIEnv*, jobject, jfloat soundstage, jfloat imaging) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetMsStage(JNIEnv*, jobject, jfloat soundstage, jfloat imaging) {
     auto* driver = getDriver();
     if (driver) driver->setMsStage(soundstage, imaging);
 }
@@ -410,7 +470,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetMsStage(JNIEnv*, job
 // ── nativeResetMsStage ─────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetMsStage(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeResetMsStage(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->resetMsStage();
 }
@@ -418,7 +478,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetMsStage(JNIEnv*, j
 // ── nativeSetTransient ──────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetTransient(JNIEnv*, jobject, jfloat amount) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetTransient(JNIEnv*, jobject, jfloat amount) {
     auto* driver = getDriver();
     if (driver) driver->setTransient(amount);
 }
@@ -426,7 +486,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetTransient(JNIEnv*, j
 // ── nativeResetTransient ─────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetTransient(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeResetTransient(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->resetTransient();
 }
@@ -434,7 +494,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeResetTransient(JNIEnv*,
 // ── nativeSetCompressorEnabled ──────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetCompressorEnabled(JNIEnv*, jobject, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetCompressorEnabled(JNIEnv*, jobject, jboolean enabled) {
     auto* driver = getDriver();
     if (driver) driver->setCompressorEnabled(enabled != 0);
 }
@@ -442,7 +502,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetCompressorEnabled(JN
 // ── nativeSetCompressorParams ──────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetCompressorParams(JNIEnv*, jobject, jfloat thresholdDb, jfloat ratio, jfloat attackMs, jfloat releaseMs, jfloat makeupDb) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetCompressorParams(JNIEnv*, jobject, jfloat thresholdDb, jfloat ratio, jfloat attackMs, jfloat releaseMs, jfloat makeupDb) {
     auto* driver = getDriver();
     if (driver) driver->setCompressorParams(thresholdDb, ratio, attackMs, releaseMs, makeupDb);
 }
@@ -450,7 +510,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetCompressorParams(JNI
 // ── nativeSetLoudnessEnabled ──────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessEnabled(JNIEnv*, jobject, jboolean enabled) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetLoudnessEnabled(JNIEnv*, jobject, jboolean enabled) {
     auto* driver = getDriver();
     if (driver) driver->setLoudnessEnabled(enabled != 0);
 }
@@ -458,7 +518,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessEnabled(JNIE
 // ── nativeSetLoudnessIntensity ──────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessIntensity(JNIEnv*, jobject, jfloat intensity) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetLoudnessIntensity(JNIEnv*, jobject, jfloat intensity) {
     auto* driver = getDriver();
     if (driver) driver->setLoudnessIntensity(intensity);
 }
@@ -466,7 +526,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessIntensity(JN
 // ── nativeSetLoudnessOutGain ──────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessOutGain(JNIEnv*, jobject, jfloat gain) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetLoudnessOutGain(JNIEnv*, jobject, jfloat gain) {
     auto* driver = getDriver();
     if (driver) driver->setLoudnessOutGain(gain);
 }
@@ -474,7 +534,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetLoudnessOutGain(JNIE
 // ── 【V8.170】nativeSetNormalizationGain：响度统一管理 ────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetNormalizationGain(JNIEnv*, jobject, jfloat db) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetNormalizationGain(JNIEnv*, jobject, jfloat db) {
     auto* driver = getDriver();
     if (driver) driver->setNormalizationGain(db);
 }
@@ -484,7 +544,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeSetNormalizationGain(JN
 // ── nativeForceReset ────────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeForceReset(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeForceReset(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->forceReset();
     LOGI("nativeForceReset");
@@ -493,7 +553,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeForceReset(JNIEnv*, job
 // ── nativeGetDebugLog ────────────────────────────────────────────────────
 
 JNIEXPORT jstring JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetDebugLog(JNIEnv* env, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetDebugLog(JNIEnv* env, jobject) {
     auto* driver = getDriver();
     if (!driver) return env->NewStringUTF("Driver not initialized");
     return env->NewStringUTF(driver->getNativeDebugLog());
@@ -502,7 +562,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeGetDebugLog(JNIEnv* env
 // ── nativeClearDebugLog ──────────────────────────────────────────────────
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeClearDebugLog(JNIEnv*, jobject) {
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeClearDebugLog(JNIEnv*, jobject) {
     auto* driver = getDriver();
     if (driver) driver->clearNativeDebugLog();
 }

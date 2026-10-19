@@ -14,6 +14,8 @@
 // [V8.119] Defined in usb_audio_driver.cpp (non-static so the inline setters below link).
 extern std::atomic<bool> g_dacWideHeadroom;
 extern std::atomic<bool> g_dacDirectPassthrough;
+// [V9.01] 引擎 DSP 主开关（DAC 模块"启用引擎 DSP"），与 g_dacDirectPassthrough 正交。
+extern std::atomic<bool> g_engineDspEnabled;
 
 /**
  * Native USB Audio Class driver for direct DAC streaming.
@@ -136,6 +138,14 @@ public:
     void setWideHeadroom(bool en) { g_dacWideHeadroom.store(en, std::memory_order_release); }
     // [V8.119] 原声直通：true = DAC 链整条 DSP 旁路
     void setDirectPassthrough(bool en) { g_dacDirectPassthrough.store(en, std::memory_order_release); }
+    // [V9.01] 引擎 DSP 主开关：true = 创意 DSP 生效；false = 整链旁路（bit-perfect 直通）
+    void setEngineDspEnabled(bool en) { g_engineDspEnabled.store(en, std::memory_order_release); }
+    bool isEngineDspEnabled() const   { return g_engineDspEnabled.load(std::memory_order_acquire); }
+    // [V9.01] DAC 模块子开关：直接翻转各创意 DSP 的使能标志（手动总闸，作为曲线载入的"上层覆盖"）。
+    // 无曲线时对应 Biquad 默认 identity，翻转这些标志也是透明直通，不会引入杂音。
+    void setMsebEnabled(bool en)  { msebSubEnabled_.store(en, std::memory_order_release); }
+    void setAutoEqEnabled(bool en){ autoEqSubEnabled_.store(en, std::memory_order_release); }
+    void setDtsEnabled(bool en)   { dtsSubEnabled_.store(en, std::memory_order_release); }
     // [2026-09-10 soft-start] Mask DAC PLL re-lock transient on (cross-rate) stream start.
     // OFF by default: a per-sample gain ramp is a mathematical intervention on the samples,
     // so bit-perfect output is preserved unless the user explicitly opts in.
@@ -334,12 +344,71 @@ private:
     BiquadFilter autoEqBand8L_, autoEqBand8R_;
     BiquadFilter autoEqBand9L_, autoEqBand9R_;
     BiquadFilter autoEqBand10L_, autoEqBand10R_;
+    // 【二期】手动参数 EQ 扩到 30 段：11-30 段专用实例（1-5 复用 dspEqBand，6-10 复用 autoEqBand6-10）。
+    BiquadFilter autoEqBand11L_, autoEqBand11R_;
+    BiquadFilter autoEqBand12L_, autoEqBand12R_;
+    BiquadFilter autoEqBand13L_, autoEqBand13R_;
+    BiquadFilter autoEqBand14L_, autoEqBand14R_;
+    BiquadFilter autoEqBand15L_, autoEqBand15R_;
+    BiquadFilter autoEqBand16L_, autoEqBand16R_;
+    BiquadFilter autoEqBand17L_, autoEqBand17R_;
+    BiquadFilter autoEqBand18L_, autoEqBand18R_;
+    BiquadFilter autoEqBand19L_, autoEqBand19R_;
+    BiquadFilter autoEqBand20L_, autoEqBand20R_;
+    BiquadFilter autoEqBand21L_, autoEqBand21R_;
+    BiquadFilter autoEqBand22L_, autoEqBand22R_;
+    BiquadFilter autoEqBand23L_, autoEqBand23R_;
+    BiquadFilter autoEqBand24L_, autoEqBand24R_;
+    BiquadFilter autoEqBand25L_, autoEqBand25R_;
+    BiquadFilter autoEqBand26L_, autoEqBand26R_;
+    BiquadFilter autoEqBand27L_, autoEqBand27R_;
+    BiquadFilter autoEqBand28L_, autoEqBand28R_;
+    BiquadFilter autoEqBand29L_, autoEqBand29R_;
+    BiquadFilter autoEqBand30L_, autoEqBand30R_;
+    BiquadFilter autoEqBand31L_, autoEqBand31R_;
+    BiquadFilter autoEqBand32L_, autoEqBand32R_;
+    BiquadFilter autoEqBand33L_, autoEqBand33R_;
+    BiquadFilter autoEqBand34L_, autoEqBand34R_;
+    BiquadFilter autoEqBand35L_, autoEqBand35R_;
+    BiquadFilter autoEqBand36L_, autoEqBand36R_;
+    BiquadFilter autoEqBand37L_, autoEqBand37R_;
+    BiquadFilter autoEqBand38L_, autoEqBand38R_;
+    BiquadFilter autoEqBand39L_, autoEqBand39R_;
+    BiquadFilter autoEqBand40L_, autoEqBand40R_;
+    BiquadFilter autoEqBand41L_, autoEqBand41R_;
+    BiquadFilter autoEqBand42L_, autoEqBand42R_;
+    BiquadFilter autoEqBand43L_, autoEqBand43R_;
+    BiquadFilter autoEqBand44L_, autoEqBand44R_;
+    BiquadFilter autoEqBand45L_, autoEqBand45R_;
+    BiquadFilter autoEqBand46L_, autoEqBand46R_;
+    BiquadFilter autoEqBand47L_, autoEqBand47R_;
+    BiquadFilter autoEqBand48L_, autoEqBand48R_;
+    BiquadFilter autoEqBand49L_, autoEqBand49R_;
+    BiquadFilter autoEqBand50L_, autoEqBand50R_;
+    BiquadFilter autoEqBand51L_, autoEqBand51R_;
+    BiquadFilter autoEqBand52L_, autoEqBand52R_;
+    BiquadFilter autoEqBand53L_, autoEqBand53R_;
+    BiquadFilter autoEqBand54L_, autoEqBand54R_;
+    BiquadFilter autoEqBand55L_, autoEqBand55R_;
+    BiquadFilter autoEqBand56L_, autoEqBand56R_;
+    BiquadFilter autoEqBand57L_, autoEqBand57R_;
+    BiquadFilter autoEqBand58L_, autoEqBand58R_;
+    BiquadFilter autoEqBand59L_, autoEqBand59R_;
+    BiquadFilter autoEqBand60L_, autoEqBand60R_;
+    BiquadFilter autoEqBand61L_, autoEqBand61R_;
+    BiquadFilter autoEqBand62L_, autoEqBand62R_;
+    BiquadFilter autoEqBand63L_, autoEqBand63R_;
+    BiquadFilter autoEqBand64L_, autoEqBand64R_;
     std::atomic<bool> autoEqEnabled_{false};
     float autoEqPreGain_ = 1.0f;
-    float lastAutoEqGains_[10] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f,
-                                   999.0f, 999.0f, 999.0f, 999.0f, 999.0f };
+    float lastAutoEqGains_[64] = { 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f, 999.0f };
     // 【V8.3】M/S 声场（跨声道矩阵）
     std::atomic<bool> msEnabled_{false};
+    // 【V9.01】DAC 模块子开关独立标志（与上面内容标志正交，曲线载入路径不碰）：
+    // 子开关 OFF 时即使载入曲线也强制静默（与 Oboe g_*SubEnabled 语义一致）。
+    std::atomic<bool> msebSubEnabled_{true};
+    std::atomic<bool> autoEqSubEnabled_{true};
+    std::atomic<bool> dtsSubEnabled_{true};
     std::atomic<float> msWidth_{1.0f};
     std::atomic<float> msCenter_{1.0f};
     float curMsWidth_ = 1.0f;

@@ -1,6 +1,9 @@
 package com.sdw.music.player.ui.navigation
+import com.sdw.music.player.core.audio.playback.MusicService
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.PredictiveBackHandler
+import kotlinx.coroutines.CancellationException
 import androidx.compose.animation.*
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
@@ -19,6 +22,7 @@ import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -37,6 +41,8 @@ import android.provider.MediaStore
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import android.widget.Toast
+import com.sdw.music.player.util.buildLyricoEditIntent
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.media3.common.Player
 import androidx.navigation.NavHostController
@@ -44,16 +50,15 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
-import com.sdw.music.player.ui.animation.SharedElementDestination
 import com.sdw.music.player.ui.animation.SharedCoverState
 import com.sdw.music.player.ui.animation.PageReveal
 import com.sdw.music.player.ui.animation.Motion
 import com.sdw.music.player.ui.screens.*
 import com.sdw.music.player.SongRepository
+import com.sdw.music.player.Song
 import com.sdw.music.player.splitArtists
 import com.sdw.music.player.PlaylistManager
 import com.sdw.music.player.R
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.ui.screens.LyricFullscreenScreen
 import com.sdw.music.player.ui.screens.PlaylistDetailScreen
 import com.sdw.music.player.ui.screens.LyricSearchScreen
@@ -104,6 +109,37 @@ fun SDWNavHost(
     // Detect large screen — never split in portrait, only landscape + width >= 600dp
     val context = androidx.compose.ui.platform.LocalContext.current
     val config = androidx.compose.ui.platform.LocalConfiguration.current
+
+    // 【Lyrico 联动】长按歌曲 → 用 Lyrico 编辑当前曲目元数据。
+    // 若 Lyrico 回传了编辑后的标签 extras（上游 PR #196 新增），就地更新内存中的歌曲，免去整库重扫；
+    // 否则（老版 Lyrico 未回传 extras）回退到整库重扫。
+    val pendingLyricoSong = remember { mutableStateOf<Song?>(null) }
+    val lyricoEditLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        val song = pendingLyricoSong.value
+        pendingLyricoSong.value = null
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            if (song != null) {
+                // 统一入口：文本字段按 extras 就地更新，封面无论新旧 Lyrico 都直接从被改写文件
+                // 重新抽取（得到新 URI），即时刷新播放器封面，不依赖平台 albumart 索引。
+                vm.onExternalTagEditReturned(song.id, song.filePath.ifBlank { song.path }, result.data?.extras)
+            } else {
+                vm.refreshSongs()
+            }
+        }
+    }
+    fun openInLyrico(song: Song) {
+        val filePath = song.filePath.ifBlank { song.path }
+        val intent = buildLyricoEditIntent(context, filePath)
+        when {
+            intent == null -> Toast.makeText(context, R.string.lyrico_edit_unsupported, Toast.LENGTH_SHORT).show()
+            intent.resolveActivity(context.packageManager) == null ->
+                Toast.makeText(context, R.string.lyrico_not_installed, Toast.LENGTH_LONG).show()
+            else -> {
+                pendingLyricoSong.value = song
+                lyricoEditLauncher.launch(intent)
+            }
+        }
+    }
     val isTablet = remember(config) {
         val displayMetrics = context.resources.displayMetrics
         val widthDp = displayMetrics.widthPixels / displayMetrics.density
@@ -144,6 +180,23 @@ fun SDWNavHost(
         // Compose inside the navigation transition, not by a drawn-on-top overlay.
         SharedTransitionLayout {
         val sharedTransitionScope = this
+        // 【V9.02】离开播放页（返回主界面 / 进入子页）时触发 sharedCoverState.exit()，
+        // 置 isAnimating=true，让播放页 60Hz 重活（VU/装饰相位）在返回转场期间暂停，
+        // 修复：① 返回主界面动画卡顿；② 返回后首次点击失效（需双击）。
+        // 覆盖「返回按钮」与「系统/预测返回手势」两种退出方式（enter() 在 onNavigateToPlayer 调，
+        // 只处理进入；exit() 此前全工程无人调用，故返回时 isAnimating 从不置 true，暂停逻辑形同虚设）。
+        DisposableEffect(navController) {
+            var prevRoute: String? = null
+            val listener = { _: androidx.navigation.NavController, destination: androidx.navigation.NavDestination, _: android.os.Bundle? ->
+                val newRoute = destination.route
+                if (prevRoute == Screen.Player.route && newRoute != Screen.Player.route) {
+                    sharedCoverState.exit()
+                }
+                prevRoute = newRoute
+            }
+            navController.addOnDestinationChangedListener(listener)
+            onDispose { navController.removeOnDestinationChangedListener(listener) }
+        }
         NavHost(
             navController = navController,
             startDestination = Screen.SongList.route,
@@ -179,10 +232,9 @@ fun SDWNavHost(
                 // Root back: minimize only when SongList is current route
                 // (prevent intercepting back during navigation transitions)
                 val rootContext = LocalContext.current
-                BackHandler {
-                    if (navController.currentBackStackEntry?.destination?.route == Screen.SongList.route) {
-                        (rootContext as? ComponentActivity)?.moveTaskToBack(true)
-                    }
+                val currentRoute = navController.currentBackStackEntryAsState().value?.destination?.route
+                BackHandler(enabled = currentRoute == Screen.SongList.route) {
+                    (rootContext as? ComponentActivity)?.moveTaskToBack(true)
                 }
 
                 val currentPlayingSong = remember(state.currentSongId, state.songList) {
@@ -286,6 +338,7 @@ fun SDWNavHost(
                             android.util.Log.e("SDWNav", "Share failed", e)
                         }
                     },
+                    onEditWithLyrico = { song -> openInLyrico(song) },
                     onNavigateToLyrics = { navController.navigate(Screen.LyricFullscreen.route) }
                 )
                 }
@@ -355,6 +408,21 @@ fun SDWNavHost(
                 // [V8.81] 注释记录过的同一个坑。删掉它，跟手能力全部交回官方实现。
                 // 保留 sharedCoverState.dragProgress / LocalCoverDragProgress 通路（默认 0f，
                 // 无副作用），若日后官方跟手观感不佳可在此处重新驱动。
+                // [V9.03] 用户实测安卓 17 上官方跟手观感不佳（封面不跟手），在此处重新驱动：
+                // 把系统返回手势进度喂给 dragProgress，经 LocalCoverDragProgress → PlayerComponents
+                // 让封面随手指下移（与 App 内手拖封面同源管线）。松手提交时 pop 回主界面由官方
+                // 共享元素收尾飞行；手势取消则归位。
+                PredictiveBackHandler { progress ->
+                    try {
+                        progress.collect { event -> sharedCoverState.dragProgress = event.progress }
+                        // 手势提交完成：封面已随手指到位，正常 pop，官方共享元素收尾
+                        sharedCoverState.dragProgress = 0f
+                        navController.popBackStack()
+                    } catch (e: CancellationException) {
+                        // 手势取消：封面归位
+                        sharedCoverState.dragProgress = 0f
+                    }
+                }
 
                 PlayerScreen(
                     positionMs = positionMs,
@@ -371,6 +439,9 @@ fun SDWNavHost(
                     onToggleShuffle = { vm.handleIntent(PlayerIntent.SetShuffle(!state.shuffleEnabled)) },
                     onReorderQueueByFlow = { vm.reorderQueueByFlow() },
                     onPreviewUpNext = { vm.previewUpNext() },
+                    onLyricoExternalEditReturned = { id, fp, ex ->
+                        vm.onExternalTagEditReturned(id, fp, ex)
+                    },
                     onCycleRepeat = {
                         val nextMode = when (state.repeatMode) {
                             Player.REPEAT_MODE_OFF -> Player.REPEAT_MODE_ALL
@@ -564,11 +635,15 @@ fun SDWNavHost(
             composable(Screen.Equalizer.route) {PageReveal {
                 EqualizerScreen(
                     onBack = { navController.popBackStack() },
-                    onNavigateToMseb = { navController.navigate(Screen.Mseb.route) }
+                    onNavigateToMseb = { navController.navigate(Screen.Mseb.route) },
+                    onNavigateToParametricEq = { navController.navigate(Screen.ParametricEq.route) }
                 )
             }}
             composable(Screen.Mseb.route) {PageReveal {
                 MsebScreen(onBack = { navController.popBackStack() })
+            }}
+            composable(Screen.ParametricEq.route) {PageReveal {
+                ParametricEqScreen(onBack = { navController.popBackStack() })
             }}
             composable(Screen.AudioDiagnostic.route) {PageReveal {
                 AudioDiagnosticScreen(onNavigateBack = { navController.popBackStack() })

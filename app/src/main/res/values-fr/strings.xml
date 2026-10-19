@@ -536,6 +536,15 @@
     <string name="mseb_dts_link_wired">Fil</string>
     <string name="mseb_dts_link_hint">Lien codé — HF du surround réduit. Passez en LDAC / LHDC pour l’effet complet.</string>
     <string name="mseb_dts_desc">Synchronise avec le menu et la pastille de lecture</string>
+    <!-- 【第2步·隔离探针】HRTF 双耳渲染探针 -->
+    <string name="mseb_hrtf_probe">Sonde HRTF</string>
+    <string name="mseb_hrtf_probe_desc">Sonde binaurale de diagnostic — convolution HRIR synthétique avant/arrière/gauche/droite/haut</string>
+    <string name="mseb_hrtf_probe_dir_auto">Auto</string>
+    <string name="mseb_hrtf_probe_dir_front">Avant</string>
+    <string name="mseb_hrtf_probe_dir_back">Arrière</string>
+    <string name="mseb_hrtf_probe_dir_left">Gauche</string>
+    <string name="mseb_hrtf_probe_dir_right">Droite</string>
+    <string name="mseb_hrtf_probe_dir_up">Haut</string>
     <string name="mseb_device_auto">Calibrage automatique</string>
     <string name="mseb_device_auto_desc">Applique le profil AutoEQ du casque / DAC actuel</string>
     <!-- 【V8.170】V8.170 新模块端点标签 -->

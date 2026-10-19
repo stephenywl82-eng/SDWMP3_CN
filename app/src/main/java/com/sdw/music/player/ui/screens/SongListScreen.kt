@@ -1,4 +1,6 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.metadata.SongSpecReader
 
 import androidx.compose.animation.animateColorAsState
 import com.sdw.music.player.ui.components.SDWTopBar
@@ -79,7 +81,6 @@ import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 import androidx.activity.compose.BackHandler
 import com.sdw.music.player.R
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.focus.FocusRequester
@@ -107,10 +108,8 @@ import androidx.compose.ui.layout.positionInWindow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import com.sdw.music.player.core.audio.SongSpecReader
-import androidx.compose.ui.platform.LocalContext
+import kotlinx.coroutines.flow.*
 
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.WallpaperManager
 import com.sdw.music.player.ui.components.AddToPlaylistSheet
 import com.sdw.music.player.ui.components.BpmBadge
@@ -192,6 +191,8 @@ fun SongListScreen(
     onToggleFavorite: () -> Unit = {},
     onToggleEqualizer: () -> Unit = {},
     onShare: () -> Unit = {},
+    // 【Lyrico 联动】长按歌曲菜单里的「用 Lyrico 编辑」入口
+    onEditWithLyrico: (Song) -> Unit = {},
     onNavigateToLyrics: () -> Unit = {},
     eqEnabled: Boolean = false,
     shuffleEnabled: Boolean = false,
@@ -478,10 +479,34 @@ fun SongListScreen(
         // minSdk 24：低版本 backdropLayer 传 null，条子保持原有便携玻璃，行为与旧版一致。
         val realBlurSupported = android.os.Build.VERSION.SDK_INT >= 31
         val backdropLayer = rememberGraphicsLayer()
+        // 【性能修复】全屏 BlurEffect 图层只在「列表内容真变了」时重录，
+        // 不再被正在播放行的 60fps 无限动画（光晕呼吸 / 跳动条）每帧触发整列重模糊。
+        // 否则空闲时 GPU 常驻 ~39%，飞回列表的转场动画抢不到预算而掉帧。
+        // 用 AtomicBoolean 而非 State：在 draw 阶段读改写不会触发重组，避免重录→重组→再重录的死循环。
+        val backdropDirty = remember { java.util.concurrent.atomic.AtomicBoolean(true) }
+        LaunchedEffect(listState) {
+            snapshotFlow {
+                listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
+            }.distinctUntilChanged().collect { backdropDirty.set(true) }
+        }
+        LaunchedEffect(currentPlayingSong) { backdropDirty.set(true) }
+        // 【性能修复·转场】共享元素飞行（进/出播放页）期间冻结列表的 60fps 无限动画，
+        // 否则正在播放行的光晕呼吸 + 跳动条会驱动整列每帧重绘，与飞行动画抢 GPU 致顿挫。
+        // coverAnimating 翻转只在转场起止两次触发重组（替代持续 60fps 重绘）。
+        val coverAnimating = sharedCoverState?.isAnimating == true
+        LaunchedEffect(sharedCoverState?.isAnimating) {
+            // 转场结束后刷新一次全屏模糊，覆盖转场期间可能的列表滚动/在播行变化。
+            if (sharedCoverState?.isAnimating != true) backdropDirty.set(true)
+        }
         val blurRadiusPx = with(androidx.compose.ui.platform.LocalDensity.current) { 22.dp.toPx() }
         if (realBlurSupported) {
             SideEffect {
-                backdropLayer.renderEffect = BlurEffect(blurRadiusPx, blurRadiusPx, TileMode.Clamp)
+                // 【V9.02 性能】转场（飞入/飞出播放页）期间冻结全屏模糊：返回时播放页整页
+                // scaleOut+fadeOut 转场与列表模糊同时渲染会超出弱 GPU 帧预算，导致飞回动画掉帧。
+                // 转场中直接画已录好的清晰图层（省掉每帧全屏 22dp 高斯模糊）；coverAnimating
+                // 翻转触发一次重组即恢复模糊。转场时迷你条本就被播放页盖住，几乎不可见，无感。
+                backdropLayer.renderEffect = if (coverAnimating) null
+                    else BlurEffect(blurRadiusPx, blurRadiusPx, TileMode.Clamp)
                 backdropLayer.compositingStrategy = CompositingStrategy.Offscreen
             }
         }
@@ -506,8 +531,11 @@ fun SongListScreen(
                 .then(
                     // [V8.111] 只在迷你条可见（有正在播放的歌）时录，无歌时零开销。
                     if (realBlurSupported && currentPlayingSong != null) Modifier.drawWithContent {
-                        val contentScope = this
-                        backdropLayer.record { contentScope.drawContent() }
+                        if (backdropDirty.get()) {
+                            val contentScope = this
+                            backdropLayer.record { contentScope.drawContent() }
+                            backdropDirty.set(false)
+                        }
                         drawContent()
                     } else Modifier
                 )
@@ -757,6 +785,7 @@ fun SongListScreen(
                                 onClick = { onSongClick(song) },
                                 onLongClick = { longPressSong = song },
                                 coverFlight = sharedCoverState?.rowFlightSongId == song.id,
+                                coverAnimating = coverAnimating,
                                 modifier = itemMod
                             )
                         }
@@ -901,11 +930,28 @@ fun SongListScreen(
             )
         }
 
+    // 【V8.111b】长按菜单背景模糊：ModalBottomSheet 自带 50% 黑 scrim 但未模糊，
+    // 背后列表文字会透上来与菜单文字重叠看不清。在列表之上、弹层之下铺一层已录好的
+    // 全屏模糊快照 backdropLayer（迷你条同款，API31+ 才有真模糊），由 scrim 压暗 → 毛玻璃透出列表。
+    // 低版本（无 RenderEffect）保持原 50% 黑 scrim，不退化。
+    if (longPressSong != null && realBlurSupported) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .drawWithContent { drawLayer(backdropLayer) }
+        )
+    }
+    LaunchedEffect(longPressSong) {
+        // 弹层打开瞬间刷新一次列表快照，保证模糊层是当前的列表。
+        if (longPressSong != null) backdropDirty.set(true)
+    }
+
     // 【V8.7】长按添加歌单
     longPressSong?.let { song ->
         AddToPlaylistSheet(
             song = song,
-            onDismiss = { longPressSong = null }
+            onDismiss = { longPressSong = null },
+            onEditWithLyrico = onEditWithLyrico
         )
     }
     }
@@ -1222,6 +1268,9 @@ fun SongItem(
     // [V8.84] true only for the row the user tapped: it becomes the source end of the
     // shared-element flight, so the flight starts from the row itself (not the mini bar).
     coverFlight: Boolean = false,
+    // [V8.117b] 转场（进/出播放页）期间为 true：让正在播放行的跳动条冻结，不再 60fps
+    // 驱动整列每帧重绘、与共享元素飞行动画抢 GPU。由 SongListScreen 在调用处传入。
+    coverAnimating: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -1355,7 +1404,7 @@ fun SongItem(
         Column(horizontalAlignment = Alignment.End) {
             // [V8.109] 正在播放的行把时长换成跳动的三根小波形，静态时长让位给"在播"。
             if (isPlaying) {
-                NowPlayingBars(accentColor)
+                NowPlayingBars(accentColor, animated = !coverAnimating)
             } else {
                 Text(
                     text = formatDuration(song.duration),
@@ -1439,6 +1488,9 @@ fun MiniPlayer(
     // [V8.112] 模糊层之上再压的一层极薄主题色薄纱：统一色调、压住过碎的细节，
     // 读起来是透亮的液态玻璃而不是"一块死板的黑/白"。
     val blurVeil = MaterialTheme.colorScheme.surface.copy(alpha = 0.16f)
+    // [V8.113] 胶囊底层的不透明磨砂底：必须在 Composable 作用域先取值，drawWithContent
+    // 的 lambda 里不能调用 @Composable 的 MaterialTheme.colorScheme（会报编译错）。
+    val miniBase = MaterialTheme.colorScheme.surface.copy(alpha = 0.95f)
     
     Column(
         modifier = modifier
@@ -1463,10 +1515,12 @@ fun MiniPlayer(
             .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
             .onGloballyPositioned { coords -> miniShift = coords.positionInRoot() - containerOrigin }
             .then(
-                if (backdropLayer != null) Modifier.drawWithContent {
-                    // [V8.112b] 修：.padding(16/6/10) 在本节点之前执行，node 的 size 已经是**内层**
-                    // 尺寸，再各边内缩 16/6/10 就多缩了一圈 → 胶囊四周留出 ~16dp 未糊的生硬竖条。
-                    // 这里按节点真实尺寸直接裁胶囊（与 glassSurface 的 RoundedCornerShape(26dp) 对齐）。
+                // [V8.113] 胶囊底层始终铺一层不透明磨砂底，挡住背后常驻的壁纸/主题渐变，
+                // 否则迷你条（自身极薄填充）会把背景透上来，与模糊列表叠影。
+                // API31+ 在此底之上再贴真·模糊列表；低版本只显示这层磨砂底。
+                Modifier.drawWithContent {
+                    // [V8.112b] 按节点真实尺寸直接裁胶囊（与 glassSurface 的 RoundedCornerShape(26dp) 对齐），
+                    // 避免四周留出未糊的生硬竖条。
                     val rad = 26.dp.toPx()
                     val capsule = Path().apply {
                         addRoundRect(
@@ -1474,14 +1528,18 @@ fun MiniPlayer(
                         )
                     }
                     clipPath(capsule) {
-                        translate(left = -miniShift.x, top = -miniShift.y) {
-                            drawLayer(backdropLayer)
+                        // 不透明磨砂底：用当前配色 surface（深/浅自动适配），alpha 拉到 0.95 挡住背景。
+                        drawPath(capsule, miniBase)
+                        if (backdropLayer != null) {
+                            translate(left = -miniShift.x, top = -miniShift.y) {
+                                drawLayer(backdropLayer)
+                            }
                         }
                     }
                     // [V8.112] 薄纱压在模糊层之上、内容之下：色调统一 + 提升可读性
                     drawPath(capsule, blurVeil)
                     drawContent()
-                } else Modifier
+                }
             )
     ) {
         Row(

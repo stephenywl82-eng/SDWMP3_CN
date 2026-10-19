@@ -1,6 +1,12 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.dsp.ParametricEqManager
+import com.sdw.music.player.core.audio.dsp.AutoEqPresetManager
+import com.sdw.music.player.core.audio.dsp.EqualizerManager
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.engine.OboeDirectPlayer
 
 import androidx.compose.foundation.clickable
+import com.sdw.music.player.ui.components.ExpressiveSwitch
 import com.sdw.music.player.ui.components.SDWDivider
 import com.sdw.music.player.ui.theme.sectionTitleStyle
 import com.sdw.music.player.ui.components.SDWTopBar
@@ -24,12 +30,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.res.stringResource
-import com.sdw.music.player.EqualizerManager
-import com.sdw.music.player.MusicService
-import com.sdw.music.player.OboeDirectPlayer
 import com.sdw.music.player.R
-import com.sdw.music.player.core.audio.AutoEqPreset
-import com.sdw.music.player.core.audio.AutoEqPresetManager
+import com.sdw.music.player.core.audio.dsp.AutoEqPreset
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.components.springPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -48,13 +50,14 @@ private fun presetDescription(presetId: String): String {
 @Composable
 fun EqualizerScreen(
     onBack: () -> Unit,
-    onNavigateToMseb: () -> Unit = {}
+    onNavigateToMseb: () -> Unit = {},
+    onNavigateToParametricEq: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val isOboeMode = EqualizerManager.isOboeMode(context)
 
     if (isOboeMode) {
-        OboeEqFullScreen(onBack, onNavigateToMseb)
+        OboeEqFullScreen(onBack, onNavigateToMseb, onNavigateToParametricEq)
     } else {
         EqualizerPresetsScreen(onBack)
     }
@@ -63,7 +66,11 @@ fun EqualizerScreen(
 // ================ Oboe 独占模式：DSP + Equalizer预设合并 ================
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun OboeEqFullScreen(onBack: () -> Unit, onNavigateToMseb: () -> Unit) {
+private fun OboeEqFullScreen(
+    onBack: () -> Unit,
+    onNavigateToMseb: () -> Unit,
+    onNavigateToParametricEq: () -> Unit = {}
+) {
     val context = LocalContext.current
     val presets = remember { EqualizerManager.PRESETS }
 
@@ -80,6 +87,9 @@ private fun OboeEqFullScreen(onBack: () -> Unit, onNavigateToMseb: () -> Unit) {
 
     LaunchedEffect(Unit) {
         EqualizerManager.restoreSettings(context)
+        // 【V9.05】从参数 EQ 界面返回时，EqualizerScreen 会重新组合并触发上面的 restoreSettings，
+        // 可能把共用的 AutoEQ 通道上的 PEQ 覆盖掉。这里紧接着把 PEQ 重新下发一遍，确保返回后效果保留。
+        com.sdw.music.player.core.audio.dsp.ParametricEqManager.restoreSettings(context)
         currentPresetId = EqualizerManager.getCurrentPresetId(context)
     }
 
@@ -98,7 +108,7 @@ private fun OboeEqFullScreen(onBack: () -> Unit, onNavigateToMseb: () -> Unit) {
                         style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.padding(end = 4.dp)
                     )
-                    Switch(
+                    ExpressiveSwitch(
                         checked = eqEnabled,
                         onCheckedChange = { on ->
                             EqualizerManager.setEnabled(on, context)
@@ -132,57 +142,26 @@ private fun OboeEqFullScreen(onBack: () -> Unit, onNavigateToMseb: () -> Unit) {
                 }
             }
 
-            // === 分隔 ===
+            // === 手动参数 EQ（发烧级）入口 ===
             item {
-                SDWDivider(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 1f)
-                )
-            }
-
-            // === 28 种品牌Equalizer预设 ===
-            item {
-                Text(
-                    text = stringResource(R.string.eq_brand_presets),
-                    style = sectionTitleStyle(),
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
-                )
-            }
-
-            items(presets) { preset ->
-                val isSelected = currentPresetId == preset.id && eqEnabled
-                // [V8.115] 统一玻璃语言：Surface -> glassSurface（选中走 accent 洗底 + 发丝描边，
-                // 与主界面「正在播放行」同形），加弹簧按压。
-                val eqInteraction = remember { MutableInteractionSource() }
-                Column(
+                OutlinedButton(
+                    onClick = onNavigateToParametricEq,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 2.dp)
-                        .glassSurface(shape = SDWShapes.Row, selected = isSelected, fillBoost = 0f)
-                        .springPress(eqInteraction, pressedScale = 0.975f)
-                        .clickable(
-                            interactionSource = eqInteraction,
-                            indication = null
-                        ) {
-                            currentPresetId = preset.id
-                            EqualizerManager.applyPreset(preset.id, context)
-                        }
+                        .padding(horizontal = 16.dp, vertical = 0.dp)
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = preset.name,
-                            style = sectionTitleStyle(),
-                            color = if (isSelected) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = presetDescription(preset.id),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                        )
-                    }
+                    Text(stringResource(R.string.eq_peq_title), style = MaterialTheme.typography.titleSmall)
                 }
+            }
+
+            // === 5 段品牌 / 曲风预设已迁移至参数均衡器模板 ===
+            item {
+                Text(
+                    text = stringResource(R.string.eq_presets_migrated),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+                )
             }
 
             // === AutoEQ Headphone Correction ===
@@ -416,7 +395,7 @@ private fun EqualizerPresetsScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.padding(end = 4.dp)
                     )
-                    Switch(
+                    ExpressiveSwitch(
                         checked = enabled,
                         onCheckedChange = { on ->
                             EqualizerManager.setEnabled(on, context)
@@ -439,40 +418,14 @@ private fun EqualizerPresetsScreen(onBack: () -> Unit) {
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            items(presets) { preset ->
-                val isSelected = currentPresetId == preset.id && enabled
-                // [V8.115] 统一玻璃语言：Surface -> glassSurface（选中走 accent 洗底 + 发丝描边，
-                // 与主界面「正在播放行」同形），加弹簧按压。
-                val eqInteraction = remember { MutableInteractionSource() }
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 2.dp)
-                        .glassSurface(shape = SDWShapes.Row, selected = isSelected, fillBoost = 0f)
-                        .springPress(eqInteraction, pressedScale = 0.975f)
-                        .clickable(
-                            interactionSource = eqInteraction,
-                            indication = null
-                        ) {
-                            currentPresetId = preset.id
-                            EqualizerManager.applyPreset(preset.id, context)
-                        }
-                ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
-                        Text(
-                            text = preset.name,
-                            style = sectionTitleStyle(),
-                            color = if (isSelected) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = presetDescription(preset.id),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                        )
-                    }
-                }
+            // 5 段品牌 / 曲风预设已迁移至参数均衡器模板（Oboe / DAC 输出模式下可用）
+            item {
+                Text(
+                    text = stringResource(R.string.eq_presets_migrated),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+                )
             }
 
             // EQ Unavailable时提示

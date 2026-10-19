@@ -48,6 +48,10 @@
 std::atomic<bool> g_dacWideHeadroom{true};          // DAC headroom profile
 std::atomic<bool> g_dacDirectPassthrough{false};    // DAC 原声直通（整链旁路）
 
+// 【V9.01】引擎 DSP 主开关（DAC 模块"启用引擎 DSP"）。false = 创意 DSP 整链旁路，
+// 与 g_dacDirectPassthrough 正交：两者任一为真都进入 bit-perfect 直通。
+std::atomic<bool> g_engineDspEnabled{true};          // 引擎 DSP 主开关
+
 static inline float dacSoftClip(float x) {
     // [V8.119] knee follows the headroom profile (same rationale as the Oboe
     // softClip): 0.92 stays linear up to -0.7 dBFS instead of wave-shaping
@@ -493,7 +497,21 @@ bool UsbAudioDriver::start(int sampleRate, int channels, int bitsPerSample) {
 
     // Start stream thread
     streaming_.store(true, std::memory_order_release);
-    streamThread_ = std::thread(streamThreadEntry, this);
+    // 【V9.02 修复】std::thread 构造在 pthread_create 资源紧张 / 旧线程未完全回收时可能抛
+    // std::system_error（前期走 alt 切换的重启路径尤其易触发）；若 move-assign 时
+    // streamThread_ 仍 joinable 也会触发 std::terminate。这里兜底：先确保非 joinable，
+    // 再 try 创建；失败则回退 streaming_ 标志并返回 false，绝不让异常冒泡整进程崩溃。
+    if (streamThread_.joinable()) {
+        try { streamThread_.join(); } catch (...) {}
+    }
+    try {
+        streamThread_ = std::thread(streamThreadEntry, this);
+    } catch (...) {
+        streaming_.store(false, std::memory_order_release);
+        LOGE("start: std::thread spawn FAILED (sr=%d ch=%d bits=%d) -> return false",
+             sampleRate_, channels_, bitsPerSample_);
+        return false;
+    }
     return true;
 }
 
@@ -669,12 +687,90 @@ void UsbAudioDriver::setAutoEq10Band(const float* gainsDb, const float* freqsHz,
     std::lock_guard<std::mutex> eqLock(dspEqMutex_);
     float sr = static_cast<float>(sampleRate_ > 0 ? sampleRate_ : 48000);
 
-    BiquadFilter* bandsL[10] = { &autoEqBand1L_, &autoEqBand2L_, &autoEqBand3L_, &autoEqBand4L_, &autoEqBand5L_,
-                                 &autoEqBand6L_, &autoEqBand7L_, &autoEqBand8L_, &autoEqBand9L_, &autoEqBand10L_ };
-    BiquadFilter* bandsR[10] = { &autoEqBand1R_, &autoEqBand2R_, &autoEqBand3R_, &autoEqBand4R_, &autoEqBand5R_,
-                                 &autoEqBand6R_, &autoEqBand7R_, &autoEqBand8R_, &autoEqBand9R_, &autoEqBand10R_ };
+    BiquadFilter* bandsL[64] = { &autoEqBand1L_, &autoEqBand2L_, &autoEqBand3L_, &autoEqBand4L_, &autoEqBand5L_,
+                                 &autoEqBand6L_, &autoEqBand7L_, &autoEqBand8L_, &autoEqBand9L_, &autoEqBand10L_,
+                                 &autoEqBand11L_, &autoEqBand12L_, &autoEqBand13L_, &autoEqBand14L_, &autoEqBand15L_,
+                                 &autoEqBand16L_, &autoEqBand17L_, &autoEqBand18L_, &autoEqBand19L_, &autoEqBand20L_,
+                                 &autoEqBand21L_, &autoEqBand22L_, &autoEqBand23L_, &autoEqBand24L_, &autoEqBand25L_,
+                                 &autoEqBand26L_, &autoEqBand27L_, &autoEqBand28L_, &autoEqBand29L_, &autoEqBand30L_,
+                                 &autoEqBand31L_,
+                                 &autoEqBand32L_,
+                                 &autoEqBand33L_,
+                                 &autoEqBand34L_,
+                                 &autoEqBand35L_,
+                                 &autoEqBand36L_,
+                                 &autoEqBand37L_,
+                                 &autoEqBand38L_,
+                                 &autoEqBand39L_,
+                                 &autoEqBand40L_,
+                                 &autoEqBand41L_,
+                                 &autoEqBand42L_,
+                                 &autoEqBand43L_,
+                                 &autoEqBand44L_,
+                                 &autoEqBand45L_,
+                                 &autoEqBand46L_,
+                                 &autoEqBand47L_,
+                                 &autoEqBand48L_,
+                                 &autoEqBand49L_,
+                                 &autoEqBand50L_,
+                                 &autoEqBand51L_,
+                                 &autoEqBand52L_,
+                                 &autoEqBand53L_,
+                                 &autoEqBand54L_,
+                                 &autoEqBand55L_,
+                                 &autoEqBand56L_,
+                                 &autoEqBand57L_,
+                                 &autoEqBand58L_,
+                                 &autoEqBand59L_,
+                                 &autoEqBand60L_,
+                                 &autoEqBand61L_,
+                                 &autoEqBand62L_,
+                                 &autoEqBand63L_,
+                                 &autoEqBand64L_,
+                                 };
+    BiquadFilter* bandsR[64] = { &autoEqBand1R_, &autoEqBand2R_, &autoEqBand3R_, &autoEqBand4R_, &autoEqBand5R_,
+                                 &autoEqBand6R_, &autoEqBand7R_, &autoEqBand8R_, &autoEqBand9R_, &autoEqBand10R_,
+                                 &autoEqBand11R_, &autoEqBand12R_, &autoEqBand13R_, &autoEqBand14R_, &autoEqBand15R_,
+                                 &autoEqBand16R_, &autoEqBand17R_, &autoEqBand18R_, &autoEqBand19R_, &autoEqBand20R_,
+                                 &autoEqBand21R_, &autoEqBand22R_, &autoEqBand23R_, &autoEqBand24R_, &autoEqBand25R_,
+                                 &autoEqBand26R_, &autoEqBand27R_, &autoEqBand28R_, &autoEqBand29R_, &autoEqBand30R_,
+                                 &autoEqBand31R_,
+                                 &autoEqBand32R_,
+                                 &autoEqBand33R_,
+                                 &autoEqBand34R_,
+                                 &autoEqBand35R_,
+                                 &autoEqBand36R_,
+                                 &autoEqBand37R_,
+                                 &autoEqBand38R_,
+                                 &autoEqBand39R_,
+                                 &autoEqBand40R_,
+                                 &autoEqBand41R_,
+                                 &autoEqBand42R_,
+                                 &autoEqBand43R_,
+                                 &autoEqBand44R_,
+                                 &autoEqBand45R_,
+                                 &autoEqBand46R_,
+                                 &autoEqBand47R_,
+                                 &autoEqBand48R_,
+                                 &autoEqBand49R_,
+                                 &autoEqBand50R_,
+                                 &autoEqBand51R_,
+                                 &autoEqBand52R_,
+                                 &autoEqBand53R_,
+                                 &autoEqBand54R_,
+                                 &autoEqBand55R_,
+                                 &autoEqBand56R_,
+                                 &autoEqBand57R_,
+                                 &autoEqBand58R_,
+                                 &autoEqBand59R_,
+                                 &autoEqBand60R_,
+                                 &autoEqBand61R_,
+                                 &autoEqBand62R_,
+                                 &autoEqBand63R_,
+                                 &autoEqBand64R_,
+                                 };
 
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 64; i++) {
         float gainDb = (i < len) ? gainsDb[i] : 0.0f;
         float freqHz = (freqsHz && i < len && freqsHz[i] > 0.0f) ? freqsHz[i] : 1000.0f;
         float Q = (qs && i < len && qs[i] > 0.0f) ? qs[i] : 1.0f;
@@ -705,20 +801,98 @@ void UsbAudioDriver::setAutoEq10Band(const float* gainsDb, const float* freqsHz,
 
     autoEqPreGain_ = powf(10.0f, preampDb / 20.0f);
     autoEqEnabled_.store(true, std::memory_order_release);
-    LOGI("DAC AutoEQ 10-band applied: preamp=%.1fdB", preampDb);
+    LOGI("DAC AutoEQ 64-band applied: preamp=%.1fdB", preampDb);
 }
 
 void UsbAudioDriver::resetAutoEq() {
     std::lock_guard<std::mutex> eqLock(dspEqMutex_);
-    BiquadFilter* bandsL[10] = { &autoEqBand1L_, &autoEqBand2L_, &autoEqBand3L_, &autoEqBand4L_, &autoEqBand5L_,
-                                 &autoEqBand6L_, &autoEqBand7L_, &autoEqBand8L_, &autoEqBand9L_, &autoEqBand10L_ };
-    BiquadFilter* bandsR[10] = { &autoEqBand1R_, &autoEqBand2R_, &autoEqBand3R_, &autoEqBand4R_, &autoEqBand5R_,
-                                 &autoEqBand6R_, &autoEqBand7R_, &autoEqBand8R_, &autoEqBand9R_, &autoEqBand10R_ };
-    for (int i = 0; i < 10; i++) { bandsL[i]->reset(); bandsR[i]->reset(); bandsL[i]->setFlat(); bandsR[i]->setFlat(); }
-    for (int i = 0; i < 10; i++) lastAutoEqGains_[i] = 999.0f;  // 强制下次重新应用
+    BiquadFilter* bandsL[64] = { &autoEqBand1L_, &autoEqBand2L_, &autoEqBand3L_, &autoEqBand4L_, &autoEqBand5L_,
+                                 &autoEqBand6L_, &autoEqBand7L_, &autoEqBand8L_, &autoEqBand9L_, &autoEqBand10L_,
+                                 &autoEqBand11L_, &autoEqBand12L_, &autoEqBand13L_, &autoEqBand14L_, &autoEqBand15L_,
+                                 &autoEqBand16L_, &autoEqBand17L_, &autoEqBand18L_, &autoEqBand19L_, &autoEqBand20L_,
+                                 &autoEqBand21L_, &autoEqBand22L_, &autoEqBand23L_, &autoEqBand24L_, &autoEqBand25L_,
+                                 &autoEqBand26L_, &autoEqBand27L_, &autoEqBand28L_, &autoEqBand29L_, &autoEqBand30L_,
+                                 &autoEqBand31L_,
+                                 &autoEqBand32L_,
+                                 &autoEqBand33L_,
+                                 &autoEqBand34L_,
+                                 &autoEqBand35L_,
+                                 &autoEqBand36L_,
+                                 &autoEqBand37L_,
+                                 &autoEqBand38L_,
+                                 &autoEqBand39L_,
+                                 &autoEqBand40L_,
+                                 &autoEqBand41L_,
+                                 &autoEqBand42L_,
+                                 &autoEqBand43L_,
+                                 &autoEqBand44L_,
+                                 &autoEqBand45L_,
+                                 &autoEqBand46L_,
+                                 &autoEqBand47L_,
+                                 &autoEqBand48L_,
+                                 &autoEqBand49L_,
+                                 &autoEqBand50L_,
+                                 &autoEqBand51L_,
+                                 &autoEqBand52L_,
+                                 &autoEqBand53L_,
+                                 &autoEqBand54L_,
+                                 &autoEqBand55L_,
+                                 &autoEqBand56L_,
+                                 &autoEqBand57L_,
+                                 &autoEqBand58L_,
+                                 &autoEqBand59L_,
+                                 &autoEqBand60L_,
+                                 &autoEqBand61L_,
+                                 &autoEqBand62L_,
+                                 &autoEqBand63L_,
+                                 &autoEqBand64L_,
+                                 };
+    BiquadFilter* bandsR[64] = { &autoEqBand1R_, &autoEqBand2R_, &autoEqBand3R_, &autoEqBand4R_, &autoEqBand5R_,
+                                 &autoEqBand6R_, &autoEqBand7R_, &autoEqBand8R_, &autoEqBand9R_, &autoEqBand10R_,
+                                 &autoEqBand11R_, &autoEqBand12R_, &autoEqBand13R_, &autoEqBand14R_, &autoEqBand15R_,
+                                 &autoEqBand16R_, &autoEqBand17R_, &autoEqBand18R_, &autoEqBand19R_, &autoEqBand20R_,
+                                 &autoEqBand21R_, &autoEqBand22R_, &autoEqBand23R_, &autoEqBand24R_, &autoEqBand25R_,
+                                 &autoEqBand26R_, &autoEqBand27R_, &autoEqBand28R_, &autoEqBand29R_, &autoEqBand30R_,
+                                 &autoEqBand31R_,
+                                 &autoEqBand32R_,
+                                 &autoEqBand33R_,
+                                 &autoEqBand34R_,
+                                 &autoEqBand35R_,
+                                 &autoEqBand36R_,
+                                 &autoEqBand37R_,
+                                 &autoEqBand38R_,
+                                 &autoEqBand39R_,
+                                 &autoEqBand40R_,
+                                 &autoEqBand41R_,
+                                 &autoEqBand42R_,
+                                 &autoEqBand43R_,
+                                 &autoEqBand44R_,
+                                 &autoEqBand45R_,
+                                 &autoEqBand46R_,
+                                 &autoEqBand47R_,
+                                 &autoEqBand48R_,
+                                 &autoEqBand49R_,
+                                 &autoEqBand50R_,
+                                 &autoEqBand51R_,
+                                 &autoEqBand52R_,
+                                 &autoEqBand53R_,
+                                 &autoEqBand54R_,
+                                 &autoEqBand55R_,
+                                 &autoEqBand56R_,
+                                 &autoEqBand57R_,
+                                 &autoEqBand58R_,
+                                 &autoEqBand59R_,
+                                 &autoEqBand60R_,
+                                 &autoEqBand61R_,
+                                 &autoEqBand62R_,
+                                 &autoEqBand63R_,
+                                 &autoEqBand64R_,
+                                 };
+    for (int i = 0; i < 64; i++) { bandsL[i]->reset(); bandsR[i]->reset(); bandsL[i]->setFlat(); bandsR[i]->setFlat(); }
+    for (int i = 0; i < 64; i++) lastAutoEqGains_[i] = 999.0f;  // 强制下次重新应用
     autoEqEnabled_.store(false, std::memory_order_release);
     autoEqPreGain_ = 1.0f;
-    LOGI("DAC AutoEQ 10-band reset (flat)");
+    LOGI("DAC AutoEQ 64-band reset (flat)");
 }
 
 // 【V8.3】M/S 声场 — 跨声道矩阵（soundstage -> S 宽度，imaging -> M 中心）。
@@ -846,9 +1020,11 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
         // DAC-path EQ（AutoEQ 打底 + MSEB 叠加 / 5段图形），same Biquad algo as Oboe。
         // Disabled => pure pass-through (bit-perfect preserved)。
         // [V8.119] 原声直通：DAC 链所有 DSP 模块强制关闭，ring 写原始 PCM。
-        const bool dacBypass = g_dacDirectPassthrough.load(std::memory_order_acquire);
-        bool autoEqOn = !dacBypass && autoEqEnabled_.load(std::memory_order_acquire);
-        bool msebOn = !dacBypass && mseb10Enabled_.load(std::memory_order_acquire);
+        // 【V9.01】引擎 DSP 主开关：与 g_dacDirectPassthrough 正交，任一为真即进入 bit-perfect 直通。
+        const bool dacBypass = g_dacDirectPassthrough.load(std::memory_order_acquire)
+                              || !g_engineDspEnabled.load(std::memory_order_acquire);
+        bool autoEqOn = !dacBypass && autoEqEnabled_.load(std::memory_order_acquire) && autoEqSubEnabled_.load(std::memory_order_acquire);
+        bool msebOn = !dacBypass && mseb10Enabled_.load(std::memory_order_acquire) && msebSubEnabled_.load(std::memory_order_acquire);
         bool dspOn = !dacBypass && dspEqEnabled_.load(std::memory_order_acquire);
         // 【V8.170】归一化是源增益：先于所有 EQ/限幅，后面的模块看到的都是已归一化的电平。
         // 原声直通（dacBypass）时整枚旁路，保持 bit-perfect。
@@ -871,7 +1047,7 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
         // output level instantly -> eliminates the crackle/hiss heard while adjusting live.
         const float PREGAIN_SMOOTH = 0.05f;
         float preGain = curDspPreGain_;
-        bool msOn = !dacBypass && msEnabled_.load(std::memory_order_acquire);
+        bool msOn = !dacBypass && msEnabled_.load(std::memory_order_acquire) && dtsSubEnabled_.load(std::memory_order_acquire);
         float msW = curMsWidth_, msC = curMsCenter_;
         float msTargetW = msWidth_.load(std::memory_order_acquire);
         float msTargetC = msCenter_.load(std::memory_order_acquire);
@@ -892,8 +1068,118 @@ int UsbAudioDriver::pushPcm(const float* data, int frameCount) {
             if (autoEqOn) {
                 sL = autoEqBand1L_.process(sL); sL = autoEqBand2L_.process(sL); sL = autoEqBand3L_.process(sL); sL = autoEqBand4L_.process(sL); sL = autoEqBand5L_.process(sL);
                 sL = autoEqBand6L_.process(sL); sL = autoEqBand7L_.process(sL); sL = autoEqBand8L_.process(sL); sL = autoEqBand9L_.process(sL); sL = autoEqBand10L_.process(sL);
+                sL = autoEqBand11L_.process(sL);
+                sL = autoEqBand12L_.process(sL);
+                sL = autoEqBand13L_.process(sL);
+                sL = autoEqBand14L_.process(sL);
+                sL = autoEqBand15L_.process(sL);
+                sL = autoEqBand16L_.process(sL);
+                sL = autoEqBand17L_.process(sL);
+                sL = autoEqBand18L_.process(sL);
+                sL = autoEqBand19L_.process(sL);
+                sL = autoEqBand20L_.process(sL);
+                sL = autoEqBand21L_.process(sL);
+                sL = autoEqBand22L_.process(sL);
+                sL = autoEqBand23L_.process(sL);
+                sL = autoEqBand24L_.process(sL);
+                sL = autoEqBand25L_.process(sL);
+                sL = autoEqBand26L_.process(sL);
+                sL = autoEqBand27L_.process(sL);
+                sL = autoEqBand28L_.process(sL);
+                sL = autoEqBand29L_.process(sL);
+                sL = autoEqBand30L_.process(sL);
+                sL = autoEqBand31L_.process(sL);
+                sL = autoEqBand32L_.process(sL);
+                sL = autoEqBand33L_.process(sL);
+                sL = autoEqBand34L_.process(sL);
+                sL = autoEqBand35L_.process(sL);
+                sL = autoEqBand36L_.process(sL);
+                sL = autoEqBand37L_.process(sL);
+                sL = autoEqBand38L_.process(sL);
+                sL = autoEqBand39L_.process(sL);
+                sL = autoEqBand40L_.process(sL);
+                sL = autoEqBand41L_.process(sL);
+                sL = autoEqBand42L_.process(sL);
+                sL = autoEqBand43L_.process(sL);
+                sL = autoEqBand44L_.process(sL);
+                sL = autoEqBand45L_.process(sL);
+                sL = autoEqBand46L_.process(sL);
+                sL = autoEqBand47L_.process(sL);
+                sL = autoEqBand48L_.process(sL);
+                sL = autoEqBand49L_.process(sL);
+                sL = autoEqBand50L_.process(sL);
+                sL = autoEqBand51L_.process(sL);
+                sL = autoEqBand52L_.process(sL);
+                sL = autoEqBand53L_.process(sL);
+                sL = autoEqBand54L_.process(sL);
+                sL = autoEqBand55L_.process(sL);
+                sL = autoEqBand56L_.process(sL);
+                sL = autoEqBand57L_.process(sL);
+                sL = autoEqBand58L_.process(sL);
+                sL = autoEqBand59L_.process(sL);
+                sL = autoEqBand60L_.process(sL);
+                sL = autoEqBand61L_.process(sL);
+                sL = autoEqBand62L_.process(sL);
+                sL = autoEqBand63L_.process(sL);
+                sL = autoEqBand64L_.process(sL);
+
                 sR = autoEqBand1R_.process(sR); sR = autoEqBand2R_.process(sR); sR = autoEqBand3R_.process(sR); sR = autoEqBand4R_.process(sR); sR = autoEqBand5R_.process(sR);
                 sR = autoEqBand6R_.process(sR); sR = autoEqBand7R_.process(sR); sR = autoEqBand8R_.process(sR); sR = autoEqBand9R_.process(sR); sR = autoEqBand10R_.process(sR);
+                sR = autoEqBand11R_.process(sR);
+                sR = autoEqBand12R_.process(sR);
+                sR = autoEqBand13R_.process(sR);
+                sR = autoEqBand14R_.process(sR);
+                sR = autoEqBand15R_.process(sR);
+                sR = autoEqBand16R_.process(sR);
+                sR = autoEqBand17R_.process(sR);
+                sR = autoEqBand18R_.process(sR);
+                sR = autoEqBand19R_.process(sR);
+                sR = autoEqBand20R_.process(sR);
+                sR = autoEqBand21R_.process(sR);
+                sR = autoEqBand22R_.process(sR);
+                sR = autoEqBand23R_.process(sR);
+                sR = autoEqBand24R_.process(sR);
+                sR = autoEqBand25R_.process(sR);
+                sR = autoEqBand26R_.process(sR);
+                sR = autoEqBand27R_.process(sR);
+                sR = autoEqBand28R_.process(sR);
+                sR = autoEqBand29R_.process(sR);
+                sR = autoEqBand30R_.process(sR);
+                sR = autoEqBand31R_.process(sR);
+                sR = autoEqBand32R_.process(sR);
+                sR = autoEqBand33R_.process(sR);
+                sR = autoEqBand34R_.process(sR);
+                sR = autoEqBand35R_.process(sR);
+                sR = autoEqBand36R_.process(sR);
+                sR = autoEqBand37R_.process(sR);
+                sR = autoEqBand38R_.process(sR);
+                sR = autoEqBand39R_.process(sR);
+                sR = autoEqBand40R_.process(sR);
+                sR = autoEqBand41R_.process(sR);
+                sR = autoEqBand42R_.process(sR);
+                sR = autoEqBand43R_.process(sR);
+                sR = autoEqBand44R_.process(sR);
+                sR = autoEqBand45R_.process(sR);
+                sR = autoEqBand46R_.process(sR);
+                sR = autoEqBand47R_.process(sR);
+                sR = autoEqBand48R_.process(sR);
+                sR = autoEqBand49R_.process(sR);
+                sR = autoEqBand50R_.process(sR);
+                sR = autoEqBand51R_.process(sR);
+                sR = autoEqBand52R_.process(sR);
+                sR = autoEqBand53R_.process(sR);
+                sR = autoEqBand54R_.process(sR);
+                sR = autoEqBand55R_.process(sR);
+                sR = autoEqBand56R_.process(sR);
+                sR = autoEqBand57R_.process(sR);
+                sR = autoEqBand58R_.process(sR);
+                sR = autoEqBand59R_.process(sR);
+                sR = autoEqBand60R_.process(sR);
+                sR = autoEqBand61R_.process(sR);
+                sR = autoEqBand62R_.process(sR);
+                sR = autoEqBand63R_.process(sR);
+                sR = autoEqBand64R_.process(sR);
+
             }
             // MSEB 叠加（主观调音）——优先于 5段图形 EQ。
             if (msebOn) {

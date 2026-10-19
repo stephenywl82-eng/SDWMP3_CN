@@ -1,7 +1,10 @@
 package com.sdw.music.player
+import com.sdw.music.player.core.audio.dsp.AutoEqPresetStore
+import com.sdw.music.player.core.audio.dsp.LoudnessCache
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.metadata.TagGainCache
 
 import android.app.Application
-import com.sdw.music.player.core.audio.AutoEqPresetStore
 import dagger.hilt.android.HiltAndroidApp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -36,8 +39,8 @@ class SDWApp : Application() {
         // 【V8.424】过渡采样音效已删除：不再拷贝内置音效包。
         // 【V8.233】响度扫描缓存：设置页可能在 MusicService 起来之前就读它
         bgScope.launch {
-            runCatching { com.sdw.music.player.core.audio.LoudnessCache.init(this@SDWApp) }
-            runCatching { com.sdw.music.player.core.audio.TagGainCache.init(this@SDWApp) }
+            runCatching { com.sdw.music.player.core.audio.dsp.LoudnessCache.init(this@SDWApp) }
+            runCatching { com.sdw.music.player.core.audio.metadata.TagGainCache.init(this@SDWApp) }
         }
     }
 }

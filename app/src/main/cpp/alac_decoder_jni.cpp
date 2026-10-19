@@ -513,7 +513,7 @@ static void convertToFloat(const uint8_t* in, float* out, int frames, int channe
 extern "C" {
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacOpen(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacOpen(
     JNIEnv* env, jobject /*this*/, jstring jpath) {
 
     // Stop previous
@@ -558,7 +558,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacOpen(
 }
 
 JNIEXPORT jintArray JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacInfo(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacInfo(
     JNIEnv* env, jobject /*this*/) {
     jintArray result = env->NewIntArray(4);
     if (!result) return nullptr;
@@ -573,7 +573,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacInfo(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacStart(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacStart(
     JNIEnv* /*env*/, jobject /*this*/) {
     if (!gAlac || !gFile) { LOGE("nativeAlacStart: no open stream"); return JNI_FALSE; }
     if (gRunning) { LOGW("nativeAlacStart: already running"); return JNI_TRUE; }
@@ -592,14 +592,14 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacStart(
 }
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacPause(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacPause(
     JNIEnv* /*env*/, jobject /*this*/, jboolean paused) {
     gPaused = paused;
     LOGI("nativeAlacPause: %s", paused ? "PAUSED" : "RESUMED");
 }
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacSeek(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacSeek(
     JNIEnv* /*env*/, jobject /*this*/, jlong ms) {
     gSeekTargetMs = ms;
     gSeekPending = true;
@@ -607,7 +607,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacSeek(
 }
 
 JNIEXPORT void JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacStop(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacStop(
     JNIEnv* /*env*/, jobject /*this*/) {
     gRunning = false;
     if (gDecodeThread && gDecodeThread->joinable()) {
@@ -623,13 +623,13 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacStop(
 }
 
 JNIEXPORT jboolean JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacIsEos(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacIsEos(
     JNIEnv* /*env*/, jobject /*this*/) {
     return gEos ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacPositionMs(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacPositionMs(
     JNIEnv* /*env*/, jobject /*this*/) {
     auto* drv = sdw_getUsbDriver();
     if (!drv || !gAlac) return pcmFramesToMs(gCurrentPcmFrame);
@@ -640,7 +640,7 @@ Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacPositionMs(
 }
 
 JNIEXPORT jlong JNICALL
-Java_com_sdw_music_player_core_audio_UsbDacManager_nativeAlacTotalSamples(
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacTotalSamples(
     JNIEnv* /*env*/, jobject /*this*/) {
     return gTotalPcmFrames.load();
 }

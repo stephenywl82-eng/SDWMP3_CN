@@ -536,6 +536,15 @@
     <string name="mseb_dts_link_wired">有線</string>
     <string name="mseb_dts_link_hint">コード化されたリンク — サラウンド高域を削減中。完全な効果には LDAC / LHDC を。</string>
     <string name="mseb_dts_desc">再生画面のメニューとボタンと同期</string>
+    <!-- 【第2步·隔离探针】HRTF 双耳渲染探针 -->
+    <string name="mseb_hrtf_probe">HRTF プローブ</string>
+    <string name="mseb_hrtf_probe_desc">診断用バイノーラル・プローブ — 合成 HRIR 畳み込みで前/後/左/右/上を再現</string>
+    <string name="mseb_hrtf_probe_dir_auto">自動</string>
+    <string name="mseb_hrtf_probe_dir_front">前</string>
+    <string name="mseb_hrtf_probe_dir_back">後</string>
+    <string name="mseb_hrtf_probe_dir_left">左</string>
+    <string name="mseb_hrtf_probe_dir_right">右</string>
+    <string name="mseb_hrtf_probe_dir_up">上</string>
     <string name="mseb_device_auto">デバイス自動校正</string>
     <string name="mseb_device_auto_desc">現在のイヤホン / DAC に合う AutoEQ を自動適用</string>
     <!-- 【V8.170】V8.170 新模块端点标签 -->

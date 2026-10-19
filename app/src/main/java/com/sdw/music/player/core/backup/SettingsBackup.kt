@@ -1,4 +1,7 @@
 package com.sdw.music.player.core.backup
+import com.sdw.music.player.core.audio.dsp.MasterSyncShadow
+import com.sdw.music.player.core.audio.dsp.MsebCalculator
+import com.sdw.music.player.core.audio.playback.MusicService
 import com.sdw.music.player.core.util.floatValue
 
 import android.content.Context
@@ -352,7 +355,7 @@ object SettingsBackup {
      */
     fun applyToEngine(context: Context): List<String> {
         val applied = mutableListOf<String>()
-        val svc = com.sdw.music.player.MusicService.instance
+        val svc = com.sdw.music.player.core.audio.playback.MusicService.instance
 
         runCatching {
             val s = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
@@ -361,7 +364,7 @@ object SettingsBackup {
             svc?.setCrossfadeBars(s.getInt("crossfade_bars", 0))
             // 【P3】Master Sync 真实同步。它只在服务启动时读一次 prefs，备份恢复属于
             // "运行时改 prefs" 的场景，不在这里同步的话要等服务重启才生效。
-            com.sdw.music.player.MasterSyncShadow.enabled =
+            com.sdw.music.player.core.audio.dsp.MasterSyncShadow.enabled =
                 s.getBoolean("crossfade_master_sync", false)
             svc?.applyLiveFx()
             applied += "交叉淡化 / DJ 效果"
@@ -392,7 +395,7 @@ object SettingsBackup {
         }
 
         runCatching {
-            val mseb = com.sdw.music.player.MsebCalculator
+            val mseb = com.sdw.music.player.core.audio.dsp.MsebCalculator
             if (mseb.isEnabled(context)) {
                 svc?.applyMsebEq(mseb.calculateGains(mseb.load(context)), null, null)
                 applied += "MSEB"

@@ -1,4 +1,7 @@
 ﻿package com.sdw.music.player.lyric
+import com.sdw.music.player.core.audio.metadata.LyricsEmbedder
+import com.sdw.music.player.core.audio.engine.UsbDacManager
+import com.sdw.music.player.core.audio.metadata.WavCoverReader
 
 import android.content.Context
 import android.util.Log
@@ -135,7 +138,7 @@ class LyricRepository private constructor(
             val ext = actualPath.substringAfterLast('.', "").lowercase()
             // [V8.134] removeWavLyrics 在 V8.129 已写好，但门闸漏了 wav/wave -> 永远走不到
             if (ext == "flac" || ext == "mp3" || ext == "wav" || ext == "wave") {
-                val removed = com.sdw.music.player.core.audio.LyricsEmbedder.removeLyrics(actualPath)
+                val removed = com.sdw.music.player.core.audio.metadata.LyricsEmbedder.removeLyrics(actualPath)
                 Log.d(TAG, "🧹 移除内嵌歌词${if (removed) "成功" else "失败/无"}: $actualPath")
             }
             // 删除同目录 .lrc / .LRC
@@ -180,9 +183,9 @@ class LyricRepository private constructor(
         if (!isFlac && !isWav && !isMp3) { Log.d(TAG, "loadEmbedded: 未支持的格式 $ext, skip"); return@withContext null }
         try {
             val lyrics = when {
-                isWav -> com.sdw.music.player.core.audio.WavCoverReader.readTags(actualPath)?.lyrics
+                isWav -> com.sdw.music.player.core.audio.metadata.WavCoverReader.readTags(actualPath)?.lyrics
                 isMp3 -> SongRepository.readId3v2Lyrics(actualPath)
-                else -> com.sdw.music.player.core.audio.UsbDacManager.flacReadLyrics(context, actualPath)
+                else -> com.sdw.music.player.core.audio.engine.UsbDacManager.flacReadLyrics(context, actualPath)
             }
             if (lyrics.isNullOrBlank()) { Log.d(TAG, "loadEmbedded: 内嵌歌词为空"); return@withContext null }
             Log.d(TAG, "loadEmbedded: 读到 ${lyrics.length} 字")
@@ -637,7 +640,7 @@ class LyricRepository private constructor(
                 val ext = actualPath.substringAfterLast('.', "").lowercase()
                 // [V8.134] 补 wav/wave：V8.129 的 WAV 写入器此前被这道门闸挡死
                 if (ext == "flac" || ext == "mp3" || ext == "wav" || ext == "wave") {
-                    embeddedOk = com.sdw.music.player.core.audio.LyricsEmbedder.embedLyrics(actualPath, lyrics)
+                    embeddedOk = com.sdw.music.player.core.audio.metadata.LyricsEmbedder.embedLyrics(actualPath, lyrics)
                     Log.d(TAG, "💾 内嵌歌词${if (embeddedOk) "成功" else "失败/不支持"}: $actualPath")
                 }
             }

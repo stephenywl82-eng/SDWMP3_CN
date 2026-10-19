@@ -2796,8 +2796,6 @@ private var xfadeBChorusMs = -1L
     // FFT 
     private var fftCallback: ((ByteArray) -> Unit)? = null
 
-    // [v7.122] Auto-map system standby bucket to idle_level
-    private var standbyBucketReceiver: BroadcastReceiver? = null
 
     // 
     
@@ -8192,7 +8190,6 @@ val displayArtist = if (song.artist.isBlank() || SongRepository.isPlaceholderArt
 
         // [V3.3.7] ע����Ļ״̬������
         unregisterScreenOffReceiver()
-        unregisterStandbyBucketReceiver()
         // 【V8.361】对称注销：蓝牙恢复监听与电话监听同生命周期
         unregisterBtRestoreReceiver()
         unregisterPhoneStateListener()
@@ -8235,8 +8232,6 @@ val displayArtist = if (song.artist.isBlank() || SongRepository.isPlaceholderArt
             } catch (_: Exception) {}
         }
 
-        // [v7.122] Unregister standby bucket listener
-        try { unregisterStandbyBucketReceiver() } catch (_: Exception) {}
 
         // Cancel any pending Visualizer release
         handler.removeCallbacks(visualizerReleaseTask)
@@ -8276,19 +8271,6 @@ val displayArtist = if (song.artist.isBlank() || SongRepository.isPlaceholderArt
      */
     fun isVisualizerReady(): Boolean = visualizerManager.isReady()
 
-    // [v7.122] Register receiver to auto-map system standby bucket to idle_level
-
-    private fun unregisterStandbyBucketReceiver() {
-        try {
-            standbyBucketReceiver?.let {
-                unregisterReceiver(it)
-                standbyBucketReceiver = null
-                Log.d(TAG, "Standby bucket receiver unregistered")
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to unregister standby bucket receiver: ${e.message}")
-        }
-    }
 
     // [V3.3.7] ������ͣ FFT ���ӻ������� CPU ����
     private var screenOffReceiver: BroadcastReceiver? = null

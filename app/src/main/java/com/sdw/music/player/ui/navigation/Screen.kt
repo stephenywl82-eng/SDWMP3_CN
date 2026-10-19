@@ -18,6 +18,7 @@ sealed class Screen(val route: String) {
     }
     data object Equalizer : Screen("equalizer")
     data object Mseb : Screen("mseb")
+    data object ParametricEq : Screen("peq")
     data object LyricSearch : Screen("lyricSearch/{songId}/{songTitle}/{songArtist}") {
         fun createRoute(songId: Long, title: String, artist: String) =
             "lyricSearch/$songId/$title/$artist"

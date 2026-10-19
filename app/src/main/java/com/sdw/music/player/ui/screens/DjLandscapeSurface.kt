@@ -1,4 +1,6 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.playback.WaveformCache
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -28,7 +30,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,8 +45,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.sdw.music.player.MusicService
-import com.sdw.music.player.core.audio.WaveformCache
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
 import coil.compose.rememberAsyncImagePainter
@@ -97,7 +96,7 @@ fun DjLandscapeSurface(
     modifier: Modifier = Modifier,
 ) {
     val xf by remember { androidx.compose.runtime.derivedStateOf {
-        com.sdw.music.player.MusicService.instance?.crossfadeUiInfo
+        com.sdw.music.player.core.audio.playback.MusicService.instance?.crossfadeUiInfo
             ?: MusicService.CrossfadeUiInfo()
     } }
 
@@ -110,7 +109,7 @@ fun DjLandscapeSurface(
     var playProgress by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(Unit) {
         while (isActive) {
-            val p = com.sdw.music.player.MusicService.instance?.oboeDirectPlayer
+            val p = com.sdw.music.player.core.audio.playback.MusicService.instance?.oboeDirectPlayer
             val cur = p?.getCurrentPositionMs() ?: 0L
             val dur = p?.getDurationMs() ?: 0L
             playProgress = if (dur > 0) (cur.toFloat() / dur).coerceIn(0f, 1f) else 0f

@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -29,6 +30,7 @@ import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import androidx.compose.foundation.Image
 import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.R
 import com.sdw.music.player.Song
 import com.sdw.music.player.PlaylistManager
@@ -44,6 +46,8 @@ import com.sdw.music.player.Playlist
 fun AddToPlaylistSheet(
     song: Song,
     onDismiss: () -> Unit,
+    // 【Lyrico 联动】长按歌曲弹出的菜单里，提供「用 Lyrico 编辑」入口（为 null 时不显示）
+    onEditWithLyrico: ((Song) -> Unit)? = null,
     songs: List<Song>? = null,
     title: String? = null,
 ) {
@@ -115,11 +119,31 @@ fun AddToPlaylistSheet(
                 }
             }
 
+            // ── 用 Lyrico 编辑（仅在提供回调时长按菜单显示）──
+            onEditWithLyrico?.let { edit ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row, fillBoost = 0f).clickable {
+                        edit(song); onDismiss()
+                    }.padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier.size(36.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Edit, stringResource(R.string.action_edit_with_lyrico), tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(stringResource(R.string.action_edit_with_lyrico), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyLarge)
+                }
+                SDWDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+            }
+
             SDWDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
 
             // ── 新建歌单入口 ──
             Row(
-                modifier = Modifier.fillMaxWidth().clickable { showCreate = true }.padding(horizontal = 20.dp, vertical = 12.dp),
+                modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row, fillBoost = 0f).clickable { showCreate = true }.padding(horizontal = 20.dp, vertical = 12.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
@@ -150,6 +174,7 @@ fun AddToPlaylistSheet(
                         val contains = if (batch == null) song.id in pl.songIds else batch.all { it.id in pl.songIds }
                         Row(
                             modifier = Modifier.fillMaxWidth()
+                                .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
                                 .clickable(enabled = !contains) {
                                     if (batch == null) {
                                         if (PlaylistManager.addSongToPlaylist(pl.id, song.id)) {

@@ -1,4 +1,7 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.metadata.SongSpecReader
+import com.sdw.music.player.core.audio.engine.UsbDacManager
 
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.animateColorAsState
@@ -40,11 +43,15 @@ import androidx.compose.material.icons.automirrored.filled.QueueMusic
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.ui.platform.LocalContext
 import kotlinx.coroutines.launch
+import com.sdw.music.player.util.buildLyricoEditIntent
 import android.os.SystemClock
+import android.os.Bundle
 import androidx.compose.ui.text.TextStyle
 import android.widget.Toast
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.core.audio.DebugLog
 import com.sdw.music.player.LyricLine
 import com.sdw.music.player.ui.components.buildWordSegments
@@ -82,7 +89,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import kotlin.math.roundToInt
-import kotlin.math.abs
 import androidx.compose.ui.unit.dp
 import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
@@ -135,6 +141,10 @@ fun PlayerTopBar(
     isCurrentSongFavorite: Boolean = false,
     onToggleFavorite: () -> Unit = {},
     onShare: () -> Unit = {},
+    // 【Lyrico 联动】传入当前歌曲路径，供三点菜单「用 Lyrico 编辑」打开外部标签编辑器；
+    // onLyricoEditReturned 在 Lyrico 编辑返回后回调（携带 result extras），由调用方就地刷新封面/标签
+    currentSongPath: String = "",
+    onLyricoEditReturned: (extras: Bundle?) -> Unit = {},
     onToggleEqualizer: () -> Unit = {},
     // 【DTS-in-menu】三点菜单里的 DTS 环绕开关（开→M/S 声场，关→旁路）
     dtsEnabled: Boolean = false,
@@ -159,6 +169,23 @@ fun PlayerTopBar(
     backIconSize: Dp = 36.dp,
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
+    // 【Lyrico 联动】打开 Lyrico 单曲编辑页；返回后把 result extras 抛给 onLyricoEditReturned，
+    // 由调用方（PlayerScreen）就地刷新封面/标签（含从被改写文件重新抽封面，绕过平台 albumart 缓存）
+    val lyricoLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            onLyricoEditReturned(result.data?.extras)
+        }
+    }
+    fun launchLyricoEdit() {
+        val intent = buildLyricoEditIntent(context, currentSongPath)
+        when {
+            intent == null -> Toast.makeText(context, R.string.lyrico_edit_unsupported, Toast.LENGTH_SHORT).show()
+            intent.resolveActivity(context.packageManager) == null ->
+                Toast.makeText(context, R.string.lyrico_not_installed, Toast.LENGTH_LONG).show()
+            else -> lyricoLauncher.launch(intent)
+        }
+    }
     Row(
         modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = verticalPadding),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -199,6 +226,11 @@ fun PlayerTopBar(
                         text = { Text(stringResource(R.string.action_share)) },
                         onClick = { onDismissMenu(); onShare() },
                         leadingIcon = { Icon(Icons.Default.Share, stringResource(R.string.action_share), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.action_edit_with_lyrico)) },
+                        onClick = { onDismissMenu(); launchLyricoEdit() },
+                        leadingIcon = { Icon(Icons.Default.Edit, stringResource(R.string.action_edit_with_lyrico), tint = MaterialTheme.colorScheme.onSurfaceVariant) }
                     )
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.title_dsp_equalizer)) },
@@ -1300,7 +1332,7 @@ fun PlayerBottomActions(
                         if (!ok) {
                             // 【V8.271】带上服务端给出的具体原因（旧版只有一句「未触发」）
                             // 【V8.274】服务未连接时也给一句明确原因；文案走 stringResource
-                            val svc = com.sdw.music.player.MusicService.instance
+                            val svc = com.sdw.music.player.core.audio.playback.MusicService.instance
                             val reason = svc?.lastManualTriggerReason.orEmpty()
                                 .ifEmpty { if (svc == null) djNoServiceMsg else "" }
                             // 【V8.304】「已排队」不是拒绝：单独一句肯定口吻。
@@ -1355,11 +1387,11 @@ fun PlayerBottomActions(
                                 enabled = !hidden,
                                 onClick = {
                                     autoHide?.poke()
-                                    if (com.sdw.music.player.MusicService.instance?.beatJump(1) != true) jumpToast()
+                                    if (com.sdw.music.player.core.audio.playback.MusicService.instance?.beatJump(1) != true) jumpToast()
                                 },
                                 onLongClick = {
                                     autoHide?.poke()
-                                    if (com.sdw.music.player.MusicService.instance?.beatJump(-1) != true) jumpToast()
+                                    if (com.sdw.music.player.core.audio.playback.MusicService.instance?.beatJump(-1) != true) jumpToast()
                                 }
                             ),
                         contentAlignment = Alignment.Center
@@ -1872,7 +1904,7 @@ fun MarqueeText(
  */
 @Composable
 fun SongSpecLabel(
-    spec: com.sdw.music.player.core.audio.SongSpecReader.Spec?,
+    spec: com.sdw.music.player.core.audio.metadata.SongSpecReader.Spec?,
     accentColor: Color,
     textAccentColor: Color,
     modifier: Modifier = Modifier
@@ -1940,11 +1972,11 @@ fun DacInfoBar(
     // [V3.3.6] 只在 DAC 激活时轮询，避免主线程卡顿
     LaunchedEffect(Unit) {
         while (true) {
-            val claimed = try { com.sdw.music.player.core.audio.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
+            val claimed = try { com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
             if (claimed) {
-                dacName = com.sdw.music.player.core.audio.UsbDacManager.getDacDisplayName()
-                sr = com.sdw.music.player.core.audio.UsbDacManager.queryActiveSampleRate()
-                bits = com.sdw.music.player.core.audio.UsbDacManager.queryActiveBits()
+                dacName = com.sdw.music.player.core.audio.engine.UsbDacManager.getDacDisplayName()
+                sr = com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveSampleRate()
+                bits = com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveBits()
             } else { 
                 dacName = ""; sr = 0; bits = 0
             }
@@ -2040,7 +2072,7 @@ fun OutputDeviceBar(
         while (true) {
             // DAC 独占激活时蓝牙不可能同时输出，直接跳过
             val dacClaimed = try {
-                com.sdw.music.player.core.audio.UsbDacManager.isClaimed()
+                com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed()
             } catch (_: Throwable) { false }
             if (!dacClaimed) {
                 btActive = com.sdw.music.player.util.BluetoothOutput.isBluetoothActive(context)

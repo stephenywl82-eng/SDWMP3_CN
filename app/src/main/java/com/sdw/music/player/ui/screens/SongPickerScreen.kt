@@ -45,7 +45,6 @@ import androidx.compose.ui.draw.alpha
 import com.sdw.music.player.Song
 import com.sdw.music.player.R
 import com.sdw.music.player.SongRepository
-import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.ui.components.AddToPlaylistSheet
 import com.sdw.music.player.util.PinyinUtils
 import com.sdw.music.player.ui.theme.*

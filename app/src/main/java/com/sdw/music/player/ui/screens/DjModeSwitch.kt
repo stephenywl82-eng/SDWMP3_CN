@@ -1,4 +1,5 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.playback.MusicService
 
 import android.content.Context
 import androidx.compose.runtime.Composable
@@ -60,8 +61,8 @@ fun readDjEnabled(context: Context): Boolean = try {
  */
 fun djActionsOrNull(djEnabled: Boolean): (() -> Boolean)? = if (djEnabled) {
     {
-        (com.sdw.music.player.MusicService.instance?.triggerCrossfadeNowDetailed()
-            ?: com.sdw.music.player.NO_SERVICE_REASON).isEmpty()
+        (com.sdw.music.player.core.audio.playback.MusicService.instance?.triggerCrossfadeNowDetailed()
+            ?: com.sdw.music.player.core.audio.playback.NO_SERVICE_REASON).isEmpty()
     }
 } else {
     null
@@ -75,7 +76,7 @@ fun djActionsOrNull(djEnabled: Boolean): (() -> Boolean)? = if (djEnabled) {
  * 服务未连接时同样直接回退。排队成功时什么都不做 —— 过渡落点会自动补切。
  */
 fun djCutOrFallbackNext(hardNext: () -> Unit): () -> Unit = {
-    val svc = com.sdw.music.player.MusicService.instance
+    val svc = com.sdw.music.player.core.audio.playback.MusicService.instance
     val cut = svc?.triggerCrossfadeNow() == true
     if (!cut && svc?.lastManualTriggerQueued != true) hardNext()
 }

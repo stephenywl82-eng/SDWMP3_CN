@@ -1,9 +1,8 @@
 package com.sdw.music.player.core
+import com.sdw.music.player.core.audio.dsp.LoudnessCache
 
 import com.sdw.music.player.BpmKeyCache
 import com.sdw.music.player.Song
-import com.sdw.music.player.core.audio.LoudnessCache
-
 /**
  * 【V8.244】Rekordbox 式「能量 / 颜色」标签。
  *

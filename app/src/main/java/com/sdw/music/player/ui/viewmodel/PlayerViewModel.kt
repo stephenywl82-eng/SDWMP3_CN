@@ -1,15 +1,20 @@
 package com.sdw.music.player.ui.viewmodel
+import com.sdw.music.player.core.audio.dsp.EqualizerManager
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.playback.PlayerConnection
+import com.sdw.music.player.core.audio.playback.PlayerStateStore
 
 import android.app.Application
 import android.content.Context
 import android.os.Build
+import android.os.Bundle
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.Player
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.Song
+import com.sdw.music.player.util.LyricoResultExtras
+import com.sdw.music.player.util.hasLyricoEditExtras
 import com.sdw.music.player.SongRepository
-import com.sdw.music.player.core.audio.PlayerConnection
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -21,7 +26,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 import com.sdw.music.player.MemoryManager
 import com.sdw.music.player.widget.MusicWidgetProvider
 import com.sdw.music.player.lyric.LyricRepository
-import com.sdw.music.player.core.audio.PlayerStateStore
 import com.sdw.music.player.core.model.PlayerPersistedState
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
@@ -438,7 +442,7 @@ class PlayerViewModel @Inject constructor(
             }
             is PlayerIntent.SelectEqPreset -> {
                 val ctx = getApplication<android.app.Application>().applicationContext
-                com.sdw.music.player.EqualizerManager.applyPreset(intent.presetId, ctx)
+                com.sdw.music.player.core.audio.dsp.EqualizerManager.applyPreset(intent.presetId, ctx)
             }
             is PlayerIntent.ToggleFavorite -> {
                 val songId = _state.value.currentSongId
@@ -559,6 +563,120 @@ class PlayerViewModel @Inject constructor(
                 connection.setSongs(freshSongs, updateGlobal = false)
             } catch (e: Exception) {
                 _state.update { it.copy(scanStatus = "error:${e.message}") }
+            }
+        }
+    }
+
+    /**
+     * Lyrico 等外部编辑器保存后，用其回传的标签 extras 就地更新内存中的歌曲，
+     * 避免整库重扫 MediaStore。仅覆盖 extras 中存在的非空字段。
+     */
+    fun applyExternalTagEdits(
+        songId: Long,
+        title: String? = null,
+        artist: String? = null,
+        album: String? = null,
+        genre: String? = null,
+    ) {
+        if (songId <= 0) return
+        _state.update { st ->
+            val newList = st.songList.map { s ->
+                if (s.id == songId) s.copy(
+                    title = title ?: s.title,
+                    artist = artist ?: s.artist,
+                    album = album ?: s.album,
+                    genre = genre ?: s.genre,
+                ) else s
+            }
+            val cur = if (st.currentSongId == songId) st.copy(
+                currentSongTitle = title ?: st.currentSongTitle,
+                currentSongArtist = artist ?: st.currentSongArtist,
+                currentSongAlbum = album ?: st.currentSongAlbum,
+            ) else st
+            cur.copy(songList = newList)
+        }
+    }
+
+    /**
+     * Lyrico（或任意外部标签编辑器）编辑完歌曲返回时调用。
+     *
+     * [extras] 携带回传的新标签值（Lyrico PR #196+ 支持 result-extras 时）走就地更新；
+     * 为 null 时退化为整库重扫以拾取改动。两种情况都会**直接从被改写的文件重新抽取内嵌封面**
+     * 写进自有缓存（key 含 size+mtime → 每次编辑都得到新 URI），从而让播放器即时显示新封面，
+     * 而不依赖平台媒体库索引（其 albumart URI 改写后字符串不变，Coil 会一直喂旧图）。
+     */
+    fun onExternalTagEditReturned(songId: Long, filePath: String, extras: Bundle?) {
+        if (songId <= 0) return
+        viewModelScope.launch {
+            try {
+                val ctx = getApplication<Application>().applicationContext
+                val fp = filePath.ifBlank { "" }
+                // ① 文本字段
+                if (extras != null && hasLyricoEditExtras(extras)) {
+                    val str: (String) -> String? = { extras.getString(it)?.takeIf { v -> v.isNotBlank() } }
+                    applyExternalTagEdits(
+                        songId = songId,
+                        title = str(LyricoResultExtras.TITLE),
+                        artist = str(LyricoResultExtras.ARTIST),
+                        album = str(LyricoResultExtras.ALBUM),
+                        genre = str(LyricoResultExtras.GENRE),
+                    )
+                } else {
+                    // 退化：重扫库，拾取标题/歌手/专辑等改动并刷新 songList + 当前播放文本
+                    val scanned = SongRepository.rescanFromMediaStore(ctx)
+                    if (scanned.isNotEmpty()) {
+                        SongRepository.setSongs(scanned)
+                        connection.setSongs(scanned, updateGlobal = false)
+                        val id = songId
+                        _state.update { st ->
+                            val fresh = scanned.find { it.id == id }
+                            val newList = st.songList.map { s -> if (s.id == id) (fresh ?: s) else s }
+                            val cur = if (st.currentSongId == id) st.copy(
+                                currentSongTitle = fresh?.title ?: st.currentSongTitle,
+                                currentSongArtist = fresh?.artist ?: st.currentSongArtist,
+                                currentSongAlbum = fresh?.album ?: st.currentSongAlbum,
+                            ) else st
+                            cur.copy(songList = newList)
+                        }
+                    }
+                }
+                // ② 封面：从被改写的文件重新抽内嵌图。freshArt 为 null 表示封面已被删除
+                //    （WAV/FLAC 删封面时 reader 返回 null），需把 currentSongAlbumArt 置空让播放页
+                //    回退默认封面，而不能保留旧图；有图则就地更新。
+                val freshArt = SongRepository.refreshArtAfterRewrite(ctx, fp)
+                // 无封面（删除）时用空串清掉 albumArtUri/currentSongAlbumArt，与"无封面=空 URI"约定一致，
+                // resolveCoverUri 会据此回退默认封面；有图则就地更新。
+                val art = freshArt ?: ""
+                _state.update { st ->
+                    val id = st.songList.find { it.filePath == fp }?.id ?: songId
+                    val newList = st.songList.map { s -> if (s.id == id) s.copy(albumArtUri = art) else s }
+                    val cur = if (st.currentSongId == id) st.copy(currentSongAlbumArt = art) else st
+                    cur.copy(songList = newList)
+                }
+                val coverUri = freshArt.takeIf { SongRepository.hasRealCover(it) }
+                if (coverUri != null) {
+                    val color = MemoryManager.extractAccentColor(ctx, coverUri, songId)
+                    if (color != null) {
+                        _state.update { s -> s.copy(
+                            accentColor = color.toLong() and 0xFFFFFFFFL,
+                            accentColorSource = coverUri
+                        ) }
+                    }
+                    val colors = MemoryManager.extractCoverColors(ctx, coverUri, songId)
+                    _state.update { s -> s.copy(
+                        coverColors = colors?.toList() ?: emptyList(),
+                        coverColorsSource = coverUri
+                    ) }
+                } else {
+                    // 无封面：清掉强调色/调色板源，回到默认
+                    _state.update { s -> s.copy(
+                        coverColors = emptyList(),
+                        coverColorsSource = null
+                    ) }
+                }
+                try { MusicService.instance?.refreshMetadata() } catch (_: Exception) {}
+            } catch (e: Exception) {
+                android.util.Log.w("PlayerViewModel", "onExternalTagEditReturned failed", e)
             }
         }
     }

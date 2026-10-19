@@ -1,6 +1,8 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.metadata.LyricsEmbedder
 
 import android.content.Intent
+import com.sdw.music.player.ui.components.ExpressiveSwitch
 import com.sdw.music.player.ui.theme.sectionTitleStyle
 import android.net.Uri
 import android.os.Build
@@ -416,15 +418,11 @@ fun LyricFullscreenScreen(
                 fontSize = 10.sp,
                 fontWeight = if (!isManualSource) FontWeight.SemiBold else FontWeight.Normal
             )
-            Switch(
+            ExpressiveSwitch(
                 checked = isManualSource,
                 onCheckedChange = { isManualSource = it },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = accent,
-                    checkedTrackColor = accent.copy(alpha = 0.3f),
-                    uncheckedThumbColor = Color.White.copy(alpha = 0.6f),
-                    uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
-                ),
+                trackOnColor = accent,
+                iconOnColor = accent,
                 modifier = Modifier.padding(horizontal = 2.dp)
             )
             Text(
@@ -443,18 +441,14 @@ fun LyricFullscreenScreen(
                 fontSize = 10.sp,
                 fontWeight = if (wordByWord) FontWeight.SemiBold else FontWeight.Normal
             )
-            Switch(
+            ExpressiveSwitch(
                 checked = wordByWord,
                 onCheckedChange = {
                     wordByWord = it
                     lyricPrefs.edit().putBoolean("lyric_word_by_word", it).apply()
                 },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = accent,
-                    checkedTrackColor = accent.copy(alpha = 0.3f),
-                    uncheckedThumbColor = Color.White.copy(alpha = 0.6f),
-                    uncheckedTrackColor = Color.White.copy(alpha = 0.15f)
-                ),
+                trackOnColor = accent,
+                iconOnColor = accent,
                 modifier = Modifier.padding(horizontal = 2.dp)
             )
 

@@ -1,4 +1,5 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.playback.MusicService
 
 import androidx.compose.foundation.background
 import com.sdw.music.player.ui.components.SDWTopBar
@@ -33,7 +34,6 @@ import coil.request.ImageRequest
 import kotlinx.coroutines.launch
 import com.sdw.music.player.Song
 import com.sdw.music.player.SongRepository
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.R
 import com.sdw.music.player.ui.components.AlphabetIndexBar
 import com.sdw.music.player.ui.components.CountKind

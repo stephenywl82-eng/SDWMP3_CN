@@ -68,7 +68,9 @@ object Motion {
      * overshoot that makes it land with weight instead of drifting to a stop.
      */
     fun coverFlight(): FiniteAnimationSpec<androidx.compose.ui.geometry.Rect> = spring(
-        dampingRatio = 0.9f,
+        // 【V9.02 性能/观感】dampingRatio 0.9 的轻微过冲在弱 GPU 上读作"抖动"，改为临界阻尼(1.0)
+        // 保留同等飞行时长与分量感，但落地不再回弹过冲。
+        dampingRatio = 1.0f,
         stiffness = 190f
     )
 
@@ -149,8 +151,7 @@ object Motion {
      * song list around its edges, so the two screens are visibly related. Slight bouncy so
      * it lands with weight; the fade rides along on top of it.
      */
-    val playerPopScale: FiniteAnimationSpec<Float> = spring(
-        dampingRatio = 0.88f,
-        stiffness = Spring.StiffnessMediumLow
-    )
+    // 【V9.02 性能/观感】原 spring(dampingRatio 0.88, StiffnessMediumLow) 在弱 GPU 上过冲回弹读作"抖动"。
+    // 改为与淡出同长的 tween：缩放与淡出同步、平滑收尾、无回弹。
+    val playerPopScale: FiniteAnimationSpec<Float> = tween(260, easing = FastOutSlowInEasing)
 }

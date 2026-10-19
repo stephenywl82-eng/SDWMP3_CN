@@ -536,6 +536,15 @@
     <string name="mseb_dts_link_wired">유선</string>
     <string name="mseb_dts_link_hint">코딩된 링크 — 서라운드 고음이 감소됨. 완전한 효과는 LDAC / LHDC 사용.</string>
     <string name="mseb_dts_desc">재생 화면 메뉴와 버튼과 동기화</string>
+    <!-- 【第2步·隔离探针】HRTF 双耳渲染探针 -->
+    <string name="mseb_hrtf_probe">HRTF 프로브</string>
+    <string name="mseb_hrtf_probe_desc">진단용 양이귀도 프로브 — 합성 HRIR 합성곱으로 앞/뒤/좌/우/위 구현</string>
+    <string name="mseb_hrtf_probe_dir_auto">자동</string>
+    <string name="mseb_hrtf_probe_dir_front">앞</string>
+    <string name="mseb_hrtf_probe_dir_back">뒤</string>
+    <string name="mseb_hrtf_probe_dir_left">좌</string>
+    <string name="mseb_hrtf_probe_dir_right">우</string>
+    <string name="mseb_hrtf_probe_dir_up">위</string>
     <string name="mseb_device_auto">기기 자동 보정</string>
     <string name="mseb_device_auto_desc">현재 헤드폰 / DAC 맞는 AutoEQ 자동 적용</string>
     <!-- 【V8.170】V8.170 新模块端点标签 -->

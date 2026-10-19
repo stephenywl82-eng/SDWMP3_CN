@@ -77,6 +77,7 @@ fun ArtistSongScreen(
                 coverUri = coverUri,
                 coverSize = 96.dp,
                 onPlayAll = onPlayAll,
+                artistName = artistName,
                 subtitle = {
                     CountText(songs.size, CountKind.SONGS)
                 }

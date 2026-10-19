@@ -67,7 +67,9 @@ fun Modifier.glassSurface(
     // 厚底色，否则读起来是"一块死板的黑/白"，而不是透亮的液态玻璃。打开后填充降到极薄的主题色薄纱。
     blurBacked: Boolean = false
 ): Modifier {
-    val onWallpaper = WallpaperManager.hasWallpaper()
+    // [V8.113] 真·液态玻璃：背后永远有模糊层，填充按「薄纱」处理。但「自定义图片壁纸」是繁忙照片，
+    // 面板太透文字会看不清 —— 设了图片壁纸时把 scrim 加厚成磨砂玻璃（仍透出模糊照片），未设则极薄真玻璃。
+    val hasWallpaper = WallpaperManager.hasWallpaper()
     val wpLight = LocalWallpaperEffectiveLight.current
     val scrim = if (wpLight) Color.White else Color.Black
     // [V8.110] L2 - 主题切换期玻璃面「重新结霜」：切换进行中（ThemeFlip.reveal 钟形曲线
@@ -78,17 +80,18 @@ fun Modifier.glassSurface(
     val boost = (fillBoost + frost * 0.18f).coerceIn(0f, 0.9f)
 
     val topColor = when {
-        selected -> accent.copy(alpha = (if (onWallpaper) 0.40f else 0.20f) + boost * 0.5f)
+        selected -> accent.copy(alpha = (if (hasWallpaper) 0.40f else 0.20f) + boost * 0.5f)
         // [V8.112] 模糊底：极薄薄纱，让下面的模糊内容透出来
         blurBacked -> MaterialTheme.colorScheme.surface.copy(alpha = 0.10f + boost * 0.5f)
-        onWallpaper -> scrim.copy(alpha = 0.30f + boost)
-        else -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.60f + boost)
+        // 有图片壁纸：磨砂玻璃，scrim 加厚到 0.46 托住文字；无壁纸：极薄 0.30 真玻璃
+        hasWallpaper -> scrim.copy(alpha = 0.46f + boost)
+        else -> scrim.copy(alpha = 0.30f + boost)
     }
     val bottomColor = when {
-        selected -> accent.copy(alpha = (if (onWallpaper) 0.18f else 0.06f) + boost * 0.5f)
+        selected -> accent.copy(alpha = (if (hasWallpaper) 0.18f else 0.06f) + boost * 0.5f)
         blurBacked -> MaterialTheme.colorScheme.surface.copy(alpha = 0.20f + boost * 0.5f)
-        onWallpaper -> scrim.copy(alpha = 0.15f + boost)
-        else -> MaterialTheme.colorScheme.surface.copy(alpha = 0.92f + boost * 0.08f)
+        hasWallpaper -> scrim.copy(alpha = 0.30f + boost)
+        else -> scrim.copy(alpha = 0.15f + boost)
     }
     // Edge highlight: brighter along the top edge and dropping off at the bottom. This is
     // what actually sells the "pane of glass" read, more than the fill does.

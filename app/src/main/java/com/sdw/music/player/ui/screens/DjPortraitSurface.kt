@@ -1,4 +1,5 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.playback.MusicService
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -39,7 +40,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.rememberAsyncImagePainter
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.SongRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive

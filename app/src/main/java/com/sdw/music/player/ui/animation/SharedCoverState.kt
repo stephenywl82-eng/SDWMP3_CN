@@ -1,5 +1,7 @@
 package com.sdw.music.player.ui.animation
 
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -13,6 +15,14 @@ data class CoverPosition(
 )
 
 class SharedCoverState {
+    /** 【V8.52 回归修复】手搓的 SharedCoverOverlay 已退役，reset() 不再有任何调用点触发，
+     *  但 enter() 仍会把 isAnimating 置 true —— 于是进入播放页后 isAnimating 永久卡 true，
+     *  把 VU 循环与背景模糊都冻在「转场中」状态（即用户复现的「VU 死 + 背景模糊没了」）。
+     *  这里用主线程 Handler 做兜底：转场时长（飞入约 380ms，留足缓冲到 700ms）后强制复位，
+     *  不受重组风暴影响；拖拽进行中（isDragging）不复位以免打断返回手势。 */
+    private val resetHandler = Handler(Looper.getMainLooper())
+    private var resetGen = 0
+
     /** MiniPlayer Cover的窗口坐标+尺寸 */
     var miniCoverPosition by mutableStateOf(CoverPosition())
 
@@ -55,12 +65,14 @@ class SharedCoverState {
         isEntering = true
         isAnimating = true
         dragProgress = 0f
+        scheduleReset()
     }
 
     fun exit() {
         isEntering = false
         isAnimating = true
         dragProgress = 0f
+        scheduleReset()
     }
 
     /** 外部判断全屏Cover位置是否已就绪（size > 0）*/
@@ -75,6 +87,15 @@ class SharedCoverState {
         isDragging = false
         dragProgress = 0f
         onAnimationEnd = null
+    }
+
+    /** 转场结束后兜底复位 isAnimating：generation 守卫保证只有最后一次 enter/exit 的定时器生效，
+     *  拖拽进行中不复位（避免打断返回手势）。 */
+    private fun scheduleReset() {
+        val gen = ++resetGen
+        resetHandler.postDelayed({
+            if (gen == resetGen && isAnimating && !isDragging) reset()
+        }, 700L)
     }
 }
 

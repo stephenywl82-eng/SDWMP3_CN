@@ -857,6 +857,14 @@
     <string name="mseb_hrtf_spatial">HRIR Spatial</string>
     <string name="mseb_hrtf_spatial_desc">Real-measured HRIR multi-speaker binaural surround — replaces DTS</string>
     <string name="mseb_hrtf_spatial_hint">Drag the field: horizontal = azimuth, vertical = elevation</string>
+    <string name="mseb_hrtf_field_readout">Azimuth %1$d° · Elevation %2$d°</string>
+    <string name="mseb_hrtf_field_reset">Reset</string>
+    <string name="mseb_hrtf_reverb">Room Reverb</string>
+    <string name="mseb_hrtf_reverb_desc">Add studio/hall ambience — early reflections + reverb tail</string>
+    <string name="mseb_hrtf_distance">Distance</string>
+    <string name="mseb_hrtf_distance_desc">Near-field boost + distance attenuation — sources feel closer or farther</string>
+    <string name="mseb_hrtf_distance_near">Near</string>
+    <string name="mseb_hrtf_distance_far">Far</string>
     <string name="mseb_device_auto">Device Auto-Calibration</string>
     <string name="mseb_device_auto_desc">Apply the matching AutoEQ profile for the current headphone / DAC</string>
     <!-- 【V8.170】V8.170 新模块端点标签 -->
@@ -871,6 +879,8 @@
     <string name="mseb_end_neutral">Neutral</string>
     <string name="mseb_end_fullfix">Full fix</string>
     <string name="mseb_unavailable">Not available on this output</string>
+    <!-- 【V9.14】主开关(右上角)关闭时，DTS/HRIR 等被统一旁路，卡片置灰并提示 -->
+    <string name="mseb_master_bypassed">Master switch off — DTS/HRIR bypassed (turn it on to restore)</string>
     <string name="mseb_apply_advice">Apply</string>
     <!-- 【V8.170】设备自适应卡片文案 -->
     <string name="mseb_dev_wired">Wired output</string>

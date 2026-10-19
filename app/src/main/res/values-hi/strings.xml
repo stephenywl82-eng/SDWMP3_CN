@@ -536,6 +536,15 @@
     <string name="mseb_dts_link_wired">तार</string>
     <string name="mseb_dts_link_hint">कोडेड लिंक — सराउंड HF कम किया गया। पूर्ण प्रभाव के लिए LDAC / LHDC का उपयोग करें।</string>
     <string name="mseb_dts_desc">प्ले स्क्रीन मेनू और बटन के साथ सिंक</string>
+    <!-- 【第2步·隔离探针】HRTF 双耳渲染探针 -->
+    <string name="mseb_hrtf_probe">HRTF प्रोब</string>
+    <string name="mseb_hrtf_probe_desc">नैदानिक बाइनॉरल प्रोब — आगे/पीछे/बाएँ/दाएँ/ऊपर के लिए सिंथेटिक HRIR कन्वोल्यूशन</string>
+    <string name="mseb_hrtf_probe_dir_auto">ऑटो</string>
+    <string name="mseb_hrtf_probe_dir_front">आगे</string>
+    <string name="mseb_hrtf_probe_dir_back">पीछे</string>
+    <string name="mseb_hrtf_probe_dir_left">बायाँ</string>
+    <string name="mseb_hrtf_probe_dir_right">दायाँ</string>
+    <string name="mseb_hrtf_probe_dir_up">ऊपर</string>
     <string name="mseb_device_auto">डिवाइस ऑटो-कैलiberation</string>
     <string name="mseb_device_auto_desc">वर्तमान हेडफ़ोन / DAC के AutoEQ को लागू करें</string>
     <!-- 【V8.170】V8.170 新模块端点标签 -->

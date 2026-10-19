@@ -1,11 +1,17 @@
 package com.sdw.music.player.ui.screens
-import android.util.Log
-import com.sdw.music.player.core.util.floatValue
+import com.sdw.music.player.core.audio.dsp.DeviceDspAdvice
+import com.sdw.music.player.core.audio.dsp.DspSnapshot
+import com.sdw.music.player.core.audio.dsp.MsebParams
+import com.sdw.music.player.core.audio.dsp.MsebPreset
+import com.sdw.music.player.core.audio.engine.BtCodecTracker
+import com.sdw.music.player.core.audio.dsp.MsebCalculator
+import com.sdw.music.player.core.audio.dsp.MsebDeviceAdapt
+import com.sdw.music.player.core.audio.dsp.MsebPresets
+import com.sdw.music.player.core.audio.playback.MusicService
+import com.sdw.music.player.core.audio.engine.OboeDirectPlayer
 
+import android.util.Log
 import androidx.compose.animation.core.*
-import com.sdw.music.player.ui.components.ExpressiveSwitch
-import com.sdw.music.player.ui.components.SDWDivider
-import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -30,21 +36,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.res.stringResource
 import android.content.Context
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
-import com.sdw.music.player.MsebCalculator
-import com.sdw.music.player.MsebParams
-import com.sdw.music.player.MsebPreset
-import com.sdw.music.player.MsebPresets
-import com.sdw.music.player.MusicService
 import com.sdw.music.player.R
-import com.sdw.music.player.DspSnapshot
-import com.sdw.music.player.core.audio.BtCodecTracker
-import com.sdw.music.player.core.audio.MsebDeviceAdapt
+import com.sdw.music.player.ui.components.ExpressiveSwitch
+import com.sdw.music.player.ui.components.SDWDivider
 import com.sdw.music.player.ui.components.glassSurface
 import kotlinx.coroutines.delay
 import java.util.Timer
@@ -55,7 +54,7 @@ import java.util.TimerTask
  * 拖动时把归一化坐标换算成 yaw/pitch 回调出去，native 据此旋转整圈虚拟音箱。
  */
 @Composable
-fun HrtfFieldPanner(yaw: Float, pitch: Float, onYawPitch: (Float, Float) -> Unit) {
+fun HrtfFieldPanner(yaw: Float, pitch: Float, onYawPitch: (Float, Float) -> Unit, enabled: Boolean = true) {
     val sizeDp = 180.dp
     val accent = MaterialTheme.colorScheme.tertiary
     val ring = MaterialTheme.colorScheme.outline.copy(alpha = 0.5f)
@@ -66,7 +65,8 @@ fun HrtfFieldPanner(yaw: Float, pitch: Float, onYawPitch: (Float, Float) -> Unit
                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
                 RoundedCornerShape(16.dp)
             )
-            .pointerInput(Unit) {
+            .pointerInput(enabled) {
+                if (!enabled) return@pointerInput
                 awaitPointerEventScope {
                     fun report(p: Offset) {
                         val w = size.width.toFloat().coerceAtLeast(1f)
@@ -153,21 +153,21 @@ fun MsebScreen(
     // ── 【V8.3】动态压缩（独立全局模块，独立开关）──
     val compPrefs = remember { context.getSharedPreferences("compressor", Context.MODE_PRIVATE) }
     var compEnabled by remember { mutableStateOf(compPrefs.getBoolean("enabled", false)) }
-    var compThreshold by remember { mutableStateOf(compPrefs.floatValue("threshold", -18f)) }
-    var compRatio by remember { mutableStateOf(compPrefs.floatValue("ratio", 2f)) }
-    var compAttack by remember { mutableStateOf(compPrefs.floatValue("attack", 10f)) }
-    var compRelease by remember { mutableStateOf(compPrefs.floatValue("release", 120f)) }
-    var compMakeup by remember { mutableStateOf(compPrefs.floatValue("makeup", 0f)) }
+    var compThreshold by remember { mutableStateOf(compPrefs.getFloat("threshold", -18f)) }
+    var compRatio by remember { mutableStateOf(compPrefs.getFloat("ratio", 2f)) }
+    var compAttack by remember { mutableStateOf(compPrefs.getFloat("attack", 10f)) }
+    var compRelease by remember { mutableStateOf(compPrefs.getFloat("release", 120f)) }
+    var compMakeup by remember { mutableStateOf(compPrefs.getFloat("makeup", 0f)) }
 
     // ── 【V8.3】等响补偿（独立全局模块，独立开关）──
     val loudPrefs = remember { context.getSharedPreferences("loudness", Context.MODE_PRIVATE) }
     var loudEnabled by remember { mutableStateOf(loudPrefs.getBoolean("enabled", false)) }
-    var loudIntensity by remember { mutableStateOf(loudPrefs.floatValue("intensity", 1f)) }
+    var loudIntensity by remember { mutableStateOf(loudPrefs.getFloat("intensity", 1f)) }
 
     // ── 【V8.3】Crossfeed（消除头中效应，仅 Oboe）──
     val xfPrefs = remember { context.getSharedPreferences("crossfeed", Context.MODE_PRIVATE) }
     var xfEnabled by remember { mutableStateOf(xfPrefs.getBoolean("enabled", false)) }
-    var xfAmount by remember { mutableStateOf(xfPrefs.floatValue("amount", 0.6f)) }
+    var xfAmount by remember { mutableStateOf(xfPrefs.getFloat("amount", 0.6f)) }
 
     // ── 【V8.170】DTS 环绕 —— 与播放页三点菜单 / 控制栏胶囊共用同一状态源 ──
     //
@@ -188,6 +188,10 @@ fun MsebScreen(
     var hrtfSpatialOn by remember { mutableStateOf(MsebCalculator.isHrtfSpatialEnabled(context)) }
     var hrtfFieldYaw by remember { mutableStateOf(MsebCalculator.getHrtfFieldYaw(context)) }
     var hrtfFieldPitch by remember { mutableStateOf(MsebCalculator.getHrtfFieldPitch(context)) }
+    // 【房间混响】HRIR 卷积之后叠加虚拟录音棚/音乐厅的早期反射+混响尾音，去干声。
+    var hrtfReverbOn by remember { mutableStateOf(MsebCalculator.isHrtfReverbEnabled(context)) }
+    // 【距离 / 近场线索】声场距离（米）：近场增强（强 ILD + 低频提升）+ 距离能量衰减。
+    var hrtfFieldDistance by remember { mutableStateOf(MsebCalculator.getHrtfFieldDistance(context)) }
 
     // ── 【V8.172】DTS 虚拟环绕的两个高级参数（与宽度/结像正交）──
     // surround = 环绕包围强度，height = 高度/耳廓感。这两个值决定"两侧变宽"和
@@ -242,6 +246,10 @@ fun MsebScreen(
     // 进入页面时把 native 里仍然生效的值读回来（模块可能在别处被改过）
     LaunchedEffect(Unit) {
         svc?.syncNativeDspState(context)
+        // 【V8.650】总开关也必须在进页面时读回：播放页 MSEB 胶囊/三点菜单可改它，
+        // 而 enabled 原来只在首次组合时读一次——导航栈保留本屏组合时永远是旧值，
+        // 表现为"播放页开了 MSEB，DSP 界面右上角总开关还显示关"。
+        enabled = MsebCalculator.isEnabled(context)
         val n = DspSnapshot.captureNative(context)
         n.spaceReverbEnabled?.let { srEnabled = it }
         n.spaceReverbWet?.let { srWet = it }
@@ -258,22 +266,33 @@ fun MsebScreen(
         hrtfSpatialOn = MsebCalculator.isHrtfSpatialEnabled(context)
         hrtfFieldYaw = MsebCalculator.getHrtfFieldYaw(context)
         hrtfFieldPitch = MsebCalculator.getHrtfFieldPitch(context)
+        hrtfReverbOn = MsebCalculator.isHrtfReverbEnabled(context)
+        hrtfFieldDistance = MsebCalculator.getHrtfFieldDistance(context)
     }
 
     // 【V8.171 修同步】前台期间把镜像对齐回数据源：这一屏从回退栈回来时可能还留着
     // 旧的组合状态，而 DTS 可能在播放页胶囊 / 三点菜单里被改过，光靠首次组合读不到。
+    // 【V8.650】扩展到 总开关/HRIR/探针：它们同样可在别处被改（播放页 MSEB 胶囊改
+    // 总开关、DTS 与 HRIR 互斥时另一方被联动关闭），只对齐 dtsOn 会造成其余开关
+    // 显示滞后（用户实测"dts 胶囊打开后 dsp 界面开关还显示关着"）。
     LaunchedEffect(Unit) {
         while (true) {
             if (uiActive) {
+                val storedEnabled = MsebCalculator.isEnabled(context)
+                if (enabled != storedEnabled) enabled = storedEnabled
                 val stored = MsebCalculator.isDtsEnabled(context)
                 if (dtsOn != stored) dtsOn = stored
+                val storedSpatial = MsebCalculator.isHrtfSpatialEnabled(context)
+                if (hrtfSpatialOn != storedSpatial) hrtfSpatialOn = storedSpatial
+                val storedProbe = MsebCalculator.isHrtfProbeEnabled(context)
+                if (hrtfProbeOn != storedProbe) hrtfProbeOn = storedProbe
             }
             delay(500)
         }
     }
 
     // 设备自适应建议
-    var advice by remember { mutableStateOf<com.sdw.music.player.core.audio.DeviceDspAdvice?>(null) }
+    var advice by remember { mutableStateOf<com.sdw.music.player.core.audio.dsp.DeviceDspAdvice?>(null) }
     LaunchedEffect(Unit) {
         advice = runCatching { MsebDeviceAdapt.detect(context) }.getOrNull()
     }
@@ -334,21 +353,51 @@ fun MsebScreen(
         MsebCalculator.setPresetName(context, "")  // 手动调滑块/重置 → 脱离预设
         if (savedName.isNotEmpty()) savedName = ""  // 【V8.184】镜像同步，副标题别再挂着旧名字
         if (enabled) applyMseb(context, newParams)
-        syncFlatState(enabled, newParams)
     }
 
+    // 主开关开启时，把每个独立效果的引擎状态恢复为用户各自保存的偏好（不动这些偏好位本身）。
+    // 注：局部函数须先声明后调用（Kotlin 词法作用域），故放在 toggleEnabled 之前。
+    fun syncEffectsToMaster() {
+        val svc = MusicService.instance ?: return
+        if (dtsOn) {
+            svc.applyDtsEnabled(true)
+            svc.applyMsStage(params.soundstage, params.imaging, dtsEx.surround, dtsEx.height)
+        } else svc.applyDtsEnabled(false)
+        if (hrtfProbeOn) {
+            svc.applyHrtfProbeEnabled(true)
+            svc.applyHrtfProbeDir(hrtfProbeDir)
+        } else svc.applyHrtfProbeEnabled(false)
+        if (hrtfSpatialOn) {
+            svc.applyHrtfSpatialEnabled(true)
+            svc.applyHrtfFieldOrientation(hrtfFieldYaw, hrtfFieldPitch)
+            svc.applyHrtfFieldDistance(hrtfFieldDistance)
+            svc.applyHrtfReverbEnabled(hrtfReverbOn)
+        } else svc.applyHrtfSpatialEnabled(false)
+    }
+
+    // 主开关关闭时，把所有可被它接管的效果统一旁路（仅改引擎状态，保留各自的偏好位以便恢复）。
+    fun forceAllEffectsOff() {
+        val svc = MusicService.instance ?: return
+        svc.applyDtsEnabled(false)
+        svc.applyHrtfProbeEnabled(false)
+        svc.applyHrtfSpatialEnabled(false)
+    }
+
+    // 主开关（右上角）= 真·总开关：关时把 DTS / HRIR(双耳环绕) / 隔离探针 全部统一旁路，
+    // 做到名副其实的"直通 / 位完美 A/B"；开时按各自保存的偏好(dtsOn/hrtfSpatialOn/hrtfProbeOn)恢复。
     fun toggleEnabled(on: Boolean) {
         enabled = on
         MsebCalculator.setEnabled(context, on)
         val svcNow = MusicService.instance
         if (on) {
             applyMseb(context, params)
-            syncFlatState(on, params)
+            syncEffectsToMaster()   // 恢复 DTS / HRIR / 探针各自的偏好状态
         } else {
             svcNow?.setDspEqEnabled(false)  // Sync flag
             svcNow?.resetMsebEq()
             svcNow?.resetMsStage()
             svcNow?.resetTransient()
+            forceAllEffectsOff()    // 统一旁路 DTS / HRIR / 探针 → 真·直通
         }
     }
 
@@ -472,6 +521,26 @@ fun MsebScreen(
         MusicService.instance?.applyHrtfFieldOrientation(yaw, pitch)
     }
 
+    // 【房间混响】HRIR 多虚拟音箱 upmix 的二级开关：仅在"真·双耳环绕"开启时可用，
+    // 在 HRIR 卷积之后叠加早期反射+混响尾音，给干声补回空间空气感。
+    fun toggleHrtfReverb(on: Boolean) {
+        hrtfReverbOn = on
+        MsebCalculator.setHrtfReverbEnabled(context, on)
+        // 若双耳环绕本身没开，先把主开关打开，保证链路在跑、混响才有意义。
+        if (on && !hrtfSpatialOn) {
+            toggleHrtfSpatial(true)
+        }
+        MusicService.instance?.applyHrtfReverbEnabled(on)
+        Log.i("MsebScreen", "HrtfReverb ${if (on) "ON" else "OFF"}")
+    }
+
+    // 声场距离（米）：近场增强（强 ILD + 低频提升）+ 距离能量衰减。1.5=远场参考，越小越近场。
+    fun setHrtfFieldDistance(meters: Float) {
+        hrtfFieldDistance = meters
+        MsebCalculator.setHrtfFieldDistance(context, meters)
+        MusicService.instance?.applyHrtfFieldDistance(meters)
+    }
+
     fun applyCompressorParams(en: Boolean, thr: Float, ratio: Float, atk: Float, rel: Float, makeup: Float) {
         MusicService.instance?.applyCompressor(en, thr, ratio, atk, rel, makeup)
         compThreshold = thr; compRatio = ratio; compAttack = atk; compRelease = rel; compMakeup = makeup
@@ -535,7 +604,7 @@ fun MsebScreen(
 
     Scaffold(
         topBar = {
-            SDWTopBar(
+            TopAppBar(
                 title = { Text(stringResource(R.string.title_mseb)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -636,7 +705,7 @@ fun MsebScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .glassSurface(shape = SDWShapes.Row, selected = enabled, fillBoost = 0f)
+                    .glassSurface(shape = RoundedCornerShape(16.dp), selected = enabled, fillBoost = 0f)
             ) {
                 Row(
                     modifier = Modifier
@@ -682,11 +751,11 @@ fun MsebScreen(
             DspModuleCard(
                 title = stringResource(R.string.mseb_dts),
                 subtitle = dtsSubtitle(),
-                checked = dtsOn,
+                checked = enabled && dtsOn,
                 onCheckedChange = { toggleDts(it) },
                 accent = MaterialTheme.colorScheme.primary,
-                dimmed = false,   // 【V9.01】USB DAC 引擎已支持 DTS/M-S（setMsStage + g_msEnabled），解除 DAC 模式锁定
-                dimmedNote = stringResource(R.string.mseb_unavailable)
+                dimmed = !enabled,   // 主开关关闭时整体接管、置灰并旁路
+                dimmedNote = stringResource(R.string.mseb_master_bypassed)
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     // 【V8.172】链路状态：环绕效果好不好，一半取决于链路剩下多少带宽。
@@ -705,6 +774,7 @@ fun MsebScreen(
                         rightLabel = "10",
                         description = stringResource(R.string.mseb_dts_surround_desc),
                         value = dtsEx.surround,
+                        enabled = enabled,
                         valueRange = 0f..10f,
                         decimals = 1,
                         onValueChange = { updateDtsEx(dtsEx.copy(surround = it)) }
@@ -715,6 +785,7 @@ fun MsebScreen(
                         rightLabel = "10",
                         description = stringResource(R.string.mseb_dts_height_desc),
                         value = dtsEx.height,
+                        enabled = enabled,
                         valueRange = 0f..10f,
                         decimals = 1,
                         onValueChange = { updateDtsEx(dtsEx.copy(height = it)) }
@@ -726,11 +797,11 @@ fun MsebScreen(
             DspModuleCard(
                 title = stringResource(R.string.mseb_hrtf_probe),
                 subtitle = hrtfProbeSubtitle(),
-                checked = hrtfProbeOn,
+                checked = enabled && hrtfProbeOn,
                 onCheckedChange = { toggleHrtfProbe(it) },
                 accent = MaterialTheme.colorScheme.tertiary,
-                dimmed = false,
-                dimmedNote = null
+                dimmed = !enabled,
+                dimmedNote = stringResource(R.string.mseb_master_bypassed)
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
@@ -757,6 +828,7 @@ fun MsebScreen(
                         dirs.forEach { (dir, label) ->
                             FilterChip(
                                 selected = hrtfProbeDir == dir,
+                                enabled = enabled,
                                 onClick = { selectHrtfProbeDir(dir) },
                                 label = { Text(label, style = MaterialTheme.typography.labelSmall) },
                                 colors = FilterChipDefaults.filterChipColors(
@@ -772,11 +844,11 @@ fun MsebScreen(
             DspModuleCard(
                 title = stringResource(R.string.mseb_hrtf_spatial),
                 subtitle = stringResource(R.string.mseb_hrtf_spatial_desc),
-                checked = hrtfSpatialOn,
+                checked = enabled && hrtfSpatialOn,
                 onCheckedChange = { toggleHrtfSpatial(it) },
                 accent = MaterialTheme.colorScheme.tertiary,
-                dimmed = false,
-                dimmedNote = null
+                dimmed = !enabled,
+                dimmedNote = stringResource(R.string.mseb_master_bypassed)
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
@@ -788,13 +860,92 @@ fun MsebScreen(
                     HrtfFieldPanner(
                         yaw = hrtfFieldYaw,
                         pitch = hrtfFieldPitch,
-                        onYawPitch = { y, p -> setHrtfFieldOrientation(y, p) }
+                        onYawPitch = { y, p -> setHrtfFieldOrientation(y, p) },
+                        enabled = enabled
                     )
-                    Text(
-                        "方位 ${hrtfFieldYaw.toInt()}° · 俯仰 ${hrtfFieldPitch.toInt()}°",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            stringResource(
+                                R.string.mseb_hrtf_field_readout,
+                                hrtfFieldYaw.toInt(),
+                                hrtfFieldPitch.toInt()
+                            ),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        TextButton(onClick = { setHrtfFieldOrientation(0f, 0f) }) {
+                            Text(stringResource(R.string.mseb_hrtf_field_reset))
+                        }
+                    }
+                    // ── 【房间混响】二级开关：给双耳环绕补空间回响（早期反射+混响尾音）──
+                    SDWDivider(modifier = Modifier.padding(vertical = 2.dp))
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        ExpressiveSwitch(
+                            checked = hrtfReverbOn,
+                            onCheckedChange = { toggleHrtfReverb(it) },
+                            enabled = enabled && hrtfSpatialOn,
+                            trackOnColor = MaterialTheme.colorScheme.tertiary
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                stringResource(R.string.mseb_hrtf_reverb),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                stringResource(R.string.mseb_hrtf_reverb_desc),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    // ── 【距离 / 近场线索】声场距离滑块：近场增强 + 距离衰减 ──
+                    SDWDivider(modifier = Modifier.padding(vertical = 2.dp))
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                stringResource(R.string.mseb_hrtf_distance),
+                                style = MaterialTheme.typography.bodyMedium
+                            )
+                            Text(
+                                "%.1f m".format(hrtfFieldDistance),
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Text(
+                            stringResource(R.string.mseb_hrtf_distance_desc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Slider(
+                            value = hrtfFieldDistance,
+                            onValueChange = { setHrtfFieldDistance(it) },
+                            valueRange = 0.3f..6.0f,
+                            enabled = enabled,
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(stringResource(R.string.mseb_hrtf_distance_near), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(stringResource(R.string.mseb_hrtf_distance_far), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
                 }
             }
 
@@ -819,7 +970,7 @@ fun MsebScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .glassSurface(shape = SDWShapes.Row, selected = false, fillBoost = 0f)
+                        .glassSurface(shape = RoundedCornerShape(16.dp), selected = false, fillBoost = 0f)
                 ) {
                     Column(
                         modifier = Modifier
@@ -900,7 +1051,7 @@ fun MsebScreen(
                 MsebSlider(stringResource(R.string.mseb_slider_basstexture), stringResource(R.string.mseb_end_loose), stringResource(R.string.mseb_end_tight), stringResource(R.string.mseb_slider_basstexture_desc), params.bassTexture) { update(params.copy(bassTexture = it)) }
                 MsebSlider(stringResource(R.string.mseb_slider_sibilance), stringResource(R.string.mseb_end_smooth), stringResource(R.string.mseb_end_bright), stringResource(R.string.mseb_slider_sibilance_desc), params.sibilance) { update(params.copy(sibilance = it)) }
 
-                SDWDivider(modifier = Modifier.padding(vertical = 4.dp))
+                Divider(modifier = Modifier.padding(vertical = 4.dp))
 
                 MsebSlider(stringResource(R.string.mseb_slider_sibilance_lf), stringResource(R.string.mseb_end_soft), stringResource(R.string.mseb_end_crisp), stringResource(R.string.mseb_slider_sibilance_lf_desc), params.sibilanceLf) { update(params.copy(sibilanceLf = it)) }
                 MsebSlider(stringResource(R.string.mseb_slider_sibilance_hf), stringResource(R.string.mseb_end_soft), stringResource(R.string.mseb_end_crisp), stringResource(R.string.mseb_slider_sibilance_hf_desc), params.sibilanceHf) { update(params.copy(sibilanceHf = it)) }
@@ -909,7 +1060,7 @@ fun MsebScreen(
 
                 MsebSlider(stringResource(R.string.mseb_slider_transient), stringResource(R.string.mseb_end_soft), stringResource(R.string.mseb_end_fast), stringResource(R.string.mseb_slider_transient_desc), params.impulseResponse) { update(params.copy(impulseResponse = it)) }
 
-                SDWDivider(modifier = Modifier.padding(vertical = 4.dp))
+                Divider(modifier = Modifier.padding(vertical = 4.dp))
 
                 MsebSlider(stringResource(R.string.mseb_slider_soundstage), stringResource(R.string.mseb_end_narrow), stringResource(R.string.mseb_end_wide), stringResource(R.string.mseb_slider_soundstage_desc), params.soundstage) { update(params.copy(soundstage = it)) }
                 MsebSlider(stringResource(R.string.mseb_slider_imaging), stringResource(R.string.mseb_end_diffuse), stringResource(R.string.mseb_end_focused), stringResource(R.string.mseb_slider_imaging_desc), params.imaging) { update(params.copy(imaging = it)) }
@@ -1274,7 +1425,7 @@ private fun DtsLinkRow(bluetooth: Boolean, codec: String, modifier: Modifier = M
                 Box(
                     modifier = Modifier
                         .size(width = 14.dp, height = 6.dp)
-                        .clip(SDWShapes.Badge)
+                        .clip(RoundedCornerShape(3.dp))
                         .background(if (i < bars) tone else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.22f))
                 )
             }
@@ -1306,7 +1457,7 @@ private fun DspModuleCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .glassSurface(shape = SDWShapes.Row, selected = checked && !dimmed, fillBoost = 0f)
+            .glassSurface(shape = RoundedCornerShape(16.dp), selected = checked && !dimmed, fillBoost = 0f)
     ) {
         Column(
             modifier = Modifier
@@ -1385,7 +1536,7 @@ private fun MsebBandGainsDebug(gains: FloatArray) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
+            .glassSurface(shape = RoundedCornerShape(16.dp), fillBoost = 0f)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
@@ -1416,7 +1567,7 @@ private fun MsebBandGainsDebug(gains: FloatArray) {
                                     modifier = Modifier
                                         .fillMaxWidth(0.6f)
                                         .height((kotlin.math.abs(g) / 6f * 24f).dp)
-                                        .background(MaterialTheme.colorScheme.primary, SDWShapes.Badge)
+                                        .background(MaterialTheme.colorScheme.primary, RoundedCornerShape(2.dp))
                                 )
                             }
                         }
@@ -1438,7 +1589,7 @@ private fun MsebBandGainsDebug(gains: FloatArray) {
                                         .height((kotlin.math.abs(g) / 6f * 24f).dp)
                                         .background(
                                             MaterialTheme.colorScheme.error.copy(alpha = 0.7f),
-                                            SDWShapes.Badge
+                                            RoundedCornerShape(2.dp)
                                         )
                                 )
                             }
@@ -1485,7 +1636,7 @@ private fun MsebFftBars(levels: FloatArray) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
+            .glassSurface(shape = RoundedCornerShape(16.dp), fillBoost = 0f)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
@@ -1554,9 +1705,10 @@ private fun MsebSlider(
     rightLabel: String,
     description: String,
     value: Float,
+    enabled: Boolean = true,
     onValueChange: (Float) -> Unit
 ) {
-    MsebSlider(label, leftLabel, rightLabel, description, value, -10f..10f, 1, onValueChange)
+    MsebSlider(label, leftLabel, rightLabel, description, value, -10f..10f, 1, enabled, onValueChange)
 }
 
 @Composable
@@ -1568,6 +1720,7 @@ private fun MsebSlider(
     value: Float,
     valueRange: ClosedFloatingPointRange<Float>,
     decimals: Int,
+    enabled: Boolean = true,
     onValueChange: (Float) -> Unit
 ) {
     Column {
@@ -1580,7 +1733,7 @@ private fun MsebSlider(
             )
         }
         Text(description, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Slider(value = value, onValueChange = onValueChange, valueRange = valueRange, modifier = Modifier.fillMaxWidth())
+        Slider(value = value, onValueChange = onValueChange, valueRange = valueRange, enabled = enabled, modifier = Modifier.fillMaxWidth())
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(leftLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(rightLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -1589,19 +1742,6 @@ private fun MsebSlider(
 }
 
 // ── DSP ──
-
-/**
- * 【V8.176】曲线全平时不算「开着 DSP」。
- * 全平的参数本身不会改变声音，但 native 的状态位还亮着（MSEB 那颗绿灯不灭），
- * 用户看到的就是「我明明关了、它还亮着」。这里把状态位一并收掉。
- */
-private fun syncFlatState(enabled: Boolean, params: MsebParams) {
-    if (!enabled || !params.isFlat) return
-    val svc = MusicService.instance ?: return
-    svc.resetMsebEq()
-    svc.resetMsStage()
-    svc.resetTransient()
-}
 
 private fun applyMseb(
     context: Context,

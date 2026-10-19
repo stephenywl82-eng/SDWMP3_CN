@@ -1,6 +1,9 @@
 package com.sdw.music.player.ui.screens
+import com.sdw.music.player.core.audio.metadata.AudioCoverEmbedder
+import com.sdw.music.player.core.audio.metadata.CoverDownloader
 
 import android.content.Intent
+import com.sdw.music.player.ui.components.ExpressiveSwitch
 import com.sdw.music.player.ui.components.SDWTopBar
 import android.net.Uri
 import android.os.Build
@@ -41,8 +44,6 @@ import com.sdw.music.player.ui.components.rememberSharedCoverPainter
 import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.Song
 import com.sdw.music.player.SongRepository
-import com.sdw.music.player.core.audio.AudioCoverEmbedder
-import com.sdw.music.player.core.audio.CoverDownloader
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.components.springPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -268,7 +269,7 @@ fun CoverEmbedScreen(
                     style = MaterialTheme.typography.bodyMedium,
                     modifier = Modifier.weight(1f)
                 )
-                Switch(checked = !showAll, onCheckedChange = { showAll = !it })
+                ExpressiveSwitch(checked = !showAll, onCheckedChange = { showAll = !it })
             }
 
             if (scanning) {

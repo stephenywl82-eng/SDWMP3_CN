@@ -71,6 +71,20 @@ private val SDWLightColorScheme = lightColorScheme(
 /** 壁纸激活且取色感知判定为"亮壁纸"（需用深色文字）。非壁纸或暗壁纸 = false。 */
 val LocalWallpaperEffectiveLight = staticCompositionLocalOf { false }
 
+/**
+ * 当前是否处于「浅色/亮色」模式：浅色开关开启，或壁纸取色感知判定为偏亮时为 true。
+ * 主题与 WallpaperBackground 共用同一份判定，避免两边各算一遍导致漂移。
+ */
+@Composable
+fun sdwEffectiveLight(): Boolean {
+    val followSystem = ThemeManager.followSystem.value
+    val systemNight = (LocalConfiguration.current.uiMode and
+        android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
+        android.content.res.Configuration.UI_MODE_NIGHT_YES
+    val lightMode = if (followSystem) !systemNight else ThemeManager.lightMode.value
+    return lightMode || WallpaperManager.shouldUseDarkText()
+}
+
 @Composable
 fun SDWMusicTheme(
     content: @Composable () -> Unit
@@ -79,14 +93,8 @@ fun SDWMusicTheme(
     // [V8.111] 「跟随系统」开启时改用系统 uiMode。Manifest 里 MainActivity 已声明
     // configChanges=...|uiMode，系统切换深/浅色不会重建 Activity，LocalConfiguration
     // 变化会触发这里重组，所以是实时跟随，无需重启。
-    val followSystem = ThemeManager.followSystem.value
-    val systemNight = (LocalConfiguration.current.uiMode and
-        android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
-        android.content.res.Configuration.UI_MODE_NIGHT_YES
-    val lightMode = if (followSystem) !systemNight else ThemeManager.lightMode.value
-    // 自定义壁纸取色感知：壁纸偏亮时用深文字（浅色配色），否则浅文字（深色配色）
-    val wallpaperDarkText = WallpaperManager.shouldUseDarkText()
-    val effectiveLight = lightMode || wallpaperDarkText
+    // [V8.113] 与 WallpaperBackground 共用同一份「是否浅色」判定，避免漂移
+    val effectiveLight = sdwEffectiveLight()
     val context = LocalContext.current
 
     val colorScheme = when {
@@ -116,58 +124,60 @@ fun SDWMusicTheme(
         else -> SDWDarkColorScheme
     }
 
-    // 自定义壁纸：有壁纸时页面背景 + 卡片统一透明，透出底部壁纸层。
+    // [V8.113] 真·液态玻璃：背后永远有一层模糊底图。但「自定义图片壁纸」是繁忙照片，面板若太透
+    // 文字会看不清，故按"是否真设了图片"分流：设了图片→磨砂玻璃（够厚托住文字，仍透出模糊照片）；
+    // 未设图片（主题渐变底，底色干净）→ 极薄真玻璃。
     val hasWallpaper = WallpaperManager.hasWallpaper()
-    val finalScheme = if (hasWallpaper) {
-        if (effectiveLight) {
-            // 浅色（含壁纸偏亮取色感知）：几乎全透明白卡片，深文字
-            colorScheme.copy(
-                background = Color.Transparent,
-                surface = Color.White.copy(alpha = 0.14f),
-                surfaceVariant = Color(0xFFE8E8EA).copy(alpha = 0.14f),
-                onSurface = Color(0xFF141416),
-                onSurfaceVariant = Color(0xFF3C3C40),
-                outline = Color(0xFF3A3A3E).copy(alpha = 0.10f),
-                outlineVariant = Color(0xFF8E8E93).copy(alpha = 0.08f)
-            )
-        } else {
-            // 深色：几乎全透明深色卡片，浅文字（统一透明质感）
-            colorScheme.copy(
-                background = Color.Transparent,
-                surface = DarkCard.copy(alpha = 0.10f),
-                surfaceVariant = DarkSurface.copy(alpha = 0.10f),
-                onSurface = TextPrimary,
-                onSurfaceVariant = TextSecondary,
-                outline = DarkSurface.copy(alpha = 0.08f),
-                outlineVariant = DarkSurface.copy(alpha = 0.06f)
-            )
-        }
-    } else colorScheme
-
-    // 壁纸激活时：文字自动描边衬底（居中光晕模拟描边），深色/浅色模式都生效。
-    val finalTypography = if (hasWallpaper) {
-        val textShadow = if (effectiveLight) {
-            // 浅色模式：深文字 + 白色描边衬底（居中光晕，四周浮出）
-            Shadow(color = Color.White.copy(alpha = 0.85f), offset = Offset.Zero, blurRadius = 3f)
-        } else {
-            // 深色模式：浅文字 + 黑色描边衬底
-            Shadow(color = Color.Black.copy(alpha = 0.80f), offset = Offset.Zero, blurRadius = 3f)
-        }
-        SDWTypography.copy(
-            headlineLarge = SDWTypography.headlineLarge.copy(shadow = textShadow),
-            headlineMedium = SDWTypography.headlineMedium.copy(shadow = textShadow),
-            headlineSmall = SDWTypography.headlineSmall.copy(shadow = textShadow),
-            titleLarge = SDWTypography.titleLarge.copy(shadow = textShadow),
-            titleMedium = SDWTypography.titleMedium.copy(shadow = textShadow),
-            titleSmall = SDWTypography.titleSmall.copy(shadow = textShadow),
-            bodyLarge = SDWTypography.bodyLarge.copy(shadow = textShadow),
-            bodyMedium = SDWTypography.bodyMedium.copy(shadow = textShadow),
-            bodySmall = SDWTypography.bodySmall.copy(shadow = textShadow),
-            labelLarge = SDWTypography.labelLarge.copy(shadow = textShadow),
-            labelMedium = SDWTypography.labelMedium.copy(shadow = textShadow),
-            labelSmall = SDWTypography.labelSmall.copy(shadow = textShadow)
+    // 设了图片壁纸时面板加厚到约 0.30；未设时回到极薄 0.10 真玻璃。
+    val surfA = if (hasWallpaper) 0.30f else 0.10f
+    val surfVA = if (hasWallpaper) 0.30f else 0.10f
+    val finalScheme = if (effectiveLight) {
+        // 浅色（含壁纸偏亮取色感知）：几乎全透明白卡片，深文字
+        colorScheme.copy(
+            background = Color.Transparent,
+            surface = Color.White.copy(alpha = surfA),
+            surfaceVariant = Color(0xFFE8E8EA).copy(alpha = surfVA),
+            onSurface = Color(0xFF141416),
+            onSurfaceVariant = Color(0xFF3C3C40),
+            outline = Color(0xFF3A3A3E).copy(alpha = 0.10f),
+            outlineVariant = Color(0xFF8E8E93).copy(alpha = 0.08f)
         )
-    } else SDWTypography
+    } else {
+        // 深色：几乎全透明深色卡片，浅文字（统一透明质感）
+        colorScheme.copy(
+            background = Color.Transparent,
+            surface = DarkCard.copy(alpha = surfA),
+            surfaceVariant = DarkSurface.copy(alpha = surfVA),
+            onSurface = TextPrimary,
+            onSurfaceVariant = TextSecondary,
+            outline = DarkSurface.copy(alpha = 0.08f),
+            outlineVariant = DarkSurface.copy(alpha = 0.06f)
+        )
+    }
+
+    // [V8.113] 真·液态玻璃：背后永远有模糊底图，文字统一加描边衬底保证对比度（深/浅色都生效）。
+    // 设了图片壁纸时文字直接压在照片上，描边衬底加强（blur 3→4、alpha 略升）避免看不清。
+    val textShadow = if (effectiveLight) {
+        // 浅色模式：深文字 + 白色描边衬底（居中光晕，四周浮出）
+        Shadow(color = Color.White.copy(alpha = if (hasWallpaper) 0.92f else 0.85f), offset = Offset.Zero, blurRadius = if (hasWallpaper) 4f else 3f)
+    } else {
+        // 深色模式：浅文字 + 黑色描边衬底
+        Shadow(color = Color.Black.copy(alpha = if (hasWallpaper) 0.90f else 0.80f), offset = Offset.Zero, blurRadius = if (hasWallpaper) 4f else 3f)
+    }
+    val finalTypography = SDWTypography.copy(
+        headlineLarge = SDWTypography.headlineLarge.copy(shadow = textShadow),
+        headlineMedium = SDWTypography.headlineMedium.copy(shadow = textShadow),
+        headlineSmall = SDWTypography.headlineSmall.copy(shadow = textShadow),
+        titleLarge = SDWTypography.titleLarge.copy(shadow = textShadow),
+        titleMedium = SDWTypography.titleMedium.copy(shadow = textShadow),
+        titleSmall = SDWTypography.titleSmall.copy(shadow = textShadow),
+        bodyLarge = SDWTypography.bodyLarge.copy(shadow = textShadow),
+        bodyMedium = SDWTypography.bodyMedium.copy(shadow = textShadow),
+        bodySmall = SDWTypography.bodySmall.copy(shadow = textShadow),
+        labelLarge = SDWTypography.labelLarge.copy(shadow = textShadow),
+        labelMedium = SDWTypography.labelMedium.copy(shadow = textShadow),
+        labelSmall = SDWTypography.labelSmall.copy(shadow = textShadow)
+    )
 
     val view = LocalView.current
     if (!view.isInEditMode) {
@@ -182,7 +192,7 @@ fun SDWMusicTheme(
     }
 
     CompositionLocalProvider(
-        LocalWallpaperEffectiveLight provides (hasWallpaper && effectiveLight)
+        LocalWallpaperEffectiveLight provides effectiveLight
     ) {
         MaterialTheme(
             colorScheme = finalScheme,

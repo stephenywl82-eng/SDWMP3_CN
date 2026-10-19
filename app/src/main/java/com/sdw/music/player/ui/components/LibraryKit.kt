@@ -38,6 +38,7 @@ import com.sdw.music.player.ui.theme.sectionTitleStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -396,16 +397,8 @@ fun NowPlayingMark(accent: Color = MaterialTheme.colorScheme.primary) {
  */
 @Composable
 fun NowPlayingHalo(accentColor: Color, shape: Shape = CircleShape) {
-    val transition = rememberInfiniteTransition(label = "rowHalo")
-    val alpha by transition.animateFloat(
-        initialValue = 0.25f,
-        targetValue = 0.75f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1600, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "rowHaloAlpha"
-    )
+    // 静态光晕：不再呼吸（用户反馈呼吸效果存在感弱），仅作"正在播放"的 accent 光指示。
+    val alpha = 0.5f
     Box(
         modifier = Modifier
             .requiredSize(64.dp)
@@ -427,23 +420,29 @@ fun NowPlayingHalo(accentColor: Color, shape: Shape = CircleShape) {
  * 只在 isPlaying 的行组合，其余行不进合成。
  */
 @Composable
-fun NowPlayingBars(accentColor: Color) {
+fun NowPlayingBars(accentColor: Color, animated: Boolean = true) {
     val transition = rememberInfiniteTransition(label = "npBars")
     val peaks = listOf(9f, 15f, 11f)
+    val rests = listOf(7f, 10f, 8f)
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(2.dp)
     ) {
         peaks.forEachIndexed { i, peak ->
-            val h by transition.animateFloat(
-                initialValue = 5f,
-                targetValue = peak,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 520 + i * 140, easing = FastOutSlowInEasing),
-                    repeatMode = RepeatMode.Reverse
-                ),
-                label = "npBar$i"
-            )
+            // 转场期间 animated=false：用静态中位高度，停掉 60fps 跳动，给飞行动画让 GPU。
+            val h by if (animated) {
+                transition.animateFloat(
+                    initialValue = 5f,
+                    targetValue = peak,
+                    animationSpec = infiniteRepeatable(
+                        animation = tween(durationMillis = 520 + i * 140, easing = FastOutSlowInEasing),
+                        repeatMode = RepeatMode.Reverse
+                    ),
+                    label = "npBar$i"
+                )
+            } else {
+                remember { mutableStateOf(rests[i]) }
+            }
             Box(
                 modifier = Modifier
                     .width(3.dp)
@@ -474,7 +473,9 @@ fun DetailHero(
     coverUri: String = "",
     coverSize: Dp = 96.dp,
     onPlayAll: () -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 歌手页传艺人名：头部改用艺人头像（圆形），否则用专辑/歌单封面。 */
+    artistName: String? = null
 ) {
     Row(
         modifier = modifier
@@ -482,12 +483,17 @@ fun DetailHero(
             .padding(horizontal = SDWSpace.Gutter, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        RowCover(
-            title = coverTitle,
-            artist = coverArtist,
-            uri = coverUri,
-            size = coverSize
-        )
+        if (artistName != null) {
+            // 歌手页没有统一封面，头部直接显示艺人头像（圆形），与歌手列表的前导位一致。
+            ArtistAvatar(artistName = artistName, size = coverSize)
+        } else {
+            RowCover(
+                title = coverTitle,
+                artist = coverArtist,
+                uri = coverUri,
+                size = coverSize
+            )
+        }
         Spacer(Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text(

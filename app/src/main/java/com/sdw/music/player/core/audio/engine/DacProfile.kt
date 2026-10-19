@@ -13,14 +13,18 @@ package com.sdw.music.player.core.audio.engine
  * [DacDescriptor], which is the single source of truth for *standard* DACs.
  *
  * Only **genuinely non-standard firmware** needs a hand-written entry, kept in
- * [DacQuirk]. A new, spec-compliant DAC therefore needs **zero** code — it falls
- * through to the generic default (Oboe system-route) and its wire format / hardware
- * volume / 44.1k support are all auto-detected. That is the end-state:
+ * [DacQuirk]. A new, spec-compliant DAC therefore needs **zero** code — it takes
+ * the generic default, whose [DacQuirk.autoProbe] flag makes it *attempt* USB Host
+ * Exclusive (bit-perfect) first, then auto-fall-back to Oboe system-route if the
+ * path turns out silent/dead (recorded via [UsbDacManager.isForcedOboe] for the
+ * rest of the session). Wire format / hardware volume / 44.1k support are all
+ * auto-detected. That is the end-state:
  * "插上就用，只有真正奇葩的才需要往 quirk 库里加一条。"
  *
  * Routing (3 paths, ordered by priority):
  *   Path 1 — USB Host Exclusive (Bit-Perfect): DACs with [DacQuirk.useSystemRoute]=false
- *   Path 2 — Oboe System Route: the safe default for unknown/standard DACs
+ *   Path 2 — Oboe System Route: safe fallback (default for unknown DACs that fail the
+ *            Host-Exclusive auto-probe, and for known-good system-route DACs)
  *   Path 3 — ExoPlayer (SRC fallback): no DAC, Bluetooth, or broken 44.1k family
  *
  * The merged result is [DacProfile]; [DacProfile.find] combines a [DacQuirk] with
@@ -129,7 +133,12 @@ data class DacQuirk(
     val ifaceDelayUs: Int = 0,
     val forceIfaceReset: Boolean = false,
     val forceUac1: Boolean = false,
-    val skipSetCurQuirk: Boolean = false
+    val skipSetCurQuirk: Boolean = false,
+
+    /** [P2] True for *unknown* DACs (generic default). Attempt Host Exclusive
+     *  bit-perfect first, but arm the silence watchdog so a dead/silent path auto
+     *  falls back to Oboe system-route. Known verified DACs leave this false. */
+    val autoProbe: Boolean = false
 ) {
     /** Verified hardware-volume Feature Unit params (UAC2 int16.16 dB). */
     data class FeatureUnit(
@@ -186,7 +195,8 @@ data class DacQuirk(
             ifaceDelayUs = ifaceDelayUs,
             forceIfaceReset = forceIfaceReset,
             forceUac1 = forceUac1,
-            skipSetCurQuirk = skipSetCurQuirk
+            skipSetCurQuirk = skipSetCurQuirk,
+            autoProbe = autoProbe
         )
     }
 
@@ -266,7 +276,11 @@ data class DacQuirk(
 
         /** Look up a known quirk, or return a generic safe default (system-route). */
         fun findQuirk(vid: Int, pid: Int): DacQuirk =
-            byKey[vid to pid] ?: DacQuirk(vid, pid, "USB DAC (${vid.toString(16)}:${pid.toString(16)})")
+            byKey[vid to pid] ?: DacQuirk(
+                vid, pid, "USB DAC (${vid.toString(16)}:${pid.toString(16)})",
+                // [P2] 未知 DAC：先试 Host 独占(bit-perfect)，配静音看门狗回退 Oboe 系统路由
+                useSystemRoute = false, autoProbe = true
+            )
     }
 }
 
@@ -299,7 +313,12 @@ data class DacProfile(
     val ifaceDelayUs: Int = 0,
     val forceIfaceReset: Boolean = false,
     val forceUac1: Boolean = false,
-    val skipSetCurQuirk: Boolean = false
+    val skipSetCurQuirk: Boolean = false,
+
+    /** [P2] Mirrors [DacQuirk.autoProbe]; true when this profile came from the generic
+     *  unknown-DAC default and a silence watchdog is therefore supervising the Host
+     *  Exclusive attempt. */
+    val autoProbe: Boolean = false
 ) {
     companion object {
         /** Look up / build the merged profile for this VID/PID.
@@ -317,7 +336,12 @@ data class DacProfile(
         /** Correct wire-format bits for this DAC (descriptor-derived or quirk override). */
         fun wireBitsFor(vid: Int, pid: Int): Int = find(vid, pid).wireBits
 
-        /** True if this DAC should use Oboe system-route instead of USB Host Exclusive. */
-        fun shouldUseSystemRoute(vid: Int, pid: Int): Boolean = find(vid, pid).useSystemRoute
+        /** True if this DAC should use Oboe system-route instead of USB Host Exclusive.
+         *  [P2] A DAC judged silent by the auto-probe watchdog (forced Oboe for this
+         *  session) always routes to Oboe, even if its quirk says otherwise. */
+        fun shouldUseSystemRoute(vid: Int, pid: Int): Boolean {
+            if (UsbDacManager.isForcedOboe(vid, pid)) return true
+            return find(vid, pid).useSystemRoute
+        }
     }
 }

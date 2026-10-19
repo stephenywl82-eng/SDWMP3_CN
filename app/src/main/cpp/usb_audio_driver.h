@@ -199,6 +199,12 @@ public:
     const char* getDetailedInfo() const { return detailedInfo_.c_str(); }
     void getStats(UsbDacStats& out) const;
 
+    /** [P1 adaptive-DAC] Pack every descriptor-derived capability the native parser
+     *  already discovered during open() into a single string so the Kotlin layer can
+     *  stop hand-writing per-model values (wireBits / Feature Unit / 44.1k support).
+     *  Format: "key=value;key=value;..." — see usb_audio_driver.cpp. */
+    const char* getDescriptorProfile() const;
+
     // 鈹€鈹€ Debug log ring buffer (Salt-style in-app log) 鈹€鈹€鈹€鈹€鈹€
     const char* getNativeDebugLog() const { return nativeLogBuf_; }
     void clearNativeDebugLog() { nativeLogWrite_ = 0; nativeLogBuf_[0] = '\0'; }
@@ -248,6 +254,8 @@ private:
     static constexpr int kNativeLogSize = 32768;
     mutable char nativeLogBuf_[kNativeLogSize] = {};
     mutable int nativeLogWrite_ = 0;
+    // [P1 adaptive-DAC] scratch buffer for getDescriptorProfile() return string
+    mutable char descriptorProfileBuf_[1024] = {};
     void nativeLog(const char* tag, const char* fmt, ...)
         __attribute__((format(printf, 3, 4)));
 
@@ -450,6 +458,7 @@ private:
     std::vector<ClockRange> clockRanges_;
     int  acIface_ = 0;     // AudioControl interface number (for clock control transfers)
     int  clockSourceId_ = -1;  // resolved UAC2 clock source entity id (from findClockSourceId)
+    int  feedbackEp_ = -1; // resolved implicit-feedback endpoint address (from findFeedbackEndpoint)
     // Descriptor cache: read once (with retry) in open(), reused by all parse* callers.
     std::vector<uint8_t> configDesc_;
     int  configDescLen_ = 0;

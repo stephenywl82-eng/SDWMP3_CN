@@ -306,12 +306,12 @@ bool UsbAudioDriver::open(int fd, int epAddress, int maxPacketSize, int interval
     LOGI("Clock source ID: %d", clockSourceId_);
 
     // Find feedback endpoint for async DACs
-    int fbEp = findFeedbackEndpoint();
-    if (fbEp > 0) {
+    feedbackEp_ = findFeedbackEndpoint();
+    if (feedbackEp_ > 0) {
         char tmp[64];
-        snprintf(tmp, sizeof(tmp), ", fbEp=0x%02X", fbEp);
+        snprintf(tmp, sizeof(tmp), ", fbEp=0x%02X", feedbackEp_);
         detailedInfo_ += tmp;
-        LOGI("Feedback endpoint: 0x%02X", fbEp);
+        LOGI("Feedback endpoint: 0x%02X", feedbackEp_);
     }
 
     // Parse Feature Unit for hardware volume control
@@ -2612,6 +2612,62 @@ int UsbAudioDriver::packetSizeBytes() const {
 
 const char* UsbAudioDriver::getSupportedRates() {
     return supportedRates_.c_str();
+}
+
+// 鈹€鈹€ getDescriptorProfile (P1 adaptive-DAC) 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+// Pack the already-parsed descriptor capabilities so the Kotlin layer no longer
+// has to hand-write per-model values. Everything here is derived in open()
+// (parseAltCandidates / parseClockRanges / parseFeatureUnit / findFeedbackEndpoint).
+// Kotlin parses this via DacDescriptor.parse(). Format is "k=v;k=v;...".
+//   wb    = wire bits (max alt subslot * 8; 16 default)
+//   ssMax = max bytes-per-sample subslot across alts
+//   ssMin = min subslot across alts (0 = not parsed)
+//   uac   = 1 (UAC1) or 2 (UAC2)
+//   hs    = 1 if real USB bus is high-speed (8000 uframes/s)
+//   fb    = 1 if an implicit-feedback IN iso endpoint was found
+//   fuId/fuCh/fuChs = auto-detected hardware-volume Feature Unit (0 = none)
+//   fuMin/fuMax/fuRes = FU dB range * 1000 (int16.16 scaled to avoid float parse loss)
+//   k44   = 1 if descriptor exposes any 44.1k-family (44.1/88.2/176.4/352.8k) clock range
+//   alts  = number of AudioStreaming alt candidates discovered
+const char* UsbAudioDriver::getDescriptorProfile() const {
+    int ssMax = 0, ssMin = 0, wireBits = 16, alts = (int)altCandidates_.size();
+    for (const auto& c : altCandidates_) {
+        if (c.subslot <= 0) continue;
+        if (ssMax == 0 || c.subslot > ssMax) ssMax = c.subslot;
+        if (ssMin == 0 || c.subslot < ssMin) ssMin = c.subslot;
+    }
+    if (ssMax > 0) wireBits = ssMax * 8;
+
+    int uac = isUac2_ ? 2 : 1;
+    int hs  = highSpeed_ ? 1 : 0;
+    int fb  = (feedbackEp_ > 0) ? 1 : 0;
+
+    int fuId  = featureUnitId_;
+    int fuCh  = featureUnitChannel_;
+    int fuChs = featureUnitChannels_;
+    int fuMin = (int)(featureUnitMinDb_ * 1000.0f);
+    int fuMax = (int)(featureUnitMaxDb_ * 1000.0f);
+    int fuRes = (int)(featureUnitResDb_ * 1000.0f);
+
+    // 44.1k family present? Scan clock sub-ranges for any coverage of the
+    // 44.1/88.2/176.4/352.8 kHz rates.
+    int k44 = 0;
+    int ci  = (int)clockRanges_.size();   // clock-info present? (probe succeeded)
+    for (const auto& cr : clockRanges_) {
+        if ((cr.min <= 44100   && 44100   <= cr.max) ||
+            (cr.min <= 88200   && 88200   <= cr.max) ||
+            (cr.min <= 176400  && 176400  <= cr.max) ||
+            (cr.min <= 352800  && 352800  <= cr.max)) {
+            k44 = 1; break;
+        }
+    }
+
+    snprintf(descriptorProfileBuf_, sizeof(descriptorProfileBuf_),
+        "wb=%d;ssMax=%d;ssMin=%d;uac=%d;hs=%d;fb=%d;"
+        "fuId=%d;fuCh=%d;fuChs=%d;fuMin=%d;fuMax=%d;fuRes=%d;k44=%d;ci=%d;alts=%d",
+        wireBits, ssMax, ssMin, uac, hs, fb,
+        fuId, fuCh, fuChs, fuMin, fuMax, fuRes, k44, ci, alts);
+    return descriptorProfileBuf_;
 }
 
 // 鈹€鈹€ static thread wrappers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€

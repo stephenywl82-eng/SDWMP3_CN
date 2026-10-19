@@ -1,226 +1,311 @@
 package com.sdw.music.player.core.audio.engine
-import com.sdw.music.player.core.audio.engine.DacProfile
-import com.sdw.music.player.core.audio.playback.MusicService
 
 /**
- * Per-DAC quirk profile for USB exclusive mode.
+ * USB DAC capability profile for exclusive-mode playback.
  *
- * Every DAC has different firmware quirks. Instead of scattering PID checks across
- * MusicService and native code, define known devices here with their capabilities
- * and let the playback pipeline read from a single source of truth.
+ * ## P1 adaptive-DAC architecture (2026-10)
  *
- * Native code (usb_audio_driver.cpp) still has its own low-level checks for things
- * like SET_CUR skipping, but these profiles tell the Kotlin layer what to expect.
+ * Every USB Audio Class DAC exposes its real capabilities in its descriptors —
+ * wire format (subslot size), hardware-volume Feature Unit, supported sample-rate
+ * family, UAC version, feedback endpoint. The native driver (`usb_audio_driver.cpp`)
+ * already parses all of these in [UsbAudioDriver.open] and packs them into a single
+ * string via `getDescriptorProfile()`. On the Kotlin side that becomes a
+ * [DacDescriptor], which is the single source of truth for *standard* DACs.
+ *
+ * Only **genuinely non-standard firmware** needs a hand-written entry, kept in
+ * [DacQuirk]. A new, spec-compliant DAC therefore needs **zero** code — it falls
+ * through to the generic default (Oboe system-route) and its wire format / hardware
+ * volume / 44.1k support are all auto-detected. That is the end-state:
+ * "插上就用，只有真正奇葩的才需要往 quirk 库里加一条。"
  *
  * Routing (3 paths, ordered by priority):
- *   Path 1 — USB Host Exclusive (Bit-Perfect): known-good DACs like TTGK 33C0
- *   Path 2 — Oboe System Route: plug in any USB DAC, Oboe opens without setDeviceId,
- *            Android auto-routes to USB_HEADSET via kernel USB driver (like Resonāda)
+ *   Path 1 — USB Host Exclusive (Bit-Perfect): DACs with [DacQuirk.useSystemRoute]=false
+ *   Path 2 — Oboe System Route: the safe default for unknown/standard DACs
  *   Path 3 — ExoPlayer (SRC fallback): no DAC, Bluetooth, or broken 44.1k family
+ *
+ * The merged result is [DacProfile]; [DacProfile.find] combines a [DacQuirk] with
+ * the live [DacDescriptor] (read from [UsbDacManager]) — quirk overrides descriptor.
+ */
+
+/**
+ * Native descriptor-derived capabilities for a connected DAC.
+ * Everything here is parsed by the C++ driver; nothing is hand-written.
+ * Parsed from the `key=value;...` string returned by `getDescriptorProfile()`.
+ */
+data class DacDescriptor(
+    /** Wire bits = max alt subslot * 8 (e.g. 4-byte subslot -> 32-bit S32_LE). */
+    val wireBits: Int,
+    val subslotMax: Int,
+    val subslotMin: Int,
+    /** 1 = UAC1, 2 = UAC2. */
+    val uacVersion: Int,
+    val highSpeed: Boolean,
+    val hasFeedbackEp: Boolean,
+    val featureUnitId: Int,
+    val featureUnitChannel: Int,
+    val featureUnitChannels: Int,
+    val featureUnitMinDb: Float,
+    val featureUnitMaxDb: Float,
+    val featureUnitResDb: Float,
+    /** True if the descriptor exposes any 44.1k-family (44.1/88.2/176.4/352.8k) clock. */
+    val has44k1Clock: Boolean,
+    /** True only when the clock-range probe actually returned data. When false the
+     *  44.1k result is unknown (probe failed) and must NOT be treated as "lacks 44.1k". */
+    val hasClockInfo: Boolean,
+    val altCount: Int
+) {
+    companion object {
+        /** Parse the packed string from native `getDescriptorProfile()`. */
+        fun parse(raw: String?): DacDescriptor? {
+            if (raw.isNullOrBlank()) return null
+            val map = raw.split(';').mapNotNull { kv ->
+                val i = kv.indexOf('=')
+                if (i <= 0) null else kv.substring(0, i) to kv.substring(i + 1)
+            }.toMap()
+            fun int(k: String, d: Int = 0) = map[k]?.toIntOrNull() ?: d
+            fun bool(k: String) = int(k) != 0
+            val wb = int("wb", 16)
+            return DacDescriptor(
+                wireBits = if (wb > 0) wb else 16,
+                subslotMax = int("ssMax"),
+                subslotMin = int("ssMin"),
+                uacVersion = int("uac", 2),
+                highSpeed = bool("hs"),
+                hasFeedbackEp = bool("fb"),
+                featureUnitId = int("fuId"),
+                featureUnitChannel = int("fuCh"),
+                featureUnitChannels = int("fuChs", 2),
+                featureUnitMinDb = int("fuMin") / 1000f,
+                featureUnitMaxDb = int("fuMax") / 1000f,
+                featureUnitResDb = int("fuRes", 1000) / 1000f,
+                has44k1Clock = bool("k44"),
+                hasClockInfo = int("ci") > 0,
+                altCount = int("alts")
+            )
+        }
+    }
+}
+
+/**
+ * Hand-written per-DAC quirk entry. **Only DACs with genuinely non-standard
+ * firmware behavior need an entry here** — standard UAC-compliant DACs need none.
+ *
+ * The booleans/flags are true quirk decisions (firmware lies, clock locks, etc.).
+ * `wireBitsOverride` and `featureUnit` are *fallbacks* for when the native generic
+ * probe cannot read the descriptor (rare); leave them at default and the live
+ * [DacDescriptor] auto-detects instead.
+ */
+data class DacQuirk(
+    val vid: Int,
+    val pid: Int,
+    val name: String,
+
+    /** True = use Oboe system-route instead of hand-rolled USB Host Exclusive.
+     *  Safe default for unknown DACs — let the kernel USB driver handle the
+     *  low-level quirks. Set false only for DACs verified with host-mode Bit-Perfect. */
+    val useSystemRoute: Boolean = true,
+
+    /** True if the DAC physically cannot generate 44.1 kHz family (even if the
+     *  descriptor claims support — some firmware lie). */
+    val lacks44k1Clock: Boolean = false,
+
+    /** True if SET_CUR control transfers break this DAC (EPIPE / dead endpoint).
+     *  Informational for the Kotlin layer; native open()/start() also skip SET_CUR. */
+    val skipSetCur: Boolean = false,
+
+    /** True = try Android 14+ BIT_PERFECT API (setPreferredMixerAttributes) before
+     *  falling back to Oboe system-route. Only meaningful when useSystemRoute=true. */
+    val tryBitPerfectApi: Boolean = false,
+
+    // ── Native-probe fallback overrides (default = auto-detect from descriptor) ──
+    /** 0 = derive from descriptor (max subslot * 8). Non-zero = hard override. */
+    val wireBitsOverride: Int = 0,
+    /** Non-null = Feature Unit override (native probe known to fail on this firmware). */
+    val featureUnit: FeatureUnit? = null,
+
+    // ── snd-usb-audio flag equivalents (native Linux quirk table mirror) ──
+    val urbPacketsOverride: Int = 0,
+    val ctlMsgDelayUs: Int = 0,
+    val ifaceDelayUs: Int = 0,
+    val forceIfaceReset: Boolean = false,
+    val forceUac1: Boolean = false,
+    val skipSetCurQuirk: Boolean = false
+) {
+    /** Verified hardware-volume Feature Unit params (UAC2 int16.16 dB). */
+    data class FeatureUnit(
+        val id: Int, val channel: Int, val channels: Int,
+        val minDb: Float, val maxDb: Float, val resDb: Float
+    )
+
+    /** Merge hand quirks over live descriptor auto-detection → final [DacProfile]. */
+    fun merge(desc: DacDescriptor?): DacProfile {
+        val wireBits = when {
+            wireBitsOverride > 0 -> wireBitsOverride
+            desc != null && desc.wireBits > 0 -> desc.wireBits
+            else -> 16
+        }
+
+        val fu = featureUnit
+        val fuId: Int
+        val fuCh: Int
+        val fuChs: Int
+        val fuMin: Float
+        val fuMax: Float
+        val fuRes: Float
+        if (fu != null) {
+            fuId = fu.id; fuCh = fu.channel; fuChs = fu.channels
+            fuMin = fu.minDb; fuMax = fu.maxDb; fuRes = fu.resDb
+        } else if (desc != null && desc.featureUnitId > 0) {
+            fuId = desc.featureUnitId; fuCh = desc.featureUnitChannel; fuChs = desc.featureUnitChannels
+            fuMin = desc.featureUnitMinDb; fuMax = desc.featureUnitMaxDb; fuRes = desc.featureUnitResDb
+        } else {
+            fuId = 0; fuCh = 1; fuChs = 2; fuMin = -127.0f; fuMax = 0.0f; fuRes = 1.0f
+        }
+
+        // A descriptor that *successfully probed* and exposes no 44.1k range is treated
+        // as lacking it (safer than trusting a firmware that advertises rates the clock
+        // can't make). If the probe failed (no clock info), we can't conclude anything —
+        // keep the quirk default so we never regress a DAC whose clock ranges are unreadable.
+        val lacks44k1 = lacks44k1Clock || (desc != null && desc.hasClockInfo && !desc.has44k1Clock)
+
+        return DacProfile(
+            vid = vid, pid = pid, name = name,
+            useSystemRoute = useSystemRoute,
+            lacks44k1Clock = lacks44k1,
+            skipSetCur = skipSetCur,
+            wireBits = wireBits,
+            tryBitPerfectApi = tryBitPerfectApi,
+            featureUnitId = fuId,
+            featureUnitChannel = fuCh,
+            featureUnitChannels = fuChs,
+            featureUnitMinDb = fuMin,
+            featureUnitMaxDb = fuMax,
+            featureUnitResDb = fuRes,
+            urbPacketsOverride = urbPacketsOverride,
+            ctlMsgDelayUs = ctlMsgDelayUs,
+            ifaceDelayUs = ifaceDelayUs,
+            forceIfaceReset = forceIfaceReset,
+            forceUac1 = forceUac1,
+            skipSetCurQuirk = skipSetCurQuirk
+        )
+    }
+
+    companion object {
+        // ── Known DACs ─────────────────────────────────────────
+        // Only the genuinely non-standard bits are handwritten. wireBits / Feature
+        // Unit are kept as explicit fallbacks for now (hardware-verified values);
+        // they can be dropped once native auto-detection is confirmed per-DAC, after
+        // which a new standard DAC needs no entry at all.
+
+        /** TTGK Audio (pid=33C0) — our reference DAC. Full UAC2, all rates. */
+        val TTGK_REFERENCE = DacQuirk(0x3302, 0x33C0, "TTGK Audio (reference)",
+            useSystemRoute = false,
+            wireBitsOverride = 16,
+            featureUnit = DacQuirk.FeatureUnit(2, 1, 2, -74.0f, 0.0f, 0.5f),
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
+
+        /** TTGK CX31993 (pid=33D8) — descriptor isomorphic to 33C0. */
+        val TTGK_33D8 = DacQuirk(0x3302, 0x33D8, "CX31993 (3302:33d8)",
+            useSystemRoute = false,
+            wireBitsOverride = 16,
+            featureUnit = DacQuirk.FeatureUnit(2, 1, 2, -74.0f, 0.0f, 0.5f),
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
+
+        /** TTGK CX31993+97220 HiFi (pid=3382) — descriptor isomorphic to 33D8. */
+        val TTGK_3382 = DacQuirk(0x3302, 0x3382, "CX31993+97220 HiFi (3302:3382)",
+            useSystemRoute = false,
+            wireBitsOverride = 16,
+            featureUnit = DacQuirk.FeatureUnit(2, 1, 2, -74.0f, 0.0f, 0.5f),
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
+
+        /** TTGK Note (pid=201D) — UAC2 adaptive, multi-alt, SET_CUR clock works. */
+        val TTGK_NOTE = DacQuirk(0x3302, 0x201D, "TTGK Note",
+            useSystemRoute = false, wireBitsOverride = 16,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
+
+        /** FiiO BTR5 (2972:0047) — UAC2 async, multi-alt, explicit feedback. */
+        val VID2972_0047 = DacQuirk(0x2972, 0x0047, "FiiO BTR5",
+            useSystemRoute = false, wireBitsOverride = 16, ctlMsgDelayUs = 1000)
+
+        /** 2D13:A001 "USB HiFi Audio" — S32_LE wire, buggy SET_CUR (locks clock). */
+        val HIFI_A001 = DacQuirk(0x2D13, 0xA001, "USB HiFi Audio (2D13:A001)",
+            useSystemRoute = false, skipSetCur = true, wireBitsOverride = 32,
+            skipSetCurQuirk = true)
+
+        /** Realtek USB2.0 Audio (0BDA:4BA6) — UAC2 adaptive, 44.1k AND 48k both OK. */
+        val REALTEK_4BA6 = DacQuirk(0x0BDA, 0x4BA6, "Realtek USB2.0 Audio (0BDA:4BA6)",
+            useSystemRoute = false, wireBitsOverride = 16,
+            featureUnit = DacQuirk.FeatureUnit(16, 1, 2, -65.25f, 0.0f, 0.38f),
+            ctlMsgDelayUs = 1000)
+
+        /** Qudelix-5K (0A12:4007) — UAC1 synchronous, full-speed 96k/24bit. */
+        val QUDELIX_5K = DacQuirk(0x0A12, 0x4007, "Qudelix-5K USB DAC",
+            useSystemRoute = false, wireBitsOverride = 24,
+            urbPacketsOverride = 16, ctlMsgDelayUs = 2000)
+
+        /** Moondrop Chu II DSP (31B2:0113) — UAC1 synchronous DSP IEM, 24-bit wire. */
+        val CHU2_DSP = DacQuirk(0x31B2, 0x0113, "Moondrop Chu II DSP",
+            useSystemRoute = false, wireBitsOverride = 24, ctlMsgDelayUs = 1000)
+
+        /** CX31993 (0BDA:0023) — clone, isomorphic to TTGK Note; system-route silent. */
+        val CX31993_0BDA_0023 = DacQuirk(0x0BDA, 0x0023, "CX31993 (0bda:0023)",
+            useSystemRoute = false, wireBitsOverride = 16,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
+
+        /** CX31993 384Khz HIFI (31B2:0111) — isomorphic to Note/0BDA:0023. */
+        val CX31993_31B2_0111 = DacQuirk(0x31B2, 0x0111, "CX31993 384K HIFI (31b2:0111)",
+            useSystemRoute = false, wireBitsOverride = 16,
+            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
+
+        // ── Lookup ─────────────────────────────────────────────
+
+        private val byKey: Map<Pair<Int, Int>, DacQuirk> = listOf(
+            TTGK_REFERENCE, TTGK_33D8, TTGK_3382, TTGK_NOTE, VID2972_0047, HIFI_A001,
+            REALTEK_4BA6, QUDELIX_5K, CHU2_DSP, CX31993_0BDA_0023, CX31993_31B2_0111
+        ).associateBy { it.vid to it.pid }
+
+        /** Look up a known quirk, or return a generic safe default (system-route). */
+        fun findQuirk(vid: Int, pid: Int): DacQuirk =
+            byKey[vid to pid] ?: DacQuirk(vid, pid, "USB DAC (${vid.toString(16)}:${pid.toString(16)})")
+    }
+}
+
+/**
+ * Merged per-DAC profile consumed by the playback pipeline.
+ * Constructed by [DacQuirk.merge] from hand quirks + live descriptor.
+ * All fields are preserved from the previous hand-written [DacProfile] so existing
+ * call sites in MusicService / UsbDacManager / MsebDeviceAdapt keep working.
  */
 data class DacProfile(
     val vid: Int,
     val pid: Int,
     val name: String,
 
-    /** True = use Oboe system-route instead of hand-rolled USB Host Exclusive.
-     *  This is the safe default for unknown DACs — let the kernel USB driver
-     *  handle all the low-level quirks (SET_CUR, clock negotiation, format auto-detect).
-     *  Set false only for DACs we've thoroughly verified with host-mode Bit-Perfect. */
     val useSystemRoute: Boolean = true,
-
-    /** True if the DAC physically cannot generate 44.1 kHz family (44.1/88.2/176.4/352.8).
-     *  Songs with these rates will be routed to ExoPlayer for SRC. */
     val lacks44k1Clock: Boolean = false,
-
-    /** True if SET_CUR control transfers will break this DAC (e.g. EPIPE / dead endpoint).
-     *  Native open()/start() already skips SET_CUR for devices where this matters;
-     *  this flag is informational for the Kotlin layer. */
     val skipSetCur: Boolean = false,
-
-    /** Wire format bits for USB ISO OUT. Use 32 for S32_LE sub-slot DACs
-     *  (mps%8==0), 24 for S24_3LE (mps%6==0), default 16 otherwise.
-     *  Only used when useSystemRoute=false. */
     val wireBits: Int = 16,
-
-    /** True = try Android 14+ BIT_PERFECT API (setPreferredMixerAttributes) before
-     *  falling back to Oboe system-route. Only meaningful when useSystemRoute=true.
-     *  DACs with known firmware quirks (broken SET_CUR, clock issues) can benefit
-     *  from the kernel USB driver's usb_quirks tolerance via this API. */
     val tryBitPerfectApi: Boolean = false,
 
-    /** Feature Unit hardware volume override (Salt-verified quirk).
-     *  Non-zero featureUnitId = DAC has a known volume FU whose GET_MIN/GET_MAX
-     *  STALLs in firmware (UAC2 optional requests the chip simply rejects).
-     *  Native layer runs its generic UAC2 auto-probe first; if that fails it falls
-     *  back to these params — so standard DACs self-detect, only quirky ones use
-     *  this table. */
     val featureUnitId: Int = 0,
-    /** Volume FU master channel. 0 = master ch0 exists (single SET_CUR);
-     *  1 = no master, send per-channel ch1..chN. */
     val featureUnitChannel: Int = 1,
-    /** Number of per-channel volume controls (e.g. 2 for stereo L/R). */
     val featureUnitChannels: Int = 2,
-    /** dB range of the volume FU (16.16, e.g. -74.0 = -74.00 dB). */
     val featureUnitMinDb: Float = -127.0f,
     val featureUnitMaxDb: Float = 0.0f,
     val featureUnitResDb: Float = 1.0f,
 
-    // ── [2026-09-10 multi-DAC quirk table] Native Linux snd-usb-audio flag equivalents ──
-    // Overrides pushed to native open() via JNI after nativeClaim. Native keeps its
-    // built-in default table (open() quirk init) as fallback; these override it when
-    // nonzero/non-default, so Kotlin DacProfile stays the single source of truth.
-
-    /** ISO packets per URB. 0 = native default (64, FS auto-drops to 16).
-     *  Full-speed 96k/24bit DACs (Qudelix-5K 576B/pkt) exceed usbfs in-flight
-     *  limits at 64 pkts -> ENOMEM on submit #13. Linux fix reference:
-     *  DIYINHK 0x20b1:0x2009 high-rate URB overrun -> SKIP_IMPLICIT_FB. */
     val urbPacketsOverride: Int = 0,
-
-    /** Delay (us) after SET_CUR before data flow — lets DAC PLL lock the new clock.
-     *  0 = native default. Linux CTL_MSG_DELAY: MOONDROP Moonriver2 Ti / iBasso
-     *  DC-Elite(1M)/DC07 Pro(1M). JDS Labs XMOS firmware: 2ms PLL relock. */
     val ctlMsgDelayUs: Int = 0,
-
-    /** Delay (us) between interface ops (setInterfaceAlt(0) teardown & reactivate).
-     *  0 = native default. Linux IFACE_DELAY: TTGK 3302:17c2, Luxman D-10X. */
     val ifaceDelayUs: Int = 0,
-
-    /** Force full interface teardown+reactivate on every restart, even same-alt.
-     *  Default false = keep endpoint (9/9 fix: Qudelix ES9219 loses lock on
-     *  teardown -> noise). Linux FORCE_IFACE_RESET: TTGK 3302:17c2 — if a device
-     *  needs full reset to clear a stuck state, set true. */
     val forceIfaceReset: Boolean = false,
-
-    /** True = firmware lies about UAC version (e.g. claims UAC2, only implements
-     *  UAC1). Linux UQ_AU_FORCE_REV_1 (Sony NW-A50 054c:0b8c). Forces descriptor
-     *  parse as UAC1. */
     val forceUac1: Boolean = false,
-
-    /** Skip SET_CUR sample-rate control entirely (alt-switch implicit lock).
-     *  HIFI_A001 (2D13:A001) locks clock at 384k on SET_CUR. */
     val skipSetCurQuirk: Boolean = false
 ) {
     companion object {
-        // ── Known DACs ─────────────────────────────────────────
-
-        /** TTGK Audio (pid=33C0) — our reference DAC. Full UAC2, all rates, clean alt switch.
-         *  Only DAC we trust with hand-rolled USB Host Exclusive for Bit-Perfect. */
-        val TTGK_REFERENCE = DacProfile(0x3302, 0x33C0, "TTGK Audio (reference)",
-            useSystemRoute = false,
-            featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
-            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f,
-            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
-
-        /** TTGK CX31993 (pid=33D8) — 用户新 DAC。descriptor 与 33C0 同构：
-         *  iface1 alt=1/2/3 OUT ep 0x01 mps=192/288/384, iface2 IN fb ep 0x81,
-         *  iface3 HID 音量。支持 16k~384k。Oboe system-route 下 Stream OFF 无声，
-         *  改走手写 USB Host Exclusive（descriptor 自适应）。 */
-        val TTGK_33D8 = DacProfile(0x3302, 0x33D8, "CX31993 (3302:33d8)",
-            useSystemRoute = false,
-            featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
-            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f,
-            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
-
-        /** TTGK CX31993+97220 HiFi (pid=3382) — 用户新 DAC（2026-09-23）。
-         *  descriptor 与 33D8 同构：iface1 alt=1/2/3 OUT ep0x01 mps=192/288/384
-         *  （16/24/32bit subslot），iface2 IN fb ep0x81 mps=24/36，iface3 HID。
-         *  支持 44.1k（sampleRates 含 44100），encodings=[2,4,21,22]。
-         *  Oboe system-route 下 Stream OFF 无声，改走手写 USB Host Exclusive。 */
-        val TTGK_3382 = DacProfile(0x3302, 0x3382, "CX31993+97220 HiFi (3302:3382)",
-            useSystemRoute = false,
-            featureUnitId = 2, featureUnitChannel = 1, featureUnitChannels = 2,
-            featureUnitMinDb = -74.0f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.5f,
-            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
-
-        /** TTGK Note (pid=201D) — UAC2 adaptive (attributes=0x09), multi-alt.
-         *  Salt verified: endpoint=0x04, alt=1 mps=196 (16bit), alt=2 mps=294 (24bit),
-         *  alt=3 mps=392 (32bit). clockSource=6, SET_CUR to clock=6 succeeds (ret=4).
-         *  Adaptive endpoint syncs via SOF, no feedback endpoint.
-         *  Hand-rolled USB Host Exclusive. */
-        val TTGK_NOTE = DacProfile(0x3302, 0x201D, "TTGK Note",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false,
-            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
-
-        /** vid=2972 pid=0047 (FiiO BTR5) — UAC2 async (attributes=0x05), multi-alt.
-         *  Salt verified: interface=1, alt=1 mps=392 (32bit), alt=2 mps=196 (16bit),
-         *  alt=3 mps=392. clockSource=40 (selector) → clock=41, SET_CUR ret=4.
-         *  Async endpoint has explicit feedback 0x81. NOT broken Clock Entity.
-         *  Hand-rolled USB Host Exclusive. */
-        val VID2972_0047 = DacProfile(0x2972, 0x0047, "FiiO BTR5",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false,
-            ctlMsgDelayUs = 1000)
-
-        /** 2D13:A001 "USB HiFi Audio" — S32_LE wire, buggy SET_CUR.
-         *  Hardware supports 44.1k but SET_CUR locks clock at 384k.
-         *  Hand-rolled USB Host Exclusive with skipSetCur = alt-switch implicit lock. */
-        val HIFI_A001 = DacProfile(0x2D13, 0xA001, "USB HiFi Audio (2D13:A001)",
-            useSystemRoute = false, skipSetCur = true, wireBits = 32,
-            skipSetCurQuirk = true)
-
-        /** Realtek USB2.0 Audio (0BDA:4BA6) — UAC2 adaptive, 3 alt settings (mps 248/372/496).
-         *  44.1k AND 48k both supported (Salt verified 44.1k output, clockVerified=true).
-         *  Adaptive endpoint auto-tracks host rate via feedback — no SET_CUR needed.
-         *  Hand-rolled USB Host Exclusive. */
-        val REALTEK_4BA6 = DacProfile(0x0BDA, 0x4BA6, "Realtek USB2.0 Audio (0BDA:4BA6)",
-            useSystemRoute = false, lacks44k1Clock = false,
-            featureUnitId = 16, featureUnitChannel = 1, featureUnitChannels = 2,
-            featureUnitMinDb = -65.25f, featureUnitMaxDb = 0.0f, featureUnitResDb = 0.38f,
-            ctlMsgDelayUs = 1000)
-
-        /** Qudelix-5K (0A12:4007) — UAC1 synchronous DAC/AMP.
-         *  Single alt=1 AudioStreaming iface, ISO OUT ep=0x03 mps=576 (full-speed 1ms).
-         *  mps=576 == 96kHz × 24bit × 2ch → wire format is 24-bit S24_3LE.
-         *  No explicit feedback endpoint (0x81/0x89 are HID interrupt) → synchronous,
-         *  streamLoop's "no feedback = maintain timing" path fits.
-         *  Sample rate switched via SET_CUR (single alt, not multi-alt).
-         *  Supports 44.1/48/88.2/96 kHz. Hand-rolled USB Host Exclusive. */
-        val QUDELIX_5K = DacProfile(0x0A12, 0x4007, "Qudelix-5K USB DAC",
-            useSystemRoute = false, lacks44k1Clock = false, wireBits = 24,
-            urbPacketsOverride = 16, ctlMsgDelayUs = 2000)
-
-        /** Moondrop Chu II DSP (31B2:0113) — UAC1 synchronous DSP IEM.
-         *  Multi-alt AudioStreaming OUT iface (id=2):
-         *    alt=1 → ep=0x04 OUT mps=388 (96kHz 16bit 2ch)
-         *    alt=2 → ep=0x04 OUT mps=582 (96kHz 24bit 2ch)
-         *  iface id=1 (ep=0x84 IN) is the mic/record interface, iface id=3 is HID
-         *  (DSP control). Wire format 24-bit S24_3LE. Sample rate via SET_CUR.
-         *  Hand-rolled USB Host Exclusive. */
-        val CHU2_DSP = DacProfile(0x31B2, 0x0113, "Moondrop Chu II DSP",
-            useSystemRoute = false, lacks44k1Clock = false, wireBits = 24,
-            ctlMsgDelayUs = 1000)
-
-        /** CX31993 (0BDA:0023) — 山寨小尾巴（抄 Realtek VID），结构同 TTGK Note：
-         *  iface#1 单 AudioStreaming，alt=1 ep=0x04 mps=196 (16bit) / alt=2 mps=294 (24bit)
-         *  / alt=3 mps=392 (32bit)，HID iface#2。实测在 Oboe system-route 下 Stream OFF
-         *  （内核 ALSA 驱动兼容问题），改走手写 USB Host Exclusive——descriptor 驱动
-         *  自适应可识别该 alt 表（同 201D 同构，201D 已跑通）。 */
-        val CX31993_0BDA_0023 = DacProfile(0x0BDA, 0x0023, "CX31993 (0bda:0023)",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false,
-            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
-
-        /** CX31993 384Khz HIFI AUDIO (31B2:0111) — 用户 DAC（2026-09-29）。
-         *  descriptor 与 TTGK Note / 0BDA:0023 同构（实测 dumpsys）：
-         *    iface id=2 OUT ep=0x04, alt=1/2/3 → mps=196/294/392（16/24/32bit 子槽）
-         *    iface id=1 IN ep=0x84（麦克风），iface id=3 HID（音量）
-         *  UAC2（proto=32），44.1k/48k/96k/176.4k/192k 都在 AudioDevice sampleRates。
-         *  无 profile 时落进 Oboe system-route —— 而这个家族全系"system-route 下
-         *  Stream OFF 无声"，用户实测无声。改走手写 USB Host Exclusive
-         *  （描述符自适应 alt 表，与 201D/0BDA:0023 同构已跑通）。
-         *  FU 音量走 native 通用 UAC2 auto-probe（同 0BDA:0023，不写死）。 */
-        val CX31993_31B2_0111 = DacProfile(0x31B2, 0x0111, "CX31993 384K HIFI (31b2:0111)",
-            useSystemRoute = false, lacks44k1Clock = false, skipSetCur = false,
-            ctlMsgDelayUs = 2000, ifaceDelayUs = 5000)
-
-        // ── Lookup ─────────────────────────────────────────────
-
-        private val byKey: Map<Pair<Int, Int>, DacProfile> = listOf(
-            TTGK_REFERENCE, TTGK_NOTE, TTGK_33D8, TTGK_3382, VID2972_0047, HIFI_A001, REALTEK_4BA6, QUDELIX_5K, CHU2_DSP, CX31993_0BDA_0023, CX31993_31B2_0111
-        ).associateBy { it.vid to it.pid }
-
-        /** Look up a known profile, or return a generic safe default (system-route). */
+        /** Look up / build the merged profile for this VID/PID.
+         *  Quirk (hand) + live descriptor (native auto-detect) merged. */
         fun find(vid: Int, pid: Int): DacProfile {
-            return byKey[vid to pid] ?: DacProfile(vid, pid, "USB DAC (${vid.toString(16)}:${pid.toString(16)})")
+            return DacQuirk.findQuirk(vid, pid).merge(UsbDacManager.getActiveDescriptor())
         }
 
         /** True if this VID/PID is known to lack 44.1 kHz clock hardware. */
@@ -229,11 +314,10 @@ data class DacProfile(
         /** True if this VID/PID should skip SET_CUR in native layer. */
         fun shouldSkipSetCur(vid: Int, pid: Int): Boolean = find(vid, pid).skipSetCur
 
-        /** Correct wire-format bits for this DAC. */
+        /** Correct wire-format bits for this DAC (descriptor-derived or quirk override). */
         fun wireBitsFor(vid: Int, pid: Int): Int = find(vid, pid).wireBits
 
-        /** True if this DAC should use Oboe system-route instead of USB Host Exclusive.
-         *  For known-good DACs (TTGK 33C0) we use hand-rolled Bit-Perfect path. */
+        /** True if this DAC should use Oboe system-route instead of USB Host Exclusive. */
         fun shouldUseSystemRoute(vid: Int, pid: Int): Boolean = find(vid, pid).useSystemRoute
     }
 }

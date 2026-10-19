@@ -567,4 +567,15 @@ Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeClearDebugLog(JN
     if (driver) driver->clearNativeDebugLog();
 }
 
+// ── nativeGetDescriptorProfile ───────────────────────────────────────────
+// [P1 adaptive-DAC] Return the descriptor-derived capability snapshot the native
+// parser built during nativeClaim/open(). Kotlin parses it via DacDescriptor
+// so per-model hand-writing (wireBits / FU / 44.1k support) becomes unnecessary.
+JNIEXPORT jstring JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetDescriptorProfile(JNIEnv* env, jobject) {
+    auto* driver = getDriver();
+    if (!driver) return env->NewStringUTF("");
+    return env->NewStringUTF(driver->getDescriptorProfile());
+}
+
 } // extern "C"

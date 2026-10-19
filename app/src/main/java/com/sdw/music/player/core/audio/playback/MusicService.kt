@@ -375,6 +375,77 @@ class MusicService : MediaLibraryService() {
         }
     }
 
+    // [P2] Silence watchdog for auto-probe (unknown) DACs. After a Host Exclusive
+    // attempt on an unknown DAC, if the native stream isn't actually draining data
+    // (no URB completions / health=wedge) we treat the path as silent/dead and fall
+    // back to the safe Oboe system-route — remembered for the rest of the session.
+    private const val DAC_SILENCE_WINDOW_MS = 3500L
+    private val dacSilenceRunnable = object : Runnable {
+        private var armedGen = -1
+        private var armedVid = 0
+        private var armedPid = 0
+        private var armedIndex = -1
+        private var armedSongs: List<Song>? = null
+        private var baselineCompleted: Long = 0
+
+        fun arm(gen: Int, vid: Int, pid: Int, index: Int, songs: List<Song>, baseline: Long) {
+            armedGen = gen; armedVid = vid; armedPid = pid
+            armedIndex = index; armedSongs = songs; baselineCompleted = baseline
+        }
+        fun reset() {
+            armedGen = -1; armedVid = 0; armedPid = 0; armedIndex = -1
+            armedSongs = null; baselineCompleted = 0
+        }
+
+        override fun run() {
+            val gen = armedGen
+            if (gen < 0) return
+            // Staleness guards: track changed, already forced Oboe, or stream stopped.
+            if (gen != dacPlayGeneration) { reset(); return }
+            if (UsbDacManager.isForcedOboe(armedVid, armedPid)) { reset(); return }
+            if (!UsbDacManager.isStreaming()) { reset(); return }
+            val liv = UsbDacManager.getStreamLiveness() ?: run {
+                handler.postDelayed(this, 400); return   // native not ready, re-poll shortly
+            }
+            val delta = liv.urbCompleted - baselineCompleted
+            // [P2] dead/silent path: no URB completed in the whole window, or native flagged wedge.
+            if (delta <= 0L || liv.health == "wedge") {
+                Log.w(TAG, "DAC auto-probe silence: vid=${armedVid.toString(16)} pid=${armedPid.toString(16)} " +
+                    "delta=$delta health=${liv.health} → fallback Oboe")
+                DebugLog.add(TAG, "DAC 自动探测静音/卡死 → 回退 Oboe 系统路由（本会话该 DAC 不再试 Host 独占）")
+                fallbackToOboeSystemRoute(armedIndex, armedSongs ?: servicePlaylist, "auto-probe 静音")
+                reset()
+            }
+        }
+    }
+
+    /**
+     * [P2] Fall back from a (silently dead) Host Exclusive attempt to the safe Oboe
+     * system-route. Marks the DAC session-Oboe so subsequent tracks skip the probe.
+     */
+    private fun fallbackToOboeSystemRoute(index: Int, songs: List<Song>, reason: String) {
+        val device = UsbDacManager.getDacDevice()
+        if (device != null) UsbDacManager.forceOboeFor(device.vendorId, device.productId)
+        handler.removeCallbacks(dacHealthRunnable)
+        handler.removeCallbacks(dacSilenceRunnable)
+        releaseUsbDacController()
+        UsbDacManager.stopAndRelease()
+        getSharedPreferences("settings", MODE_PRIVATE).edit()
+            .putString("audio_output", "AAudio (Direct)").apply()
+        refreshOboeModeCache()
+        playSongOboeDirect(index, songs)
+        notifySongChanged(songs[index])
+        handler.post {
+            try {
+                android.widget.Toast.makeText(
+                    this@MusicService,
+                    "DAC 自动回退到 Oboe 系统路由（$reason）",
+                    android.widget.Toast.LENGTH_SHORT
+                ).show()
+            } catch (_: Throwable) { /* ignore */ }
+        }
+    }
+
     // Sleep timer
     @Volatile private var sleepTimerEndAt = 0L
     private var sleepTimerMinutes: Long = 0L
@@ -2467,6 +2538,7 @@ private var xfadeBChorusMs = -1L
 
     private fun releaseUsbDacController() {
         handler.removeCallbacks(dacHealthRunnable)
+        handler.removeCallbacks(dacSilenceRunnable)  // [P2]
         DebugLog.add(TAG, "releaseUsbDac: stopDecode (keep DAC claim)")
         usbDacController?.stopDecode()
         usbDacController = null
@@ -3698,9 +3770,13 @@ private var xfadeBChorusMs = -1L
             }
 
             val dacProfile = DacProfile.find(device.vendorId, device.productId)
+            // [P2] 自动决策：被静音看门狗判死的 DAC 本会话直接走 Oboe；否则按 profile 决定路径
+            val useSystemRoute = DacProfile.shouldUseSystemRoute(device.vendorId, device.productId)
+            val dacAutoProbe = dacProfile.autoProbe &&
+                !UsbDacManager.isForcedOboe(device.vendorId, device.productId)
 
             // Path 2: unknown/problem DAC → Oboe system-route (with BIT_PERFECT API on Android 14+)
-            if (dacProfile.useSystemRoute) {
+            if (useSystemRoute) {
                 DebugLog.add(TAG, "playSong[$index]: DAC ${dacProfile.name} → Oboe system-route")
                 val audioManager = getSystemService(Context.AUDIO_SERVICE) as android.media.AudioManager
                 UsbDacManager.dumpDacInfo(device, audioManager)
@@ -3793,6 +3869,7 @@ private var xfadeBChorusMs = -1L
                 if (!UsbDacManager.claimAndStart(device, srcRate, 2, dacProfile.wireBits)) {
                     DebugLog.add(TAG, "playSong[$index]: claim FAIL, fallback Oboe system-route (Salt Player style)")
                     // Salt Player fallback: Oboe without setDeviceId, kernel USB driver auto-routes
+                    UsbDacManager.forceOboeFor(device.vendorId, device.productId)  // [P2] 本会话不再试 Host 独占
                     getSharedPreferences("settings", MODE_PRIVATE).edit().putString("audio_output", "AAudio (Direct)").apply()
                     refreshOboeModeCache()
                     handler.post { playSongOboeDirect(index, songs); notifySongChanged(songs[index]) }
@@ -3826,6 +3903,7 @@ private var xfadeBChorusMs = -1L
                         deepPrebuffer = true
                     } else {
                         DebugLog.add(TAG, "playSong[$index]: cross-rate reclaim FAIL, fallback Oboe system-route (Salt Player style)")
+                        UsbDacManager.forceOboeFor(device2.vendorId, device2.productId)  // [P2] 本会话不再试 Host 独占
                         getSharedPreferences("settings", MODE_PRIVATE).edit().putString("audio_output", "AAudio (Direct)").apply()
                         refreshOboeModeCache()
                         handler.post { playSongOboeDirect(index, songs); notifySongChanged(songs[index]) }
@@ -3879,6 +3957,14 @@ private var xfadeBChorusMs = -1L
                     usbDacController = controller
                     handler.removeCallbacks(dacHealthRunnable)
                     handler.postDelayed(dacHealthRunnable, 5000)
+                    // [P2] 未知 DAC 自动探测：武装静音看门狗（baseline=当前 URB 完成数）
+                    if (dacAutoProbe) {
+                        handler.removeCallbacks(dacSilenceRunnable)
+                        val base = UsbDacManager.getStreamLiveness()?.urbCompleted ?: 0L
+                        dacSilenceRunnable.arm(dacPlayGeneration, device.vendorId, device.productId, index, songs, base)
+                        handler.postDelayed(dacSilenceRunnable, DAC_SILENCE_WINDOW_MS)
+                        DebugLog.add(TAG, "playSong[$index]: auto-probe armed (baseURB=$base, ${DAC_SILENCE_WINDOW_MS}ms)")
+                    }
             val dacProfile = DacProfile.find(UsbDacManager.getDacDevice()?.vendorId ?: 0, UsbDacManager.getDacDevice()?.productId ?: 0)
             controller.playbackWireBits = dacProfile.wireBits
                     // 【方向1】所有分支已保证 native 流未启（claim 后/keep-claim stopMonitor 后/EOS 后均如此），

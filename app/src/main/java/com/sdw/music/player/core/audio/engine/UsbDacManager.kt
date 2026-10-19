@@ -48,6 +48,14 @@ object UsbDacManager {
     @Volatile var activeDescriptor: DacDescriptor? = null
     fun getActiveDescriptor(): DacDescriptor? = activeDescriptor
 
+    // [P2] Session-level auto-probe override: an unknown DAC that the silence
+    // watchdog judged dead/silent is remembered here so the rest of the session
+    // routes straight to Oboe (no repeated Host-Exclusive attempts every track).
+    private val forcedOboeDacs = java.util.concurrent.ConcurrentHashMap.newKeySet<Pair<Int, Int>>()
+    fun forceOboeFor(vid: Int, pid: Int) { forcedOboeDacs.add(vid to pid) }
+    fun isForcedOboe(vid: Int, pid: Int): Boolean = forcedOboeDacs.contains(vid to pid)
+    fun clearForcedOboe() { forcedOboeDacs.clear() }
+
     private data class PendingClaim(
         val device: UsbDevice,
         val sampleRate: Int,
@@ -501,6 +509,33 @@ object UsbDacManager {
     fun clearNativeDebugLog() { if (isNativeLoaded) try { nativeClearDebugLog() } catch (_: Throwable) {} }
     fun getStats(): String? = if (isNativeLoaded) nativeGetStats() else null
 
+    /**
+     * [P2] Structured liveness snapshot parsed from [getStats] — used by the
+     * silence watchdog to decide whether the Host Exclusive path is actually
+     * draining data to the DAC.
+     *  - [health]        native healthState ("stable" | "wedge" | "idle" | ...)
+     *  - [urbCompleted]  monotonic count of completed isochronous URBs
+     *  - [ringAvailFrames] current ring-buffer fill (frames)
+     */
+    data class DacLiveness(val health: String, val urbCompleted: Long, val ringAvailFrames: Int)
+    fun getStreamLiveness(): DacLiveness? {
+        if (!isNativeLoaded) return null
+        val s = nativeGetStats() ?: return null
+        val completed = runCatching {
+            val i = s.indexOf("completed=")
+            if (i < 0) 0L else s.substring(i + 10).takeWhile { it.isDigit() }.toLongOrNull() ?: 0L
+        }.getOrDefault(0L)
+        val health = runCatching {
+            val i = s.indexOf("Health=")
+            if (i < 0) "" else s.substring(i + 7).substringBefore(' ').substringBefore('|').trim()
+        }.getOrDefault("")
+        val ring = runCatching {
+            val i = s.indexOf("Ring avail=")
+            if (i < 0) -1 else s.substring(i + 11).takeWhile { it.isDigit() }.toIntOrNull() ?: -1
+        }.getOrDefault(-1)
+        return DacLiveness(health, completed, ring)
+    }
+
     fun setVolume(v: Float) {
         // 【V3.2.8】立方 audio taper：线性 1/15 档 = -23dB 对灵敏耳机仍很响；
         // v3 后最小档 ≈ -70dB，音量曲线接近人耳感知
@@ -793,6 +828,7 @@ object UsbDacManager {
                         DebugLog.add(TAG, "hotplug: USB device detached, clearing cache")
                         cachedUsbDevice = null
                         lastFindDacsTime = 0L
+                        clearForcedOboe()  // [P2] drop any session Oboe override; next device starts fresh
                     }
                     UsbManager.ACTION_USB_DEVICE_ATTACHED -> {
                         DebugLog.add(TAG, "hotplug: USB device attached, clearing cache for re-scan")

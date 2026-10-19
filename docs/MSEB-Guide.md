@@ -69,10 +69,18 @@ Limits low / mid / high **independently** — guards against clipping, protects 
 ### AutoEQ Correction Strength
 Blends between **your own tuning** and the **full AutoEQ correction**. Max it for the measured headphone curve; lower it to keep your personal taste.
 
-### DTS Surround
+### DTS Surround (legacy M/S)
 - Surround level / Height (turns "wider" into "in front of / behind you").
 - Three modes: Theater / Immersive / Wide.
 - Over Bluetooth the high end is reduced — use **LDAC / LHDC** for the full effect. Syncs with the play-screen menu and the control-bar pill.
+- **Superseded by HRIR Spatial** (below): DTS is a parametric M/S approximation; the newer HRIR mode is real-measured binaural and sounds closer to a true soundfield. The two are mutually exclusive — only one spatial mode is active at a time.
+
+### HRIR Spatial (recommended)
+Real-measured **binaural surround** that replaces DTS. A virtual 5.1 ring (FL/FR/C/SL/SR) is routed through its own Resonance-style partitioned-FFT **HRIR convolver** and summed to L/R, using the IRCAM LISTEN IRC_1002_C measured dataset (187 directions × 256 taps @ 48 kHz) with direction interpolation.
+- **Drag the 3D sound-field panner** on the MSEB screen: horizontal = azimuth, vertical = elevation (drives `hrtf_field_yaw` / `hrtf_field_pitch`).
+- Optional **Room Reverb** and near/far **Distance** for source placement.
+- Mutually exclusive with DTS Surround and the 5-point HRTF Probe.
+- Over Bluetooth the high end is reduced — use **LDAC / LHDC** for the full effect.
 
 ### Device Auto-Calibration
 Automatically applies the matching AutoEQ profile for the **currently connected headphone / DAC** — no manual curve hunting.
@@ -98,14 +106,14 @@ Automatically applies the matching AutoEQ profile for the **currently connected 
 | Old track with harsh sibilance | Slider 6 "Sibilance" left + Sliders 7/8 notch the exact frequency |
 | Vocals / podcasts | Vocal right (forward) + Thickness slightly thick + Imaging focused |
 | Live / orchestral | Space Reverb on, Soundstage slightly wide |
-| Games / movies, want surround | DTS Surround on, Height up |
+| Games / movies, want surround | **HRIR Spatial** on + drag the field (recommended); or DTS Surround on, Height up |
 
 ---
 
 ## 7. Tips & troubleshooting
 
 - **Some outputs don't support MSEB**: you'll see "Not available on this output" — normal; switch back to a supported source.
-- **Bluetooth SBC cuts above 16k**: use Dynamic EQ to restore transients and the limiter to guard the floor; switch to LDAC / LHDC for the full DTS high-end.
+- **Bluetooth SBC cuts above 16k**: use Dynamic EQ to restore transients and the limiter to guard the floor; switch to LDAC / LHDC for the full HRIR / DTS high-end.
 - **Messy tuning**: tap **Reset to flat** to zero everything.
 - **Want pure original**: switch to **Original Bit-Perfect (A)**.
 - **New phone**: the Settings backup export includes MSEB — import to restore.

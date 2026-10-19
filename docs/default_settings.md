@@ -107,6 +107,8 @@
 | `hrtf_reverb_enabled (房间混响)` | false |
 | `preset_name (预设名)` | "" (手动) |
 
+> 说明：DTS 环绕（`dts_*`）与 HRIR 空间化（`hrtf_spatial_*`）为**互斥**的两种双耳/环绕方案，同一时刻只生效其一。`be14058` 新增的 **HRIR 空间化**为真实测量双耳方案（IRCAM LISTEN 实测 HRIR 卷积），听感更贴近真实声场，**推荐优先使用**；DTS 环绕为旧 M/S 参数化近似路径，仍保留可切换。当前默认仅 `dts_enabled` 为开，HRIR 空间化默认关。
+
 
 ## 三、均衡器 (EqualizerManager → `equalizer_prefs` 存储)
 

@@ -69,10 +69,18 @@
 ### AutoEQ 校正强度 Correction Strength
 在「你自己的调音」和「完整 AutoEQ 校正」之间混合。想完全按耳机实测曲线就拉满，想保留个人口味就调低。
 
-### DTS 环绕 DTS Surround
+### DTS 环绕 DTS Surround（旧路径 M/S）
 - Surround level（环绕量）/ Height（高度感，把「更宽」变成「在你前 / 后方」）。
 - 三档：Theater 影院 / Immersive 沉浸 / Wide 宽。
 - 蓝牙下高频会被压缩，建议用 **LDAC / LHDC** 才能吃满效果；与播放页菜单、控制栏 pill 同步。
+- **已被 HRIR 空间化取代（见下）**：DTS 是 M/S 参数化近似；新的 HRIR 方案是真实测量双耳渲染，听感更接近真实声场。两者互斥，同一时刻只能开一个环绕模式。
+
+### HRIR 空间化（推荐）
+真实测量的**双耳环绕**，替换 DTS。虚拟 5.1 环（FL/FR/C/SL/SR）各走一路 Resonance 式分块 FFT **HRIR 卷积器**，求和到左右耳——数据来自 IRCAM LISTEN IRC_1002_C 实测集（187 方向 × 256 taps @ 48 kHz），做方向插值。
+- MSEB 页面可**拖动 3D 声场**：水平 = 方位 azimuth、垂直 = 俯仰 elevation（驱动 `hrtf_field_yaw` / `hrtf_field_pitch`）。
+- 可选**房间混响**与近/远距离（`hrtf_field_distance`）做声源摆位。
+- 与 DTS 环绕、5 点 HRTF 探针**互斥**。
+- 蓝牙下高频会被压缩，建议用 **LDAC / LHDC** 才能吃满效果。
 
 ### 设备自动校准 Device Auto-Calibration
 对当前连接的耳机 / DAC **自动套用匹配的 AutoEQ 配置**，不用手动找曲线。
@@ -98,14 +106,14 @@
 | 齿音重的老歌 | 第 6 根「齿音」往左 + 第 7/8 根精准削对应频点 |
 | 人声 / 播客 | 人声(Vocal)往右(前) + 厚度略厚 + 结像聚焦 |
 | 现场 / 交响 | 空间混响开、声场略宽 |
-| 游戏 / 电影想包围 | DTS 环绕开、Height 调高 |
+| 游戏 / 电影想包围 | **HRIR 空间化**开 + 拖动声场（推荐）；或 DTS 环绕开、Height 调高 |
 
 ---
 
 ## 七、小贴士与排错
 
 - **某些输出不支持 MSEB**：会显示「当前输出不可用 / Not available on this output」，属正常现象，换回支持的输出来源即可。
-- **蓝牙 SBC 砍 16k 以上**：用动态 EQ 补瞬态、限幅守住下限；切 LDAC / LHDC 才能吃满 DTS 高频效果。
+- **蓝牙 SBC 砍 16k 以上**：用动态 EQ 补瞬态、限幅守住下限；切 LDAC / LHDC 才能吃满 HRIR / DTS 高频效果。
 - **调乱了**：点 **Reset to flat** 一键归零。
 - **想完全原汁原味**：切到 **Original Bit-Perfect (A)**。
 - **换手机**：设置里的备份导出含 MSEB，导入即恢复。

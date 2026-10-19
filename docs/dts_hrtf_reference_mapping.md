@@ -9,6 +9,8 @@
 > 1. **libbs2b 实际是 MIT/X11 许可**（源码头注释是 "Permission is hereby granted, free of charge…"），不是 GPLv2。闭源 APK 可直接 vendoring 那 ~30KB 的 crossfeed，无传染风险。
 > 2. **OpenAL Soft 的 HRTF 在 `core/hrtf.cpp` + `core/mixer/hrtfbase.h`**（仓库已重构，旧 `alc/hrtf.cpp` 路径不再准确）。它是 **LGPL**，只能动态链接 `.so`，不能把源码静态并进你的二进制。
 
+> 📌 **本文件为「第 1 步」预实现分析（历史参考）**：文中规划的实测量 HRIR 卷积方案，已由提交 `be14058`（`feat(hrtf): real-measured multi-speaker binaural surround replacing DTS`）落地为 **HRIR 空间化** 引擎（Resonance 式分块 FFT 卷积器 + IRCAM LISTEN IRC_1002_C 实测数据集），**实测量双耳环绕已替换原 DTS M/S 路径**。下方 DTS 实现分析保留作为历史对照。
+
 ---
 
 ## 0. 你现有实现的"体质"（已读代码，事实）

@@ -2770,24 +2770,6 @@ private var xfadeBChorusMs = -1L
     }
     // [V8.x] Album art LruCache �� avoids repeated disk I/O on every notification refresh
     private val coverCache = android.util.LruCache<String, android.graphics.Bitmap>(4)
-    private fun loadCoverAsync(uri: String, onLoaded: (android.graphics.Bitmap?) -> Unit) {
-        try {
-            val resolvedUri = android.net.Uri.parse(uri)
-            val options = android.graphics.BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            contentResolver.openInputStream(resolvedUri)?.use { s -> android.graphics.BitmapFactory.decodeStream(s, null, options) }
-            val scale = maxOf(options.outWidth, options.outHeight) / 512
-            val options2 = android.graphics.BitmapFactory.Options().apply { inSampleSize = if (scale > 1) scale else 1 }
-            val bitmap = contentResolver.openInputStream(resolvedUri)?.use { s ->
-                android.graphics.BitmapFactory.decodeStream(s, null, options2)
-            }
-            if (bitmap != null) {
-                try { coverCache.put(uri, bitmap) } catch (_: Exception) { }
-            }
-            android.os.Handler(android.os.Looper.getMainLooper()).post { onLoaded(bitmap) }
-        } catch (_: Exception) {
-            android.os.Handler(android.os.Looper.getMainLooper()).post { onLoaded(null) }
-        }
-    }
 
     /** ??V7.XXEqualizeronAudioSessionIdChanged */
     
@@ -4461,20 +4443,6 @@ private var xfadeBChorusMs = -1L
     // =====================================================================
     // 【DSP 效果接口区】MSEB/AutoEQ/5段EQ/M-S声场/瞬态/压缩/响度/Crossfeed/蓝牙预补偿 全部 setter 群
     // =====================================================================
-    private fun applyDspEqIfNeeded() {
-        val eqPresetId = EqualizerManager.getCurrentPresetId(this)
-        if (eqPresetId == "steven_special" && oboeDirectPlayer != null) {
-            oboeDirectPlayer?.setDspEq(
-                enabled = true,
-                highShelfFreq = 8000f, highShelfDb = 2.0f, highShelfQ = 0.707f,
-                peakingFreq = 12000f, peakingDb = 2.0f, peakingQ = 2.0f,
-                preGainDb = 0.0f
-            )
-            Log.i(TAG, "DSP EQ enabled: Steven Special (High-Shelf 8kHz/+2dB + Air 12kHz/+2dB)")
-        } else {
-            oboeDirectPlayer?.setDspEq(enabled = false)
-        }
-    }
 
     /** ??v6.29??DSP EQ On??( EQ preset) */
     fun setDspEqEnabled(enabled: Boolean) {
@@ -8309,33 +8277,6 @@ val displayArtist = if (song.artist.isBlank() || SongRepository.isPlaceholderArt
     fun isVisualizerReady(): Boolean = visualizerManager.isReady()
 
     // [v7.122] Register receiver to auto-map system standby bucket to idle_level
-    private fun registerStandbyBucketReceiver() {
-        if (standbyBucketReceiver != null) return
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
-
-        val receiver = object : BroadcastReceiver() {
-            override fun onReceive(context: Context, intent: Intent) {
-                applyStandbyBucketToIdleLevel()
-            }
-        }
-        try {
-            // ACTION_APPLICATION_STANDBY_BUCKET_CHANGED exposed as SDK constant from API 31
-            @Suppress("InlinedApi")
-            val filter = IntentFilter("android.os.action.APPLICATION_STANDBY_BUCKET_CHANGED")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                registerReceiver(receiver, filter, RECEIVER_EXPORTED)
-            } else {
-                @Suppress("UnsafeRegisteredReceiver")
-                registerReceiver(receiver, filter)
-            }
-            standbyBucketReceiver = receiver
-            Log.d(TAG, "Standby bucket receiver registered")
-            // Also apply immediately on registration
-            applyStandbyBucketToIdleLevel()
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to register standby bucket receiver: ${e.message}")
-        }
-    }
 
     private fun unregisterStandbyBucketReceiver() {
         try {
@@ -8587,31 +8528,5 @@ val displayArtist = if (song.artist.isBlank() || SongRepository.isPlaceholderArt
         }
     }
 
-    // [v7.122] Read system standby bucket and write corresponding idle_level
-    private fun applyStandbyBucketToIdleLevel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.P) return
-        try {
-            val usm = getSystemService(Context.USAGE_STATS_SERVICE) as? UsageStatsManager ?: return
-            val bucket = usm.appStandbyBucket
-            val mappedLevel = when (bucket) {
-                UsageStatsManager.STANDBY_BUCKET_ACTIVE -> null  // don't override, user may have set a preference
-                UsageStatsManager.STANDBY_BUCKET_WORKING_SET -> "常用"
-                UsageStatsManager.STANDBY_BUCKET_FREQUENT -> "频繁"
-                UsageStatsManager.STANDBY_BUCKET_RARE -> "偶尔"
-                UsageStatsManager.STANDBY_BUCKET_RESTRICTED -> "受限"
-                else -> "偶尔"
-            }
-            if (mappedLevel != null) {
-                val prefs = getSharedPreferences("sdw_music_prefs", MODE_PRIVATE)
-                val current = prefs.getString("idle_level", "频繁") ?: "频繁"
-                if (current != mappedLevel) {
-                    prefs.edit().putString("idle_level", mappedLevel).apply()
-                    Log.d(TAG, "Auto-set idle_level to $mappedLevel (system bucket=$bucket)")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to apply standby bucket: ${e.message}")
-        }
-    }
 }
 

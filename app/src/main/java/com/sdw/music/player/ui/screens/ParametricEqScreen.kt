@@ -635,7 +635,7 @@ private fun PeqResponseCurve(preset: Preset, modifier: Modifier = Modifier) {
     val gridLine = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f)
     val gridZero = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.38f)
     val labelColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)
-    Canvas(modifier = modifier.background(surface, RoundedCornerShape(12.dp))) {
+    Canvas(modifier = modifier.background(surface, SDWShapes.Media)) {
         val w = size.width; val h = size.height
         val fMin = 20.0; val fMax = 20000.0
         val gMin = -18.0; val gMax = 18.0

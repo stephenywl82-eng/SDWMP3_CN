@@ -43,6 +43,8 @@ import com.sdw.music.player.ui.components.SectionHeader
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.components.springPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import com.sdw.music.player.ui.animation.ListDetailKeys
+import com.sdw.music.player.ui.animation.sharedCoverArt
 import com.sdw.music.player.ui.theme.*
 import com.sdw.music.player.ui.theme.SDWShape
 import com.sdw.music.player.ui.theme.SDWSpace
@@ -208,6 +210,7 @@ private fun AlbumGridItem(
     ) {
         Box(
             modifier = Modifier.fillMaxWidth().aspectRatio(1f).clip(shape)
+                .sharedCoverArt(ListDetailKeys.albumArt(albumName), clipShape = ListDetailKeys.AlbumFlightShape)
         ) {
             // DefaultCoverImage underneath, actual cover on top
             DefaultCoverImage(

@@ -114,6 +114,20 @@ object SharedCoverKeys {
 }
 
 /**
+ * 列表 → 详情共享飞行（专辑墙 → 专辑详情）的稳定 key 与飞行圆角。
+ *
+ * key 每项唯一（按专辑名）：点到哪张飞哪张，同屏其它卡片不参与，天然无冲突。
+ * 飞行圆角用百分比：随封面尺寸连续缩放（网格大封面 → 详情 96dp 小封面），
+ * 飞行全程半径连续变化，不会出现「大方形啪一下变圆」的末帧跳变。
+ */
+object ListDetailKeys {
+    fun albumArt(albumName: String): String = "album-art-$albumName"
+
+    /** 两端必须用同一个 Shape 实例语义（等值百分比），飞行中圆角才连续。 */
+    val AlbumFlightShape: Shape = RoundedCornerShape(percent = 12)
+}
+
+/**
  * V8.52 Live predictive-back drag progress (0..1), published by the player destination.
  *
  * The retired hand-rolled overlay used to translate the cover with the finger during a

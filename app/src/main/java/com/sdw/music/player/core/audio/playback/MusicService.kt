@@ -190,6 +190,44 @@ class MusicService : MediaLibraryService() {
     private var stopDelayRunnable: Runnable? = null
     private var isDestroyed = false
 
+    // [fix18 省电] 暂停后延迟退出前台服务计量（保留通知）。
+    // 背景：batterystats 实测 fgs 前台服务 12h55m，而 USB DAC 实际播放仅 1h53m ——
+    // 暂停后 MusicService 仍持前台服务（updateNotification 每次都 startForeground），
+    // 白挂 ~11h 前台、fgs 计费 123mAh。暂停 5 分钟后 DETACH（通知保留、媒体控制仍可用），
+    // 恢复播放时立即重新 startForeground。
+    @Volatile private var fgDetached = false
+    private var detachFgRunnable: Runnable? = null
+
+    private fun scheduleForegroundDetach() {
+        cancelForegroundDetach()
+        if (fgDetached) return
+        detachFgRunnable = Runnable {
+            if (fgDetached || isDestroyed) return@Runnable
+            fgDetached = true
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    stopForeground(STOP_FOREGROUND_DETACH)
+                } else {
+                    @Suppress("DEPRECATION")
+                    stopForeground(false)
+                }
+                Log.d(TAG, "fgs: detached after idle pause (battery saving, notification kept)")
+            } catch (e: Exception) {
+                Log.e(TAG, "fgs: detach failed: ${e.message}")
+            }
+        }
+        handler.postDelayed(detachFgRunnable!!, 5 * 60 * 1000L)
+    }
+
+    private fun cancelForegroundDetach() {
+        detachFgRunnable?.let { handler.removeCallbacks(it) }
+        detachFgRunnable = null
+        if (fgDetached) {
+            fgDetached = false
+            try { updateNotification() } catch (_: Exception) {}
+        }
+    }
+
     // =====================================================================
     // 【v8.165 省电】crossfade 监控专用后台线程
     // ---------------------------------------------------------------------
@@ -379,7 +417,7 @@ class MusicService : MediaLibraryService() {
     // attempt on an unknown DAC, if the native stream isn't actually draining data
     // (no URB completions / health=wedge) we treat the path as silent/dead and fall
     // back to the safe Oboe system-route — remembered for the rest of the session.
-    private const val DAC_SILENCE_WINDOW_MS = 3500L
+    private val DAC_SILENCE_WINDOW_MS = 3500L
     private val dacSilenceRunnable = object : Runnable {
         private var armedGen = -1
         private var armedVid = 0
@@ -2448,6 +2486,14 @@ private var xfadeBChorusMs = -1L
     // =====================================================================
     @Volatile private var usbDacController: UsbDacPlaybackController? = null
     private var dacPlayGeneration: Int = 0  // [V4.0.1] invalidate stale onCompletion
+    // [Hotplug] Remember whether playback was active through the DAC so we can auto-resume
+    // after the DAC is re-plugged (mirrors the Bluetooth reconnect auto-resume pattern).
+    private var wasPlayingBeforeDacLoss: Boolean = false
+    private var dacLossPositionMs: Long = 0L
+    // [Hotplug] True only between a DAC play() and an explicit pause()/stop(). The native layer
+    // flips usbDacController.isPlaying to false almost immediately on USB disconnect, so we CANNOT
+    // trust isPlaying() inside the detach handler — this durable flag captures the real intent.
+    private var dacPlayActive: Boolean = false
     // 【V9.02 续】DAC 初始化「在途合并」闸门：background 化后，快速连点 / 重复回调会在极短窗口内
     // 触发两次完整 open()+play()+DSP 重发（双 controller 会话），既重复耗时又造成 16↔24 协商抖动爆音。
     // dacInitInFlight 保证同一时刻只有一路 DAC 初始化在跑；dacInitPendingIndex 缓存最后连点的目标，
@@ -2542,6 +2588,7 @@ private var xfadeBChorusMs = -1L
         DebugLog.add(TAG, "releaseUsbDac: stopDecode (keep DAC claim)")
         usbDacController?.stopDecode()
         usbDacController = null
+        dacPlayActive = false  // [Hotplug] controller torn down -> no longer actively playing through DAC
         releaseDacWakeLock()
     }
 
@@ -2713,6 +2760,35 @@ private var xfadeBChorusMs = -1L
 
         override fun handleSetRepeatMode(repeatMode: Int): ListenableFuture<*> {
             this@MusicService.setRepeatMode(repeatMode)
+            invalidateState()
+            return Futures.immediateVoidFuture()
+        }
+
+        // ===== [Android Auto] 车机点歌后的控制器指令 =====
+        // 播放已由 MediaLibrarySession.onAddMediaItems → handleAutoMediaId 权威执行，
+        // 以下 handle 只做「投影确认」，防止 SimpleBasePlayer 默认实现返回失败 future
+        // 导致车机 UI 弹「无法播放」（声音其实已在播）。
+        override fun handleSetMediaItems(
+            mediaItems: MutableList<MediaItem>,
+            startIndex: Int,
+            startPositionMs: Long
+        ): ListenableFuture<*> {
+            val songs = this@MusicService.servicePlaylist.ifEmpty { SongRepository.getSongs() }
+            if (startIndex in songs.indices && startIndex != MusicService.currentIndex) {
+                this@MusicService.playSong(startIndex)
+            }
+            invalidateState()
+            return Futures.immediateVoidFuture()
+        }
+
+        override fun handlePrepare(): ListenableFuture<*> {
+            invalidateState()
+            return Futures.immediateVoidFuture()
+        }
+
+        override fun handleStop(): ListenableFuture<*> {
+            // 车机/系统 stop：只停播放，不杀 Service（通知栏与 DAC claim 保留）
+            this@MusicService.pause()
             invalidateState()
             return Futures.immediateVoidFuture()
         }
@@ -2961,11 +3037,15 @@ private var xfadeBChorusMs = -1L
                 // 于是整场播放共用同一枚增益（新歌沿用上一首的 ReplayGain 修正量）——
                 // 这正是"切歌后音量不对/某首特别响"的根因。LoudnessTags.read 是文件 IO，
                 // 走后台线程；applyNormalization 只是 native setter，安全。
+                // [V9.20p] DAC 独占模式跳过：bit-perfect 路径 NormGain 强制 0dB（见下方日志），
+                // 扫了也不下发，白扫文件。
                 runCatching {
                     val svc = instance
-                    if (svc != null) svc.analysisScope.launch {
-                        runCatching { svc.refreshNormalization() }
-                            .onFailure { android.util.Log.w("MusicService", "norm refresh: ${it.message}") }
+                    if (svc != null && !com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed()) {
+                        svc.analysisScope.launch {
+                            runCatching { svc.refreshNormalization() }
+                                .onFailure { android.util.Log.w("MusicService", "norm refresh: ${it.message}") }
+                        }
                     }
                 }
                 // 【V8.386】DJ 模式预热能量包络 + 尾奏/Drop（纯 Kotlin，不建 MediaCodec）。
@@ -3288,6 +3368,17 @@ private var xfadeBChorusMs = -1L
 
         // [V3.3.7] ����ʱ��ͣ FFT ���ӻ������� CPU ���ģ���Ӱ�� DAC ���ţ�
         registerScreenOffReceiver()
+        // [V9.20 ⑥] 音量保护：注册响度预警监听（仅前台 + 非 bit-perfect + 达阈值时弹 toast，
+        // 30s 内去重由 UsbDacManager.checkLoudPlayback 负责）。native 驱动不被触碰。
+        UsbDacManager.loudWarningListener = { level, msg ->
+            if (isAppForeground && level >= UsbDacManager.LoudPlaybackPolicy.HIGH) {
+                handler.post {
+                    try {
+                        android.widget.Toast.makeText(this@MusicService, msg, android.widget.Toast.LENGTH_LONG).show()
+                    } catch (_: Throwable) { /* ignore */ }
+                }
+            }
+        }
         registerPhoneStateListener()
         // 【V8.361】蓝牙耳机戴回自动恢复（与电话监听同一生命周期）
         registerBtRestoreReceiver()
@@ -3500,6 +3591,45 @@ private var xfadeBChorusMs = -1L
         if (isUsbExclusiveMode()) {
             UsbDacManager.init(this)
             Log.d(TAG, "USB DAC Exclusive mode initialized")
+        }
+
+        // [Hotplug] Auto (re)claim the DAC and resume playback when it is (re)plugged, so a
+        // DAC hot-attach no longer requires an app restart to start playing. Mirror the BT
+        // reconnect resume: only resume if the DAC was genuinely playing before it was removed.
+        UsbDacManager.onDacDetached = {
+            // Capture intent from the durable flag (NOT isPlaying(), which the native layer flips
+            // to false the instant the USB bus drops — that would race the broadcast and miss it).
+            wasPlayingBeforeDacLoss = dacPlayActive && UsbDacManager.isClaimed() && usbDacController != null
+            dacLossPositionMs = usbDacController?.audiblePositionMs ?: 0L
+            Log.i(TAG, "DAC detached (was playing=$wasPlayingBeforeDacLoss @ ${dacLossPositionMs}ms) -> will auto-resume on reattach")
+        }
+        UsbDacManager.onDacAttached = {
+            handler.post {
+                tryClaimUsbDac()
+                if (!wasPlayingBeforeDacLoss) {
+                    Log.d(TAG, "DAC attached but not playing before loss, skip auto-resume")
+                    return@post
+                }
+                // Claim may need a USB-permission round-trip; poll briefly, then resume.
+                var attempts = 0
+                fun check() {
+                    val claimed = UsbDacManager.isClaimed() && usbDacController != null
+                    if (claimed) {
+                        wasPlayingBeforeDacLoss = false
+                        if (!isPlaying()) {
+                            val idx = currentIndex
+                            Log.i(TAG, "DAC reattached & claimed, resuming playback @ ${dacLossPositionMs}ms")
+                            playSong(idx)
+                            if (dacLossPositionMs > 500) usbDacController?.seekTo(dacLossPositionMs)
+                        }
+                    } else if (attempts++ < 25) {
+                        handler.postDelayed({ check() }, 200)
+                    } else {
+                        Log.w(TAG, "DAC reattach: claim not ready after retries, giving up auto-resume")
+                    }
+                }
+                handler.postDelayed({ check() }, 200)
+            }
         }
 
         // [V8.x] Register USB DAC hotplug callback
@@ -3739,8 +3869,13 @@ private var xfadeBChorusMs = -1L
     // 【播放路由区】playSong 三分路(DAC独占/Oboe直连/ExoPlayer兜底) / playSongById / 队列管理
     // =====================================================================
     fun playSong(index: Int) {
-        // [v7.113] ��ʼ����ʱ������Ƶ����
+        // [fix18 省电] 新起播：撤销暂停退前台计时并重建前台服务
+        cancelForegroundDetach()
+        // [v7.113] 切歌：重置高音量提示去重，使每首歌最多提示一次
+        UsbDacManager.resetLoudWarn()
+        // [v7.113] 初始化时请求音频焦点
         requestAudioFocusIfNeeded(this)
+        dacPlayActive = false  // [Hotplug] reset; only set true again if this play actually goes through the DAC
 
         val songs = servicePlaylist.ifEmpty { SongRepository.getSongs() }
         Log.d(TAG, "playSong: index=$index, songsCount=${songs.size}, playlistSource=$playlistSource")
@@ -3852,6 +3987,8 @@ private var xfadeBChorusMs = -1L
             // up as back-to-back underruns right after the clock re-lock. 500ms of ring
             // absorbs it. Same-rate / first-claim paths keep the fast 200ms target.
             var deepPrebuffer = false
+            // [V9.20 ⑤] keep-claim 模式下标记，延迟到 controller.open 之后再做会话复用判定
+            var keepClaim = false
             val dacSession = usbDacController?.sessionState?.name
             DebugLog.add(TAG, "playSong[$index]: ${dacProfile.name} Bit-Perfect, claimed=$dacClaimed running=$dacRunning session=$dacSession")
 
@@ -3865,8 +4002,8 @@ private var xfadeBChorusMs = -1L
                     handler.post { playSongFallbackExo(index, songs) }
                     return@Thread
                 }
-                DebugLog.add(TAG, "playSong[$index]: claiming DAC sr=$srcRate bits=${dacProfile.wireBits}")
-                if (!UsbDacManager.claimAndStart(device, srcRate, 2, dacProfile.wireBits)) {
+                DebugLog.add(TAG, "playSong[$index]: claiming DAC sr=$srcRate bits=${UsbDacManager.getSourceBitDepth(song)}")
+                if (!UsbDacManager.claimAndStart(device, srcRate, 2, UsbDacManager.getSourceBitDepth(song))) {
                     DebugLog.add(TAG, "playSong[$index]: claim FAIL, fallback Oboe system-route (Salt Player style)")
                     // Salt Player fallback: Oboe without setDeviceId, kernel USB driver auto-routes
                     UsbDacManager.forceOboeFor(device.vendorId, device.productId)  // [P2] 本会话不再试 Host 独占
@@ -3897,26 +4034,24 @@ private var xfadeBChorusMs = -1L
                     UsbDacManager.stopAndRelease()
                     UsbDacManager.findDacs()
                     val device2 = UsbDacManager.getDacDevice()
-                    val bits = DacProfile.wireBitsFor(device2?.vendorId ?: 0, device2?.productId ?: 0)
+                    val bits = UsbDacManager.getSourceBitDepth(song)
                     if (device2 != null && UsbDacManager.claimAndStart(device2, newRate, 2, bits)) {
                         DebugLog.add(TAG, "playSong[$index]: cross-rate reclaim OK")
                         deepPrebuffer = true
                     } else {
                         DebugLog.add(TAG, "playSong[$index]: cross-rate reclaim FAIL, fallback Oboe system-route (Salt Player style)")
-                        UsbDacManager.forceOboeFor(device2.vendorId, device2.productId)  // [P2] 本会话不再试 Host 独占
+                        if (device2 != null) UsbDacManager.forceOboeFor(device2.vendorId, device2.productId)  // [P2] 本会话不再试 Host 独占
                         getSharedPreferences("settings", MODE_PRIVATE).edit().putString("audio_output", "AAudio (Direct)").apply()
                         refreshOboeModeCache()
                         handler.post { playSongOboeDirect(index, songs); notifySongChanged(songs[index]) }
                         return@Thread
                     }
                 } else {
-                    // 【V8.21 fix】手动切歌 same-rate keep-claim：stopMonitor() 内部已 pauseStream
-                    // + resetRingBuffer + releaseResources（controller → EOS_HOLD 语义）。
-                    // 随后新建 controller open()+play(streamAlreadyRunning=false) 走完整
-                    // startStreaming（native keep-stream 幂等重启）。
-                    usbDacController?.stopMonitor()
-                    usbDacController = null
-                    DebugLog.v(TAG, "playSong[$index]: DAC keep-claim, monitor killed, play() will restart stream")
+                    // 【V8.21 fix】手动切歌 same-rate keep-claim。
+                    // [V9.20 ⑤] 不再此处立即 stopMonitor（会 pauseStream 杀掉活动流，无法判定能否复用）；
+                    // 改为标记 keepClaim，延迟到 controller.open 拿到新轨格式后，再做会话复用判定。
+                    keepClaim = true
+                    DebugLog.v(TAG, "playSong[$index]: DAC keep-claim (defer stopMonitor until reuse decision)")
                 }
             } else {
                 // claim 保留但流已停（EOS 自动续播 / 暂停恢复 / 上轮 keep-claim 后）：
@@ -3941,11 +4076,23 @@ private var xfadeBChorusMs = -1L
                         }
                     },
                     onError = { msg ->
-                        DebugLog.add(TAG, "USB DAC error: $msg")
+                        // 【fix15】代际过滤：旧 controller(如上一首 FLAC 的 neriPull 线程，
+                        // stopMonitor 只 join 600ms 而 pushPcm stall 超时 2s，线程未死透)的
+                        // 延迟报错曾把全局播放状态毒化成停止 → 用户看到"新歌(MP3)无法播放"
+                        // (其实新曲在播，UI 被旧线程停掉)。与 onCompletion 同样只认当代。
+                        val capturedGen = dacPlayGeneration
+                        DebugLog.add(TAG, "USB DAC error: $msg (gen=$capturedGen, current=$dacPlayGeneration)")
                         // 【修复】解码异常不自动切歌、不 fallback ExoPlayer（用户明确不要）。
                         // 解码线程 finally 已 releaseResources + isPlaying=false，流自然停住。
                         // 保持静默，交给用户手动操作，避免「报错→切下一首」级联。
-                        handler.post { notifyPlayStateChanged(false) }
+                        handler.post {
+                            if (dacPlayGeneration == capturedGen) {
+                                dacPlayActive = false  // [Hotplug] playback died -> not eligible for auto-resume
+                                notifyPlayStateChanged(false)
+                            } else {
+                                android.util.Log.w(TAG, "USB DAC: stale onError ignored (gen=$capturedGen, current=$dacPlayGeneration)")
+                            }
+                        }
                     }
                 )
                 // [V3.3.4] flac/wav: open() reads the true rate itself (STREAMINFO/RIFF);
@@ -3953,7 +4100,21 @@ private var xfadeBChorusMs = -1L
                 val srcRate = if (actualPath.endsWith(".flac", true) || actualPath.endsWith(".wav", true)) 0
                               else UsbDacManager.getSourceSampleRate(currentSong)
                 DebugLog.add(TAG, "USB DAC: opening ${currentSong.title} srcRate=$srcRate (0=self-detect)")
+                // 【V9.20af-关键修复】native 单例解码格式(FLAC/ALAC)：controller.open() 会立即把进程级
+                // 全局解码器 gFlac/gAlac 换成本曲文件。若先 open 再停旧 controller，旧 controller 的
+                // releaseResources() 会执行 flacStop/alacStop —— 它操作的是这个已被换上的【新曲】全局解码器，
+                // 于是把新曲解码器关掉并把 gEos 置真 -> 立即 onCompletion -> 跳歌（同格式切歌/点列表必现级跳跃）。
+                // 因此这类格式必须在 open() 之前先把旧 controller 完整停掉（keep-claim teardown），让全局解码器
+                // 归属正确：旧歌 gFlac 先被关，open() 再换上新曲，新曲解码器存活。其余格式(WAV/MP3/AAC)解码器是
+                // 每实例独立的，不存在该单例归属问题，仍保留 ⑤ 复用优化。
+                val newIsNativeSingleton = actualPath.endsWith(".flac", true)
+                        || actualPath.endsWith(".alac", true)
+                if (usbDacController != null && newIsNativeSingleton) {
+                    DebugLog.add(TAG, "playSong[$index]: pre-stop old controller (native-singleton decode) BEFORE open to fix decoder ownership")
+                    usbDacController?.stopMonitor()
+                }
                 if (controller.open(actualPath, srcRate, dacChannels = 2)) {
+                    val oldController = usbDacController  // [V9.20 ⑤] 捕获旧 controller，复用判定/延迟 stopMonitor 用
                     usbDacController = controller
                     handler.removeCallbacks(dacHealthRunnable)
                     handler.postDelayed(dacHealthRunnable, 5000)
@@ -3966,8 +4127,31 @@ private var xfadeBChorusMs = -1L
                         DebugLog.add(TAG, "playSong[$index]: auto-probe armed (baseURB=$base, ${DAC_SILENCE_WINDOW_MS}ms)")
                     }
             val dacProfile = DacProfile.find(UsbDacManager.getDacDevice()?.vendorId ?: 0, UsbDacManager.getDacDevice()?.productId ?: 0)
-            controller.playbackWireBits = dacProfile.wireBits
-                    // 【方向1】所有分支已保证 native 流未启（claim 后/keep-claim stopMonitor 后/EOS 后均如此），
+            // [fix14] 起流位深按源位深(>16→24)，不再用 dacProfile.wireBits(neri 路径默认 16)：
+            // play() 改为先 startStreaming 后 preBuffer(fix14)，起流时还没有 bpf 实测，
+            // 若此处给 16 会把 24bit WAV 按 16bit 开流。dacProfile.wireBits 仅作 16bit 源时的下限。
+            controller.playbackWireBits = if (controller.sourceBits > 16) 24 else dacProfile.wireBits
+                    // [V9.20 ⑤] 会话复用判定：keep-claim 且新轨格式与当前活动 native 流一致 →
+                    // 跳过硬件重开（stopMonitor+pauseStream+resetRing+startStreaming），直接复用活动流。
+                    // 不一致（采样率/声道/位深任一不同）则退化到原 keep-claim 路径（stopMonitor 旧 controller）。
+                    val newOutBits = if (controller.sourceBits > 16) 24 else dacProfile.wireBits
+                    // 【V9.20af】native 单例解码格式(Flac/Alac)禁用复用：open() 已把全局 gFlac/gAlac
+                    // 换成本曲，detachForReuse() 的 flacStop/alacStop 会误杀新曲解码器 -> 立即 EOS 跳歌。
+                    // 这类格式强制走完整重开路径（同格式切歌也能正常播放，不跳）。
+                    val reuseSession = keepClaim && oldController != null &&
+                        !controller.isNativeSingletonDecode &&
+                        UsbDacManager.canReuseSession(controller.sourceSampleRate, 2, newOutBits)
+                    if (reuseSession) {
+                        DebugLog.add(TAG, "playSong[$index]: ⑤ reuse active stream (sr=${controller.sourceSampleRate} ch=2 bits=$newOutBits) — skip reopen")
+                        oldController?.detachForReuse()  // 停旧解码线程，保留活动 native 流给新 controller
+                    } else if (oldController != null) {
+                        oldController.stopMonitor()  // 原 keep-claim：完整停流+重建
+                        if (controller.isNativeSingletonDecode)
+                            DebugLog.add(TAG, "playSong[$index]: DAC keep-claim (native-singleton decode, reuse disabled) -> full reopen")
+                        else
+                            DebugLog.v(TAG, "playSong[$index]: DAC keep-claim (no reuse), monitor killed, play() will restart stream")
+                    }
+            // 【方向1】所有分支已保证 native 流未启（claim 后/keep-claim stopMonitor 后/EOS 后均如此），
                     // streamAlreadyRunning 恒 false：play() 必走完整 startStreaming（幂等安全）
                     // [2026-09-10 C] cross-rate restart gets the deeper ring target
                     usbDacController?.let { ctl ->
@@ -3981,8 +4165,15 @@ private var xfadeBChorusMs = -1L
                         getSharedPreferences("settings", MODE_PRIVATE)
                             .getBoolean("dac_soft_start", false)
                     )
+                    // [P6] async feedback loop: re-apply persisted setting BEFORE play()
+                    // (native reads the flag in start() to launch the feedback thread).
+                    UsbDacManager.setFeedbackEnabled(
+                        getSharedPreferences("settings", MODE_PRIVATE)
+                            .getBoolean("dac_feedback_loop", false)
+                    )
                     if (deepPrebuffer) DebugLog.add(TAG, "playSong[$index]: deep prebuffer ${UsbDacPlaybackController.CROSS_RATE_PREBUFFER_MS}ms (cross-rate)")
-                    controller.play(streamAlreadyRunning = false)
+                    controller.play(streamAlreadyRunning = reuseSession)
+                    dacPlayActive = true  // [Hotplug] DAC playback actually started -> eligible for auto-resume on reattach
                     // Apply system media volume to native DAC (USB bypasses Android mixer)
                     val am = getSystemService(AUDIO_SERVICE) as? AudioManager
                     if (am != null) {
@@ -4051,6 +4242,8 @@ private var xfadeBChorusMs = -1L
         // [V8.119] DAC 重开后重发宽裕余量档与原声直通（native 状态会丢）
         refreshWideHeadroom()
         refreshDirectPassthrough()
+        refreshLoudWarnInBitPerfect()   // [Stage0] 高音量提示是否覆盖比特完美模式
+        refreshLoudWarnEnabled()        // [fix10] 高音量提示总开关
         refreshEngineDspEnabled()    // 【V9.01】DAC 重开后重发引擎 DSP 主开关
         // 【V9.01】DAC 重开后重发 5 个子开关（Bass Swap 由 refreshXfadeBassSwap 覆盖）
         refreshMsebEnabled()
@@ -4186,6 +4379,9 @@ private var xfadeBChorusMs = -1L
                 _mark("refreshWideHeadroom")
                 refreshDirectPassthrough()   // [V8.119] 播放器重建后重发原声直通档
                 _mark("refreshDirectPassthrough")
+                refreshLoudWarnInBitPerfect() // [Stage0] 播放器重建后重发高音量提示档
+                refreshLoudWarnEnabled()      // [fix10] 播放器重建后重发高音量提示总开关
+                _mark("refreshLoudWarnInBitPerfect")
                 refreshEngineDspEnabled()     // 【V9.01】播放器重建后重发引擎 DSP 主开关
                 _mark("refreshEngineDspEnabled")
                 // 【V9.01】播放器重建后重发 5 个子开关（Bass Swap 由 refreshXfadeBassSwap 覆盖）
@@ -4732,6 +4928,29 @@ private var xfadeBChorusMs = -1L
         applyDirectPassthrough(prefs.getBoolean("direct_passthrough", false))
     }
 
+    // [Stage0 2026-10-23] 高音量提示是否也在比特完美模式下生效（默认开）。
+    // 旧逻辑 bitPerfect 一律 return NONE，等于把满音量用户的唯一保护静默关掉。
+    fun applyLoudWarnInBitPerfect(enabled: Boolean) {
+        UsbDacManager.LoudPlaybackPolicy.warnInBitPerfect = enabled
+        Log.i(TAG, "LoudWarnInBitPerfect ${if (enabled) "ON" else "OFF"}")
+    }
+
+    fun refreshLoudWarnInBitPerfect() {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        applyLoudWarnInBitPerfect(prefs.getBoolean("loud_warn_in_bitperfect", true))
+    }
+
+    // [fix10] 高音量提示总开关：默认开(保留安全提醒)，设置可关掉彻底不弹。
+    fun applyLoudWarnEnabled(enabled: Boolean) {
+        UsbDacManager.loudWarnEnabled = enabled
+        Log.i(TAG, "LoudWarnEnabled ${if (enabled) "ON" else "OFF"}")
+    }
+
+    fun refreshLoudWarnEnabled() {
+        val prefs = getSharedPreferences("settings", MODE_PRIVATE)
+        applyLoudWarnEnabled(prefs.getBoolean("loud_warn_enabled", true))
+    }
+
     // 【V9.01】播放器重建 / 服务重连后按 pref 重发引擎 DSP 主开关
     fun refreshEngineDspEnabled() {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
@@ -5200,6 +5419,7 @@ private var xfadeBChorusMs = -1L
             Log.d(TAG, "pause() called, usbDacController=${usbDacController != null}")
             if (usbDacController != null) {
                 usbDacController?.pause()
+                dacPlayActive = false  // [Hotplug] explicit pause -> do not auto-resume on reattach
                 notifyPlayStateChanged(false)
             } else if (isOboeDirectMode() && oboeDirectPlayer?.isPlaying == true) {
                 oboePausePosMs = oboeDirectPlayer?.getCurrentPositionMs() ?: 0L
@@ -5217,6 +5437,8 @@ private var xfadeBChorusMs = -1L
                 abandonAudioFocus(this)
             Log.d(TAG, "Paused")
             updateNotification()
+            // [fix18 省电] 暂停 5 分钟后退出前台服务计量（保留通知；恢复播放即重建）
+            scheduleForegroundDetach()
         } catch (e: Exception) {
             Log.e(TAG, "pause crash: ${e.message}", e)
         }
@@ -5224,9 +5446,11 @@ private var xfadeBChorusMs = -1L
 
     fun resume() {
         try {
+            cancelForegroundDetach()  // [fix18] 恢复播放：撤销退前台计时并重建前台服务
             requestAudioFocusIfNeeded(this)
             if (usbDacController != null) {
                 usbDacController?.resume()
+                dacPlayActive = true  // [Hotplug] resumed through DAC -> eligible for auto-resume on future reattach
                 oboePlayWhenReady = true
                 onOboeResumeSuccess()
             } else if (isOboeDirectMode()) {
@@ -5786,6 +6010,12 @@ private var xfadeBChorusMs = -1L
      * 在 IO 协程上做、不碰音频通路；LRU 6 首，足够覆盖 DJ 连切窗口。
      */
     private fun warmDjStructure(song: Song) {
+        // [V9.20p] USB DAC 独占模式：DJ 整条链（波形着色/段落/进歌点/BPM）都用不到，
+        // 且整曲扫描会和起播链路抢 CPU/IO——直接不扫（用户明确要求）。
+        if (com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed()) {
+            Log.i(TAG, "DJ struct: skip (USB DAC exclusive mode)")
+            return
+        }
         val fp = song.filePath.ifEmpty { song.path }
         // 【V8.437】这两条早退以前是静默的，导致"为什么没日志"很难排查（我这次又踩了）。
         if (fp.isBlank() || fp.startsWith("content://")) {
@@ -5805,6 +6035,8 @@ private var xfadeBChorusMs = -1L
             analysisInFlight.add("struct:$fp")
             analysisScope.launch {
                 try {
+                    // 【V9.20p】同上：延后扫描，不抢起播链路的 CPU/IO
+                    kotlinx.coroutines.delay(2000)
                     com.sdw.music.player.core.audio.playback.WaveformCache.envelopeKick(applicationContext, fp, null)
                 } catch (_: Throwable) {}
                 analysisInFlight.remove("struct:$fp")
@@ -5814,6 +6046,12 @@ private var xfadeBChorusMs = -1L
         if (!analysisInFlight.add("struct:$fp")) return      // 同一首歌不重复扫
         analysisScope.launch {
             try {
+                // 【V9.20p】延后 2s 再扫：envelopeKick 是整曲全文件扫描（纯视觉功能，
+                // 给 DJ 波形页预热），实测它和起播链路（MediaCodec 首块 / FLAC native
+                // 首帧 + preBuffer）抢 CPU+IO 时，把切歌起播拖慢 1~3 秒（用户观感：
+                // "切歌卡几秒"）。起播链路就那几百毫秒的活，让它先跑完；波形预热
+                // 晚两秒没有任何感知。
+                kotlinx.coroutines.delay(2000)
                 // 【V8.436】用 kick 包络（200Hz 低通能量）做段落检测，宽带只作为兜底。
                 // 实测根因：Loudness War 把整条频带推平（宽带 dyn=0.015，检不出段落），
                 // 但鼓组是节奏骨架不会被压平 —— native 首拍检测用 200Hz 低通就能稳定检出。
@@ -7928,6 +8166,11 @@ private var xfadeBChorusMs = -1L
         DebugLog.add(TAG, "playNext: servicePlaylist=${servicePlaylist.size} songs=${songs.size} curIdx=$currentIndex shuffle=$isShuffleMode")
         if (songs.isEmpty()) return
 
+        // [2026-10-22] 防呆：队列只有一首时，「下一首」只能重播同一首——用户实测把
+        // 这误判为「无法切歌/卡死」（点了专辑播放全部，该专辑仅一首歌）。手动切歌
+        // 给一句明确提示；行为仍保持重播（顺序循环语义不变）。自动续播不提示。
+        if (songs.size == 1 && fromUser) toastSingleSongQueue()
+
         // [V3.3.22] REMOVED direct stopDecode() here �� releaseUsbDacController() in playSong() handles it
         // V3.3.4: isShuffleMode is the single source of truth (ExoPlayer flag can be stale)
         // V3.3.8: �����־ȷ�����״̬
@@ -7958,6 +8201,8 @@ private var xfadeBChorusMs = -1L
         // [V3.3.22] REMOVED direct stopDecode() �� releaseUsbDacController() in playSong() handles it
         val songs = servicePlaylist.ifEmpty { SongRepository.getSongs() }
         if (songs.isEmpty()) return
+        // [2026-10-22] 防呆：同 playNext——队列仅一首时上一首也只能重播，明确提示。
+        if (songs.size == 1 && fromUser) toastSingleSongQueue()
 
         // [V4.0.1] Find real position by currentSong.id, not currentIndex (may be stale)
         val currentId = currentSong?.id
@@ -7977,6 +8222,17 @@ private var xfadeBChorusMs = -1L
             handler.post {
                 android.widget.Toast.makeText(
                     this@MusicService, R.string.xfade_skip_locked, android.widget.Toast.LENGTH_SHORT
+                ).show()
+            }
+        } catch (_: Throwable) { /* ignore */ }
+    }
+
+    /** 【2026-10-22】防呆：队列仅一首时，下一首/上一首必重播同一首——明确提示，勿让用户误判卡死。 */
+    private fun toastSingleSongQueue() {
+        try {
+            handler.post {
+                android.widget.Toast.makeText(
+                    this@MusicService, R.string.queue_single_song, android.widget.Toast.LENGTH_SHORT
                 ).show()
             }
         } catch (_: Throwable) { /* ignore */ }
@@ -8243,11 +8499,17 @@ val displayArtist = if (song.artist.isBlank() || SongRepository.isPlaceholderArt
 
         val notification = notificationBuilder.build()
 
-        startForeground(NOTIFICATION_ID, notification)
-        // 
-        // startForeground 
-        val manager = getSystemService(NotificationManager::class.java)
-        manager.notify(NOTIFICATION_ID, notification)
+        if (fgDetached) {
+            // [fix18] 暂停 DETACH 态：只更新通知，不提前台计量（省电）
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.notify(NOTIFICATION_ID, notification)
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+            //
+            // startForeground
+            val manager = getSystemService(NotificationManager::class.java)
+            manager.notify(NOTIFICATION_ID, notification)
+        }
         Log.d(TAG, "Notification updated: title=${song.title}, hasArt=${artBitmap != null}, isPlaying=$isPlaying, shuffleMode=$isShuffleMode, actions=${notification.actions?.size}, playerCommands=${player.availableCommands}")
         } catch (e: Exception) {
             Log.e(TAG, "updateNotification error (service may be dying): ${e.message}")
@@ -8263,6 +8525,10 @@ val displayArtist = if (song.artist.isBlank() || SongRepository.isPlaceholderArt
     override fun onDestroy() {
         isDestroyed = true
         Log.d(TAG, "onDestroy - Service being destroyed")
+
+        // [fix18] 清理退前台延迟任务
+        detachFgRunnable?.let { handler.removeCallbacks(it) }
+        detachFgRunnable = null
 
         // 【v8.165 省电】清理后台监控线程与 prefs 监听
         try {

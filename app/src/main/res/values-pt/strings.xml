@@ -258,6 +258,8 @@
 <string name="mseb_slider_transient">Transiente</string>
 <string name="mseb_slider_transient_desc">Velocidade e nitidez da resposta transitória</string>
 <string name="eq_dsp_equalizer">Equalizador DSP</string>
+<string name="eq_master_on">Equalizador · Ligado</string>
+<string name="eq_master_off">Equalizador · Desligado</string>
 <string name="eq_mseb_psychoacoustic">EQ Psicoacústico MSEB</string>
 <string name="eq_brand_presets">Predefinições de marca</string>
 <string name="eq_autoeq_calibration">Calibração de fone AutoEQ</string>

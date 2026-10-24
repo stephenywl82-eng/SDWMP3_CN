@@ -258,6 +258,8 @@
 <string name="mseb_slider_transient">ट्रांज़िएंट</string>
 <string name="mseb_slider_transient_desc">ट्रांज़िएंट प्रतिक्रिया गति और तीक्ष्णता</string>
 <string name="eq_dsp_equalizer">DSP इक्वलाइज़र</string>
+<string name="eq_master_on">इक्वलाइज़र · चालू</string>
+<string name="eq_master_off">इक्वलाइज़र · बंद</string>
 <string name="eq_mseb_psychoacoustic">MSEB साइकोअकॉस्टिक EQ</string>
 <string name="eq_brand_presets">ब्रांड प्रीसेट</string>
 <string name="eq_autoeq_calibration">AutoEQ हेडफ़ोन कैलिब्रेशन</string>

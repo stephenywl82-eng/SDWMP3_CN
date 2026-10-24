@@ -26,6 +26,7 @@ import com.sdw.music.player.ui.components.AddToPlaylistSheet
 import com.sdw.music.player.ui.components.CountKind
 import com.sdw.music.player.ui.components.CountText
 import com.sdw.music.player.ui.components.DefaultCoverImage
+import com.sdw.music.player.ui.animation.ListDetailKeys
 import com.sdw.music.player.ui.components.DetailHero
 import com.sdw.music.player.ui.components.LibraryRow
 import com.sdw.music.player.R
@@ -70,6 +71,7 @@ fun AlbumSongScreen(
                 coverArtist = "",
                 coverUri = coverUri,
                 coverSize = 96.dp,
+                heroSharedKey = ListDetailKeys.albumArt(albumName),
                 onPlayAll = onPlayAll,
                 subtitle = {
                     CountText(songs.size, CountKind.SONGS)

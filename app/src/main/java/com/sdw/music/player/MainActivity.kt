@@ -36,6 +36,16 @@ class MainActivity : ComponentActivity() {
     /** 外部打开音频文件的 URI */
     private val externalAudioUri = mutableStateOf<Uri?>(null)
 
+    /**
+     * V9.20q 语言包裹：本工程无 AppCompat 基础设施（ComponentActivity + 平台主题），
+     * AppCompatDelegate.setApplicationLocales 不生效，改为在这里用持久化的语言包裹
+     * 基础 Context。冷启动和语言切换后的 recreate() 都会走这里，Compose 的
+     * stringResource() 随即解析到新语言。见 AppLanguageManager.wrapContext。
+     */
+    override fun attachBaseContext(newBase: android.content.Context) {
+        super.attachBaseContext(AppLanguageManager.wrapContext(newBase))
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         FileLog.init(applicationContext)

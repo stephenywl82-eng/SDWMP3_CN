@@ -6,6 +6,28 @@ import com.sdw.music.player.core.audio.dsp.MsebCalculator
 import com.sdw.music.player.core.audio.playback.MusicService
 import com.sdw.music.player.core.audio.engine.OboeDirectPlayer
 import com.sdw.music.player.core.audio.engine.UsbDacManager
+import com.sdw.music.player.core.audio.engine.DacProfile
+import com.sdw.music.player.core.audio.engine.NeriUsbReport
+import com.sdw.music.player.core.audio.engine.UsbExclusivePrefs
+import com.sdw.music.player.core.audio.engine.UsbExclusivePreferences
+import com.sdw.music.player.core.audio.engine.UsbExclusiveSampleRateMode
+import com.sdw.music.player.core.audio.engine.UsbExclusiveBitDepthMode
+import com.sdw.music.player.core.audio.engine.UsbExclusiveBufferProfile
+import com.sdw.music.player.core.audio.engine.UsbExclusiveUnsupportedFormatPolicy
+import com.sdw.music.player.core.audio.engine.USB_EX_DEFAULT_BIT_PERFECT
+import com.sdw.music.player.core.audio.engine.USB_EX_DEFAULT_SAMPLE_RATE_COMPATIBILITY
+import com.sdw.music.player.core.audio.engine.USB_EX_DEFAULT_BIT_DEPTH_COMPATIBILITY
+import com.sdw.music.player.core.audio.engine.USB_EX_DEFAULT_CHANNEL_COMPATIBILITY
+import com.sdw.music.player.core.audio.engine.USB_EX_MIN_FOREGROUND_BUFFER_MS
+import com.sdw.music.player.core.audio.engine.USB_EX_MAX_FOREGROUND_BUFFER_MS
+import com.sdw.music.player.core.audio.engine.USB_EX_MIN_BACKGROUND_BUFFER_MS
+import com.sdw.music.player.core.audio.engine.USB_EX_MAX_BACKGROUND_BUFFER_MS
+import com.sdw.music.player.core.audio.engine.USB_EX_MIN_VOLUME_RISK_THRESHOLD_DBFS
+import com.sdw.music.player.core.audio.engine.USB_EX_MAX_VOLUME_RISK_THRESHOLD_DBFS
+import com.sdw.music.player.core.audio.engine.USB_EX_DEFAULT_RESPOND_TO_ATTACH
+import com.sdw.music.player.core.audio.engine.normalizeUsbExclusiveForegroundBufferMs
+import com.sdw.music.player.core.audio.engine.normalizeUsbExclusiveBackgroundBufferMs
+import com.sdw.music.player.core.audio.engine.normalizeUsbExclusiveVolumeRiskThresholdDbfs
 import com.sdw.music.player.core.util.floatValue
 
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -101,7 +123,8 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
     // 而语言切换走 AppCompatDelegate.setApplicationLocales → **Activity 重建** →
     // sectionOpen 整个丢光 → 所有分区回落默认值（只有"播放与过渡"展开），
     // 看着就像"手动折叠的全被吞了"。改为写入 SharedPreferences，重建后读回。
-    val sectionKeys = remember { listOf("cat_playback", "cat_output", "cat_library", "cat_ui", "cat_system") }
+    // 【V9.20w 设置页改版】分区顺序：播放 → 音频输出 → 界面 → 媒体库 → 系统
+    val sectionKeys = remember { listOf("cat_playback", "cat_output", "cat_ui", "cat_library", "cat_system") }
     val sectionOpen = remember {
         val m = mutableStateMapOf<String, Boolean>()
         for (k in sectionKeys) {
@@ -140,6 +163,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
     var usbAvailable by remember { mutableStateOf(false) }
     var usbDacName by remember { mutableStateOf("") }
     var usbActive by remember { mutableStateOf(false) }
+    // [2026-10-22] 当前 DAC 的 VID/PID：按设备的「强制软件音量」开关要拼 key
+    var usbDacVid by remember { mutableStateOf(0) }
+    var usbDacPid by remember { mutableStateOf(0) }
     val offLabel = stringResource(R.string.settings_off)
 
     // 【V8.195】备份 / 恢复。范围与恢复方式都放在这里（而不是 item{} 里 remember），
@@ -281,8 +307,8 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     listOf(
                         "cat_playback" to stringResource(R.string.settings_cat_playback),
                         "cat_output" to stringResource(R.string.settings_cat_audio_output),
-                        "cat_library" to stringResource(R.string.settings_cat_library),
                         "cat_ui" to stringResource(R.string.settings_cat_interface),
+                        "cat_library" to stringResource(R.string.settings_cat_library),
                         "cat_system" to stringResource(R.string.settings_cat_system)
                     ).forEach { (key, label) ->
                         val open = isSectionOpen(key)
@@ -309,15 +335,159 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     stringResource(R.string.settings_cat_playback),
                     collapsible = true,
                     expanded = isSectionOpen("cat_playback"),
-                    itemCount = 45,   // 【V8.429】-1：声道平衡移至「音频输出」
+                    itemCount = 39,   // 【V9.20w】-6：响度统一管理 / AGC 移至「音频输出」
                     onToggle = { toggleSection("cat_playback") }
                 )
             }
+
             if (isSectionOpen("cat_playback")) {
                 // 【DJ 单开关整合】隐藏的高级开关：默认收起，仅调试时可展开其余 DJ 子项
                 // 注意：此处位于 LazyListScope（非 @Composable 上下文），不能用 remember；
                 // 用普通 val 直接读 pref，切换后由 bump()/refreshTrigger 触发重组成效。
                 val devShowDjAdvanced = settingsPrefs.getBoolean("dev_show_dj_advanced", true)
+
+                item { SettingsGroupLabel(stringResource(R.string.settings_grp_basic)) }
+                // 【V8.219】节拍同步（beatmatch 变速不变调）功能整体移除：
+                // WSOLA 拉伸听感差（用户评价"像个半成品"），设置项删除，
+                // MusicService.beatmatchRatio() 恒返回 1.0，变速链路彻底不再触发。
+                // 【v8.13】随机播放模式：顺序 / A 纯随机 / B BPM 匹配
+                item {
+                    SettingsCard {
+                        SettingsOptionRow(
+                            title = stringResource(R.string.settings_shuffle_mode),
+                            options = listOf(
+                                "off" to stringResource(R.string.settings_shuffle_mode_off),
+                                "random" to stringResource(R.string.settings_shuffle_mode_random),
+                                "bpm" to stringResource(R.string.settings_shuffle_mode_bpm)
+                            ),
+                            // 【V8.194】shuffle_mode 收敛成 settings 里的三态字符串
+                            // （off / random / bpm）。遗留值：缺失或 "random" = 纯随机，
+                            // "true" = bpm，"false" = off。点一下就写回，不再出现"显示成纯随机
+                            // 但服务里其实是顺序播放"的错位。
+                            selectedKey = when (settingsPrefs.getString("shuffle_mode", null)) {
+                                "bpm", "true" -> "bpm"
+                                "random", "" -> "random"
+                                "off", "false" -> "off"
+                                else -> "random"
+                            },
+                            onSelect = { key ->
+                                settingsPrefs.edit().putString("shuffle_mode", key).apply()
+                                bump()
+                            }
+                        )
+                        SDWDivider()
+                        SettingsNoteRow(text = stringResource(R.string.settings_shuffle_mode_sub))
+                        SDWDivider()
+                        // 【V8.427】「智能选曲（和声+能量）」从 DJ 折叠移出：随机/列表播放挑下一首，
+                        // 与 DJ 模式解耦，普通模式也可见可关（不破铁律：普通模式音频链路不受 DJ 栈影响）。
+                        var smartPickPlayback by remember(refreshTrigger) {
+                            mutableStateOf(settingsPrefs.getBoolean("crossfade_smartpick", true))
+                        }
+                        SettingsSwitchItem(
+                            icon = Icons.Default.Insights,
+                            title = stringResource(R.string.settings_smartpick),
+                            subtitle = if (smartPickPlayback) stringResource(R.string.settings_smartpick_on)
+                            else stringResource(R.string.settings_smartpick_off),
+                            checked = smartPickPlayback,
+                            inCard = true,
+                            onCheckedChange = { enabled ->
+                                smartPickPlayback = enabled
+                                settingsPrefs.edit().putBoolean("crossfade_smartpick", enabled).apply()
+                                bump()
+                            }
+                        )
+                        // 【#6】cue 点感知入场开关（djay 式：B 从检测到的前奏/乐句头进）
+                        var cueEntryOn by remember(refreshTrigger) {
+                            mutableStateOf(settingsPrefs.getBoolean("crossfade_cue_entry", true))
+                        }
+                        SettingsSwitchItem(
+                            icon = Icons.Default.PlayArrow,
+                            title = stringResource(R.string.settings_cue_entry),
+                            subtitle = if (cueEntryOn) stringResource(R.string.settings_cue_entry_on)
+                                       else stringResource(R.string.settings_cue_entry_off),
+                            checked = cueEntryOn,
+                            inCard = true,
+                            onCheckedChange = { enabled ->
+                                cueEntryOn = enabled
+                                settingsPrefs.edit().putBoolean("crossfade_cue_entry", enabled).apply()
+                                bump()
+                            }
+                        )
+                    }
+                }
+
+                // 【整理】音频焦点注册：原误放 USB DAC 下（注释自述"非 DAC 路径"），实为通用播放音频策略，移入播放与过渡。
+                item {
+                    SettingsCard {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "audio_focus_register",
+                            defaultValue = true, icon = Icons.Default.Hearing,
+                            title = stringResource(R.string.settings_audio_focus),
+                            subtitleOn = stringResource(R.string.settings_audio_focus_on),
+                            subtitleOff = stringResource(R.string.settings_audio_focus_off),
+                            onChange = { enabled -> MusicService.setAudioFocusRegister(context.applicationContext, enabled) }
+                        )
+                    }
+                }
+                // 【整理】原声直通：全局 DSP 主旁路（EQ/MSEB/DTS/压缩/等响/瞬态/环绕/AGC/限幅/softClip/dither 全跳），
+                // 与 DAC 硬件无关，按与 AGC 同样的逻辑移出 DAC，归入播放与过渡。
+                item {
+                    SettingsCard {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "direct_passthrough",
+                            icon = Icons.Default.SurroundSound,
+                            title = stringResource(R.string.settings_direct_passthrough),
+                            subtitleOn = stringResource(R.string.settings_direct_passthrough_on),
+                            subtitleOff = stringResource(R.string.settings_direct_passthrough_off),
+                            note = stringResource(R.string.settings_direct_passthrough_note),
+                            onChange = { enabled -> MusicService.instance?.applyDirectPassthrough(enabled) }
+                        )
+                    }
+                }
+                // [fix10] 高音量提示总开关：关掉后 DAC 高音量预警 Toast 完全不再弹。
+                item {
+                    SettingsCard {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs,
+                            key = "loud_warn_enabled",
+                            icon = Icons.Default.Warning,
+                            title = stringResource(R.string.settings_loud_warn_enabled),
+                            subtitleOn = stringResource(R.string.settings_loud_warn_on),
+                            subtitleOff = stringResource(R.string.settings_loud_warn_off),
+                            note = stringResource(R.string.settings_loud_warn_note),
+                            onChange = { enabled -> MusicService.instance?.applyLoudWarnEnabled(enabled) }
+                        )
+                    }
+                }
+                // [Stage0 2026-10-23] 比特完美下是否仍提示高音量。旧逻辑在 bitPerfect 时直接
+                // return NONE，把满音量(gain=1.0)、峰值接近削波的用户唯一保护关掉了；这里
+                // 交还给用户决定，默认开。
+                item {
+                    SettingsCard {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs,
+                            key = "loud_warn_in_bitperfect",
+                            icon = Icons.Default.Warning,
+                            title = stringResource(R.string.settings_loud_warn_bitperfect),
+                            subtitleOn = stringResource(R.string.settings_loud_warn_bitperfect_on),
+                            subtitleOff = stringResource(R.string.settings_loud_warn_bitperfect_off),
+                            note = stringResource(R.string.settings_loud_warn_bitperfect_note),
+                            onChange = { enabled -> MusicService.instance?.applyLoudWarnInBitPerfect(enabled) }
+                        )
+                    }
+                }
+                // 【整理】自动播放：启动即播是播放行为，从「显示与界面」移入此处。
+                item {
+                    SettingsCard {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "auto_play_on_launch",
+                            icon = Icons.Default.PlayArrow,
+                            title = stringResource(R.string.settings_auto_play),
+                            subtitleOn = stringResource(R.string.settings_auto_on),
+                            subtitleOff = stringResource(R.string.settings_auto_off)
+                        )
+                    }
+                }
 
                 item { SettingsGroupLabel(stringResource(R.string.settings_section_playback)) }
                 if (devShowDjAdvanced) {
@@ -547,7 +717,6 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
                 }
-
                 // 【V8.150 Live FX 总线】切歌效果：作用于混音后总线、可随时开关、即时生效
                 item {
                     val context = LocalContext.current
@@ -1209,112 +1378,353 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         }
                     }
                 }
-                // 【V8.219】节拍同步（beatmatch 变速不变调）功能整体移除：
-                // WSOLA 拉伸听感差（用户评价"像个半成品"），设置项删除，
-                // MusicService.beatmatchRatio() 恒返回 1.0，变速链路彻底不再触发。
-                // 【v8.13】随机播放模式：顺序 / A 纯随机 / B BPM 匹配
+            }
+
+            item {
+                SettingsSectionTitle(
+                    stringResource(R.string.settings_cat_audio_output),
+                    collapsible = true,
+                    expanded = isSectionOpen("cat_output"),
+                    itemCount = 13,   // 【V9.20w】+6：响度统一管理 / AGC 从「播放」移入
+                    onToggle = { toggleSection("cat_output") }
+                )
+            }
+            if (isSectionOpen("cat_output")) {
+                item {
+                    // 【V8.429 移位】声道平衡原本被塞在「DJ 切歌」分组里，但它和 DJ 毫无关系
+                    // —— 就是最普通的立体声左右音量调节。移到「音频输出」分组。
+                    // ========== 【V8.313】声道平衡（Balance）==========
+                    // chip 一键复位 + 滑块连续微调。裸滑块居中容易漂移、难以回到正中间，
+                    // 所以配一组「偏左/居中/偏右」的粗调 chip（djay / foobar2000 同款做法）。
+                    // 存 int（-100..100）而不是 Float：SharedPreferences 没有原生
+                    // Float XML 存储类型，用 Int 避免精度/兼容坑。
+                    val balPct = settingsPrefs.getInt("stereo_balance", 0)
+                    val balChipKey = when {
+                    balPct < -8 -> "left"
+                    balPct > 8 -> "right"
+                    else -> "center"
+                    }
+                    SettingsChipGroup(
+                    label = stringResource(R.string.settings_balance_label),
+                    options = listOf(
+                    "left" to stringResource(R.string.settings_balance_left),
+                    "center" to stringResource(R.string.settings_balance_center),
+                    "right" to stringResource(R.string.settings_balance_right)
+                    ),
+                    selectedKey = balChipKey,
+                    onSelect = { key ->
+                    // 【V8.427】chip 是「偏」左/右，不该把对侧直接静音（旧值 ±100 会把
+                    // 另一声道打到 0）。改成 ±40：对侧剩 60%（约 -4.4dB），明显但不过头；
+                    // 要彻底单声道化就用下面的滑块拉到底。
+                    val target = when (key) {
+                    "left" -> -40
+                    "right" -> 40
+                    else -> 0
+                    }
+                    settingsPrefs.edit().putInt("stereo_balance", target).apply()
+                    MusicService.instance?.applyStereoBalance(target / 100f)
+                    bump()
+                    }
+                    )
+                    SDWDivider()
+                    // 滑块 -100..100，实时下发（拖动即生效，不用等松手）。
+                    // valueText 显示百分比 + 「偏左/居中/偏右」，比裸数字可读。
+                    val balLabel = when {
+                    balPct < -8 -> stringResource(R.string.settings_balance_left)
+                    balPct > 8 -> stringResource(R.string.settings_balance_right)
+                    else -> stringResource(R.string.settings_balance_center)
+                    }
+                    var balDraft by remember(refreshTrigger) { mutableFloatStateOf(balPct.toFloat()) }
+                    SettingsSliderRow(
+                    title = stringResource(R.string.settings_balance_slider),
+                    value = balDraft,
+                    valueRange = -100f..100f,
+                    valueText = "${balLabel}  ${balDraft.toInt()}%",
+                    onValueChange = { v ->
+                    balDraft = v
+                    val pct = v.toInt()
+                    settingsPrefs.edit().putInt("stereo_balance", pct).apply()
+                    MusicService.instance?.applyStereoBalance(pct / 100f)
+                    },
+                    onValueChangeFinished = { bump() }
+                    )
+                    SDWDivider()
+                    SettingsNoteRow(stringResource(R.string.settings_balance_hint))
+                    SDWDivider()
+                }
+                item { SettingsGroupLabel(stringResource(R.string.settings_usb_dac)) }
+                item {
+                    LaunchedEffect(usbExclusiveEnabled, refreshTrigger) {
+                        if (usbExclusiveEnabled) {
+                            withContext(Dispatchers.IO) {
+                                try {
+                                    UsbDacManager.init(context)
+                                    val dacs = UsbDacManager.findDacs()
+                                    usbAvailable = dacs.isNotEmpty()
+                                    usbDacName = dacs.firstOrNull()?.name ?: ""
+                                    usbDacVid = dacs.firstOrNull()?.vid ?: 0
+                                    usbDacPid = dacs.firstOrNull()?.pid ?: 0
+                                } catch (_: Exception) { /* USB unavailable */ }
+                            }
+                        } else {
+                            usbAvailable = false
+                            usbDacName = ""
+                            usbDacVid = 0
+                            usbDacPid = 0
+                        }
+                        usbActive = usbExclusiveEnabled && UsbDacManager.isStreaming()
+                    }
+
+                    ThemeStagger(index = 3) {
+                        SettingsCard {
+                            SettingsSwitchItem(
+                                icon = Icons.Default.Usb,
+                                title = stringResource(R.string.settings_hardware_exclusive),
+                                subtitle = when {
+                                    usbActive -> stringResource(R.string.settings_active_dac, usbDacName)
+                                    usbExclusiveEnabled && usbAvailable -> stringResource(R.string.settings_dac_connected, usbDacName)
+                                    usbExclusiveEnabled -> stringResource(R.string.settings_waiting_dac)
+                                    else -> stringResource(R.string.settings_bypass_mixer)
+                                },
+                                checked = usbExclusiveEnabled,
+                                inCard = true,
+                                onCheckedChange = { enabled ->
+                                    usbExclusiveEnabled = enabled
+                                    settingsPrefs.edit().putBoolean("usb_exclusive", enabled).apply()
+                                    // 【V9.01】DAC 独占模式与交叉淡化 / DJ 过渡互斥：独占总闸开启时，
+                                    // USB DAC 走单流 bit-perfect 路径，无混音 / 交叉淡化能力 → 自动关闭二者并停掉引擎。
+                                    if (enabled) {
+                                        settingsPrefs.edit()
+                                            .putBoolean("crossfade_enabled", false)
+                                            .putBoolean("crossfade_dj_enabled", false)
+                                            .apply()
+                                        MusicService.instance?.setCrossfadeEnabled(false)
+                                        MusicService.instance?.applyLiveFx()
+                                        MusicService.instance?.refreshXfadeBassSwap()
+                                        MusicService.instance?.refreshXfadeThreeBand()
+                                        MusicService.instance?.applyBeatmatchEngine()
+                                    }
+                                    bump()
+                                }
+                            )
+                            if (usbExclusiveEnabled && usbAvailable) {
+                                SettingsNoteRow(text = dacDetected, color = Color(0xFF4CAF50))
+                            }
+
+                            SDWDivider()
+                            // TPDF 抖动开关：降位到 16bit 输出时消除量化失真
+                            SettingsPrefSwitch(
+                                refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "tpdf_dither",
+                                defaultValue = true, icon = Icons.Default.GraphicEq,
+                                title = stringResource(R.string.settings_tpdf_dither),
+                                subtitleOn = stringResource(R.string.settings_tpdf_dither_desc),
+                                subtitleOff = stringResource(R.string.settings_tpdf_dither_desc),
+                                onChange = { enabled ->
+                                    // 【2026-09-08】双路下发：DAC 独占走 UsbDacManager(driver)，Oboe 外放/蓝牙走 OboeDirectPlayer
+                                    // 历史只调 DAC 侧导致外放路径 dither 恒开无法关闭（底噪来源之一）
+                                    UsbDacManager.setDitherEnabled(enabled)
+                                    MusicService.instance?.oboeDirectPlayer?.setDitherEnabled(enabled)
+                                }
+                            )
+
+                            SDWDivider()
+                            // [2026-09-10 soft-start] Mask DAC PLL re-lock pops on stream start.
+                            // Default OFF on purpose: the fade-in ramp modifies samples, so
+                            // bit-perfect output is only traded away when the user opts in.
+                            ThemeStagger(index = 4) {
+                                SettingsPrefSwitch(
+                                    refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "dac_soft_start",
+                                    icon = Icons.Default.GraphicEq,
+                                    title = stringResource(R.string.settings_dac_soft_start),
+                                    subtitleOn = stringResource(R.string.settings_dac_soft_start_on),
+                                    subtitleOff = stringResource(R.string.settings_dac_soft_start_off),
+                                    onChange = { enabled -> UsbDacManager.setSoftStartEnabled(enabled) }
+                                )
+                            }
+
+                            // [P6] 异步反馈闭环开关：默认关（开环 bit-perfect 安全），仅真·异步 DAC 开启。
+                            ThemeStagger(index = 5) {
+                                SettingsPrefSwitch(
+                                    refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "dac_feedback_loop",
+                                    icon = Icons.Default.Sync,
+                                    title = stringResource(R.string.dac_feedback_loop_title),
+                                    subtitleOn = stringResource(R.string.dac_feedback_loop_on),
+                                    subtitleOff = stringResource(R.string.dac_feedback_loop_off),
+                                    onChange = { enabled -> UsbDacManager.setFeedbackEnabled(enabled) }
+                                )
+                            }
+
+                            // [2026-10-22] 按设备强制软件音量（白名单逃生通道）。白名单策略下
+                            // 未验证设备本来就跑软件增益，此开关仅对白名单设备有意义——已验证
+                            // 有效的硬件音量在该设备/该固件版本上失灵时，打开即回退，不用等发版。
+                            if (usbAvailable && usbDacVid != 0) {
+                                SDWDivider()
+                                ThemeStagger(index = 6) {
+                                    SettingsPrefSwitch(
+                                        refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs,
+                                        key = "dac_force_sw_vol_%04X_%04X".format(usbDacVid, usbDacPid),
+                                        icon = Icons.Default.VolumeDown,
+                                        title = stringResource(R.string.settings_dac_force_sw_vol),
+                                        subtitleOn = stringResource(R.string.settings_dac_force_sw_vol_on),
+                                        subtitleOff = stringResource(R.string.settings_dac_force_sw_vol_off),
+                                        onChange = { enabled ->
+                                            // 开：立即生效（native 侧幂等禁用硬件音量）
+                                            // 关：只记录 pref，下次连接 DAC 时按白名单结果重新决定
+                                            if (enabled) UsbDacManager.forceSoftwareVolume()
+                                        }
+                                    )
+                                }
+                            }
+
+                        }
+                    }
+                }
+
+                // ── [NeriPlayer 引擎] USB 独占输出设置（选项集与 NeriPlayer 一致） ──
+                item { SettingsGroupLabel(stringResource(R.string.settings_usb_ex_group)) }
+                item {
+                    ThemeStagger(index = 3) {
+                        SettingsCard {
+                            // 引擎选择：neri（默认）/ legacy 逃生通道
+                            SettingsOptionRow(
+                                title = stringResource(R.string.settings_usb_ex_engine),
+                                options = listOf(
+                                    "neri" to stringResource(R.string.settings_usb_ex_engine_neri),
+                                    "legacy" to stringResource(R.string.settings_usb_ex_engine_legacy),
+                                ),
+                                selectedKey = if (UsbDacManager.useNeriEngine()) "neri" else "legacy",
+                                onSelect = { key ->
+                                    UsbDacManager.setUsbEngine(key)
+                                    bump()
+                                }
+                            )
+                            SettingsNoteRow(stringResource(R.string.settings_usb_ex_engine_note))
+                            if (UsbDacManager.useNeriEngine()) {
+                                SDWDivider()
+                                UsbExclusiveQualityCard(bump = bump)
+                            } else {
+                                SettingsNoteRow(stringResource(R.string.settings_usb_ex_legacy_note))
+                            }
+                        }
+                    }
+                }
+
+                // 【V9.01】创意 DSP 开关（引擎 DSP 主开关 + 5 个子开关）置于「USB DAC 独占」模块下。
+                // 原声直通（direct_passthrough）最高优先级：开启后本组全部失效。
+                val dacLockedByPassthrough = settingsPrefs.getBoolean("direct_passthrough", false)
+                if (dacLockedByPassthrough) {
+                    item {
+                        Text(
+                            stringResource(R.string.settings_dac_locked_by_passthrough),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                        )
+                    }
+                }
                 item {
                     SettingsCard {
-                        SettingsOptionRow(
-                            title = stringResource(R.string.settings_shuffle_mode),
-                            options = listOf(
-                                "off" to stringResource(R.string.settings_shuffle_mode_off),
-                                "random" to stringResource(R.string.settings_shuffle_mode_random),
-                                "bpm" to stringResource(R.string.settings_shuffle_mode_bpm)
-                            ),
-                            // 【V8.194】shuffle_mode 收敛成 settings 里的三态字符串
-                            // （off / random / bpm）。遗留值：缺失或 "random" = 纯随机，
-                            // "true" = bpm，"false" = off。点一下就写回，不再出现"显示成纯随机
-                            // 但服务里其实是顺序播放"的错位。
-                            selectedKey = when (settingsPrefs.getString("shuffle_mode", null)) {
-                                "bpm", "true" -> "bpm"
-                                "random", "" -> "random"
-                                "off", "false" -> "off"
-                                else -> "random"
-                            },
-                            onSelect = { key ->
-                                settingsPrefs.edit().putString("shuffle_mode", key).apply()
-                                bump()
+                        val engineDspEnabled = remember(refreshTrigger) { settingsPrefs.getBoolean("engine_dsp_enabled", true) }
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "engine_dsp_enabled",
+                            defaultValue = true, icon = Icons.Default.Tune,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_engine_dsp),
+                            subtitleOn = stringResource(R.string.settings_engine_dsp_on),
+                            subtitleOff = stringResource(R.string.settings_engine_dsp_off),
+                            note = stringResource(R.string.settings_engine_dsp_note),
+                            onChange = { enabled -> MusicService.instance?.applyEngineDspEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "crossfade_bass_swap",
+                            defaultValue = true, icon = Icons.Default.GraphicEq,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_bass_swap),
+                            subtitleOn = stringResource(R.string.settings_dac_bass_swap_on),
+                            subtitleOff = stringResource(R.string.settings_dac_bass_swap_off),
+                            onChange = { enabled -> MusicService.instance?.applyBassSwapEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "mseb_enabled",
+                            defaultValue = true, icon = Icons.Default.Equalizer,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_mseb),
+                            subtitleOn = stringResource(R.string.settings_dac_mseb_on),
+                            subtitleOff = stringResource(R.string.settings_dac_mseb_off),
+                            onChange = { enabled -> MusicService.instance?.applyMsebEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "limiter_enabled",
+                            defaultValue = true, icon = Icons.Default.LineWeight,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_limiter),
+                            subtitleOn = stringResource(R.string.settings_dac_limiter_on),
+                            subtitleOff = stringResource(R.string.settings_dac_limiter_off),
+                            onChange = { enabled -> MusicService.instance?.applyLimiterEnabled(enabled) }
+                        )
+                        SDWDivider()
+                        // 【V8.690 修复】DTS 开关改为读写 "mseb" pref（与 DSP 界面 MsebScreen 同源）。
+                        // 旧实现读写 "settings" 的同名字段——两个 UI 各写各的永远不通，且
+                        // 播放器重建时旧 refreshDtsEnabled 也只认 "settings"，导致"开了没效果"。
+                        // key 恰好同为 "dts_enabled"，defaultValue 对齐 MsebCalculator 的 false。
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump,
+                            prefs = context.getSharedPreferences("mseb", android.content.Context.MODE_PRIVATE),
+                            key = "dts_enabled",
+                            defaultValue = false, icon = Icons.Default.SurroundSound,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_dts),
+                            subtitleOn = stringResource(R.string.settings_dac_dts_on),
+                            subtitleOff = stringResource(R.string.settings_dac_dts_off),
+                            onChange = { enabled ->
+                                val svc = MusicService.instance
+                                svc?.applyDtsEnabled(enabled)
+                                // 与 MsebScreen.toggleDts 等价：开时下发完整 M/S 曲线，关时 reset
+                                if (enabled) {
+                                    val p = MsebCalculator.load(context)
+                                    val ex = MsebCalculator.getDtsStageEx(context)
+                                    svc?.applyMsStage(p.soundstage, p.imaging, ex.surround, ex.height)
+                                } else {
+                                    svc?.resetMsStage()
+                                }
                             }
                         )
                         SDWDivider()
-                        SettingsNoteRow(text = stringResource(R.string.settings_shuffle_mode_sub))
-                        SDWDivider()
-                        // 【V8.427】「智能选曲（和声+能量）」从 DJ 折叠移出：随机/列表播放挑下一首，
-                        // 与 DJ 模式解耦，普通模式也可见可关（不破铁律：普通模式音频链路不受 DJ 栈影响）。
-                        var smartPickPlayback by remember(refreshTrigger) {
-                            mutableStateOf(settingsPrefs.getBoolean("crossfade_smartpick", true))
-                        }
-                        SettingsSwitchItem(
-                            icon = Icons.Default.Insights,
-                            title = stringResource(R.string.settings_smartpick),
-                            subtitle = if (smartPickPlayback) stringResource(R.string.settings_smartpick_on)
-                            else stringResource(R.string.settings_smartpick_off),
-                            checked = smartPickPlayback,
-                            inCard = true,
-                            onCheckedChange = { enabled ->
-                                smartPickPlayback = enabled
-                                settingsPrefs.edit().putBoolean("crossfade_smartpick", enabled).apply()
-                                bump()
-                            }
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "autoeq_enabled",
+                            defaultValue = true, icon = Icons.Default.Headphones,
+                            enabled = !dacLockedByPassthrough,
+                            title = stringResource(R.string.settings_dac_autoeq),
+                            subtitleOn = stringResource(R.string.settings_dac_autoeq_on),
+                            subtitleOff = stringResource(R.string.settings_dac_autoeq_off),
+                            onChange = { enabled -> MusicService.instance?.applyAutoEqEnabled(enabled) }
                         )
-                        // 【#6】cue 点感知入场开关（djay 式：B 从检测到的前奏/乐句头进）
-                        var cueEntryOn by remember(refreshTrigger) {
-                            mutableStateOf(settingsPrefs.getBoolean("crossfade_cue_entry", true))
-                        }
-                        SettingsSwitchItem(
-                            icon = Icons.Default.PlayArrow,
-                            title = stringResource(R.string.settings_cue_entry),
-                            subtitle = if (cueEntryOn) stringResource(R.string.settings_cue_entry_on)
-                                       else stringResource(R.string.settings_cue_entry_off),
-                            checked = cueEntryOn,
-                            inCard = true,
-                            onCheckedChange = { enabled ->
-                                cueEntryOn = enabled
-                                settingsPrefs.edit().putBoolean("crossfade_cue_entry", enabled).apply()
-                                bump()
-                            }
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "parametric_eq_enabled",
+                            defaultValue = false, icon = Icons.Default.Speed,
+                            enabled = !dacLockedByPassthrough && engineDspEnabled,
+                            title = stringResource(R.string.settings_dac_parametric_eq),
+                            subtitleOn = stringResource(R.string.settings_dac_parametric_eq_on),
+                            subtitleOff = stringResource(R.string.settings_dac_parametric_eq_off),
+                            onChange = { enabled -> MusicService.instance?.applyParametricEqEnabled(enabled) }
                         )
                     }
                 }
 
-                // 【整理】音频焦点注册：原误放 USB DAC 下（注释自述"非 DAC 路径"），实为通用播放音频策略，移入播放与过渡。
+                item { SettingsGroupLabel(stringResource(R.string.settings_bt_output)) }
                 item {
                     SettingsCard {
                         SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "audio_focus_register",
-                            defaultValue = true, icon = Icons.Default.Hearing,
-                            title = stringResource(R.string.settings_audio_focus),
-                            subtitleOn = stringResource(R.string.settings_audio_focus_on),
-                            subtitleOff = stringResource(R.string.settings_audio_focus_off),
-                            onChange = { enabled -> MusicService.setAudioFocusRegister(context.applicationContext, enabled) }
-                        )
-                    }
-                }
-                // 【整理】原声直通：全局 DSP 主旁路（EQ/MSEB/DTS/压缩/等响/瞬态/环绕/AGC/限幅/softClip/dither 全跳），
-                // 与 DAC 硬件无关，按与 AGC 同样的逻辑移出 DAC，归入播放与过渡。
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "direct_passthrough",
-                            icon = Icons.Default.SurroundSound,
-                            title = stringResource(R.string.settings_direct_passthrough),
-                            subtitleOn = stringResource(R.string.settings_direct_passthrough_on),
-                            subtitleOff = stringResource(R.string.settings_direct_passthrough_off),
-                            note = stringResource(R.string.settings_direct_passthrough_note),
-                            onChange = { enabled -> MusicService.instance?.applyDirectPassthrough(enabled) }
-                        )
-                    }
-                }
-                // 【整理】自动播放：启动即播是播放行为，从「显示与界面」移入此处。
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "auto_play_on_launch",
-                            icon = Icons.Default.PlayArrow,
-                            title = stringResource(R.string.settings_auto_play),
-                            subtitleOn = stringResource(R.string.settings_auto_on),
-                            subtitleOff = stringResource(R.string.settings_auto_off)
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "bt_pre_emphasis",
+                            defaultValue = true, icon = Icons.Default.Bluetooth,
+                            title = stringResource(R.string.settings_bt_pre),
+                            subtitleOn = stringResource(R.string.settings_bt_pre_desc),
+                            subtitleOff = stringResource(R.string.settings_bt_pre_desc),
+                            onChange = { enabled -> MusicService.instance?.applyBtPreEmphasis(enabled) }
                         )
                     }
                 }
@@ -1444,282 +1854,456 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
 
             item {
                 SettingsSectionTitle(
-                    stringResource(R.string.settings_cat_audio_output),
+                    stringResource(R.string.settings_cat_interface),
                     collapsible = true,
-                    expanded = isSectionOpen("cat_output"),
-                    itemCount = 7,   // 【V8.429】+1：声道平衡移入本分组
-                    onToggle = { toggleSection("cat_output") }
+                    expanded = isSectionOpen("cat_ui"),
+                    itemCount = 44,   // 【V9.20w】+2：语言从「系统」移入
+                    onToggle = { toggleSection("cat_ui") }
                 )
             }
-            if (isSectionOpen("cat_output")) {
+            if (isSectionOpen("cat_ui")) {
+                item { SettingsGroupLabel(stringResource(R.string.settings_appearance)) }
                 item {
-                    // 【V8.429 移位】声道平衡原本被塞在「DJ 切歌」分组里，但它和 DJ 毫无关系
-                    // —— 就是最普通的立体声左右音量调节。移到「音频输出」分组。
-                    // ========== 【V8.313】声道平衡（Balance）==========
-                    // chip 一键复位 + 滑块连续微调。裸滑块居中容易漂移、难以回到正中间，
-                    // 所以配一组「偏左/居中/偏右」的粗调 chip（djay / foobar2000 同款做法）。
-                    // 存 int（-100..100）而不是 Float：SharedPreferences 没有原生
-                    // Float XML 存储类型，用 Int 避免精度/兼容坑。
-                    val balPct = settingsPrefs.getInt("stereo_balance", 0)
-                    val balChipKey = when {
-                    balPct < -8 -> "left"
-                    balPct > 8 -> "right"
-                    else -> "center"
-                    }
-                    SettingsChipGroup(
-                    label = stringResource(R.string.settings_balance_label),
-                    options = listOf(
-                    "left" to stringResource(R.string.settings_balance_left),
-                    "center" to stringResource(R.string.settings_balance_center),
-                    "right" to stringResource(R.string.settings_balance_right)
-                    ),
-                    selectedKey = balChipKey,
-                    onSelect = { key ->
-                    // 【V8.427】chip 是「偏」左/右，不该把对侧直接静音（旧值 ±100 会把
-                    // 另一声道打到 0）。改成 ±40：对侧剩 60%（约 -4.4dB），明显但不过头；
-                    // 要彻底单声道化就用下面的滑块拉到底。
-                    val target = when (key) {
-                    "left" -> -40
-                    "right" -> 40
-                    else -> 0
-                    }
-                    settingsPrefs.edit().putInt("stereo_balance", target).apply()
-                    MusicService.instance?.applyStereoBalance(target / 100f)
-                    bump()
-                    }
-                    )
-                    SDWDivider()
-                    // 滑块 -100..100，实时下发（拖动即生效，不用等松手）。
-                    // valueText 显示百分比 + 「偏左/居中/偏右」，比裸数字可读。
-                    val balLabel = when {
-                    balPct < -8 -> stringResource(R.string.settings_balance_left)
-                    balPct > 8 -> stringResource(R.string.settings_balance_right)
-                    else -> stringResource(R.string.settings_balance_center)
-                    }
-                    var balDraft by remember(refreshTrigger) { mutableFloatStateOf(balPct.toFloat()) }
-                    SettingsSliderRow(
-                    title = stringResource(R.string.settings_balance_slider),
-                    value = balDraft,
-                    valueRange = -100f..100f,
-                    valueText = "${balLabel}  ${balDraft.toInt()}%",
-                    onValueChange = { v ->
-                    balDraft = v
-                    val pct = v.toInt()
-                    settingsPrefs.edit().putInt("stereo_balance", pct).apply()
-                    MusicService.instance?.applyStereoBalance(pct / 100f)
-                    },
-                    onValueChangeFinished = { bump() }
-                    )
-                    SDWDivider()
-                    SettingsNoteRow(stringResource(R.string.settings_balance_hint))
-                    SDWDivider()
-                }
-                item { SettingsGroupLabel(stringResource(R.string.settings_usb_dac)) }
-                item {
-                    LaunchedEffect(usbExclusiveEnabled, refreshTrigger) {
-                        if (usbExclusiveEnabled) {
-                            withContext(Dispatchers.IO) {
-                                try {
-                                    UsbDacManager.init(context)
-                                    val dacs = UsbDacManager.findDacs()
-                                    usbAvailable = dacs.isNotEmpty()
-                                    usbDacName = dacs.firstOrNull()?.name ?: ""
-                                } catch (_: Exception) { /* USB unavailable */ }
-                            }
-                        } else {
-                            usbAvailable = false
-                            usbDacName = ""
-                        }
-                        usbActive = usbExclusiveEnabled && UsbDacManager.isStreaming()
-                    }
-
-                    ThemeStagger(index = 3) {
-                        SettingsCard {
-                            SettingsSwitchItem(
-                                icon = Icons.Default.Usb,
-                                title = stringResource(R.string.settings_hardware_exclusive),
-                                subtitle = when {
-                                    usbActive -> stringResource(R.string.settings_active_dac, usbDacName)
-                                    usbExclusiveEnabled && usbAvailable -> stringResource(R.string.settings_dac_connected, usbDacName)
-                                    usbExclusiveEnabled -> stringResource(R.string.settings_waiting_dac)
-                                    else -> stringResource(R.string.settings_bypass_mixer)
-                                },
-                                checked = usbExclusiveEnabled,
-                                inCard = true,
-                                onCheckedChange = { enabled ->
-                                    usbExclusiveEnabled = enabled
-                                    settingsPrefs.edit().putBoolean("usb_exclusive", enabled).apply()
-                                    // 【V9.01】DAC 独占模式与交叉淡化 / DJ 过渡互斥：独占总闸开启时，
-                                    // USB DAC 走单流 bit-perfect 路径，无混音 / 交叉淡化能力 → 自动关闭二者并停掉引擎。
-                                    if (enabled) {
-                                        settingsPrefs.edit()
-                                            .putBoolean("crossfade_enabled", false)
-                                            .putBoolean("crossfade_dj_enabled", false)
-                                            .apply()
-                                        MusicService.instance?.setCrossfadeEnabled(false)
-                                        MusicService.instance?.applyLiveFx()
-                                        MusicService.instance?.refreshXfadeBassSwap()
-                                        MusicService.instance?.refreshXfadeThreeBand()
-                                        MusicService.instance?.applyBeatmatchEngine()
+                    ThemeStagger(index = 6) {
+                        Box(modifier = Modifier.onGloballyPositioned { coords ->
+                            // [V8.110] 开关在行尾：取行的右侧 82% 处、垂直居中作为扩散中心
+                            val pos = coords.positionInRoot()
+                            val size = coords.size
+                            themeSwitchX = pos.x + size.width * 0.82f
+                            themeSwitchY = pos.y + size.height * 0.5f
+                        }) {
+                            SettingsCard {
+                                SettingsSwitchItem(
+                                    icon = Icons.Default.LightMode,
+                                    title = stringResource(R.string.settings_light_mode),
+                                    subtitle = if (com.sdw.music.player.ThemeManager.lightMode.value)
+                                        stringResource(R.string.settings_light_mode_on)
+                                    else stringResource(R.string.settings_light_mode_off),
+                                    checked = com.sdw.music.player.ThemeManager.lightMode.value,
+                                    inCard = true,
+                                    onCheckedChange = { enabled ->
+                                        // [V8.110] 先交扩散中心，再换色板（顺序不能反：换了色板这一帧
+                                        // MaterialTheme 已经重组，背景取到的就是新值了）
+                                        ThemeFlip.mark(Offset(themeSwitchX, themeSwitchY))
+                                        com.sdw.music.player.ThemeManager.setLightMode(context, enabled)
+                                        bump()
                                     }
+                                )
+                            }
+                        }
+                    }
+                }
+                // [V8.111] 浅色模式开关正下方：跟随系统深/浅色主题
+                item {
+                    ThemeStagger(index = 7) {
+                        Box(modifier = Modifier.onGloballyPositioned { coords ->
+                            val pos = coords.positionInRoot()
+                            val size = coords.size
+                            followSwitchX = pos.x + size.width * 0.82f
+                            followSwitchY = pos.y + size.height * 0.5f
+                        }) {
+                            SettingsCard {
+                                SettingsSwitchItem(
+                                    icon = Icons.Default.BrightnessAuto,
+                                    title = stringResource(R.string.settings_follow_system),
+                                    subtitle = if (com.sdw.music.player.ThemeManager.followSystem.value)
+                                        stringResource(R.string.settings_follow_system_on)
+                                    else stringResource(R.string.settings_follow_system_off),
+                                    checked = com.sdw.music.player.ThemeManager.followSystem.value,
+                                    inCard = true,
+                                    onCheckedChange = { enabled ->
+                                        ThemeFlip.mark(Offset(followSwitchX, followSwitchY))
+                                        com.sdw.music.player.ThemeManager.setFollowSystem(context, enabled)
+                                        bump()
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // 【V9.10】艺人头像（多源：本地文件夹 / Wikimedia / Last.fm），默认开
+                item {
+                    var showLastFmKey by remember { mutableStateOf(false) }
+                    var keyDraft by remember {
+                        mutableStateOf(uiPrefs.getString("lastfm_api_key", "") ?: "")
+                    }
+                    SettingsPrefSwitch(
+                        refreshKey = refreshTrigger,
+                        bump = bump,
+                        prefs = uiPrefs,
+                        key = "artist_avatar_enabled",
+                        icon = Icons.Default.Person,
+                        defaultValue = true,
+                        title = stringResource(R.string.settings_artist_avatar),
+                        subtitleOn = stringResource(R.string.settings_artist_avatar_on),
+                        subtitleOff = stringResource(R.string.settings_artist_avatar_off),
+                        note = stringResource(R.string.settings_artist_avatar_note)
+                    )
+                    val src = uiPrefs.getString("artist_avatar_source", "auto") ?: "auto"
+                    SettingsChipGroup(
+                        label = stringResource(R.string.settings_artist_avatar_source),
+                        options = listOf(
+                            "auto" to stringResource(R.string.settings_artist_avatar_source_auto),
+                            "netease" to stringResource(R.string.settings_artist_avatar_source_netease),
+                            "qq" to stringResource(R.string.settings_artist_avatar_source_qq),
+                            "wikimedia" to stringResource(R.string.settings_artist_avatar_source_wikimedia),
+                            "lastfm" to stringResource(R.string.settings_artist_avatar_source_lastfm),
+                            "local" to stringResource(R.string.settings_artist_avatar_source_local)
+                        ),
+                        selectedKey = src,
+                        onSelect = {
+                            uiPrefs.edit().putString("artist_avatar_source", it).apply()
+                            bump()
+                        }
+                    )
+                    if (src == "lastfm" || src == "auto") {
+                        SettingsItem(
+                            icon = Icons.Default.Lock,
+                            title = stringResource(R.string.settings_lastfm_key),
+                            subtitle = if (keyDraft.isBlank())
+                                stringResource(R.string.settings_lastfm_key_hint)
+                            else "••••••••",
+                            inCard = true,
+                            onClick = { showLastFmKey = true }
+                        )
+                    }
+                    if (showLastFmKey) {
+                        AlertDialog(
+                            onDismissRequest = { showLastFmKey = false },
+                            title = { Text(stringResource(R.string.settings_lastfm_key)) },
+                            text = {
+                                OutlinedTextField(
+                                    value = keyDraft,
+                                    onValueChange = { keyDraft = it },
+                                    label = { Text(stringResource(R.string.settings_lastfm_key_hint)) },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            },
+                            confirmButton = {
+                                TextButton(onClick = {
+                                    uiPrefs.edit().putString("lastfm_api_key", keyDraft.trim()).apply()
+                                    showLastFmKey = false
+                                    bump()
+                                }) { Text(stringResource(android.R.string.ok)) }
+                            },
+                            dismissButton = {
+                                TextButton(onClick = { showLastFmKey = false }) {
+                                    Text(stringResource(android.R.string.cancel))
+                                }
+                            }
+                        )
+                    }
+                }
+
+                item { SettingsGroupLabel(stringResource(R.string.settings_section_display)) }
+                item {
+                    // 【V8.439】进度条上方显示什么：四选一（VU 表 / 整曲波形 / 两者 / 都不显示）。
+                    // 原来是单一开关，只能"有VU 表 / 没 VU 表"。波形（djay 着色 + 进拍/出拍横线）
+                    // 一直写好了但没有入口，所以用户从来看不到它—— 现在给它一个常驻开关。
+                    var visualMode by remember(refreshTrigger) {
+                        mutableStateOf(com.sdw.music.player.ui.components.PlayerVisualMode.read(uiPrefs))
+                    }
+                    val vuOnlyLabel = stringResource(R.string.pv_mode_vu)
+                    val noneLabel = stringResource(R.string.pv_mode_none)
+                    SettingsCard {
+                        SettingsChipGroup(
+                            options = listOf(
+                                "0" to vuOnlyLabel,
+                                "3" to noneLabel
+                            ),
+                            selectedKey = visualMode.key.toString(),
+                            label = stringResource(R.string.pv_above_progress),
+                            onSelect = { key ->
+                                val m = com.sdw.music.player.ui.components.PlayerVisualMode.fromKey(key.toInt())
+                                visualMode = m
+                                com.sdw.music.player.ui.components.PlayerVisualMode.write(uiPrefs, m)
+                                bump()
+                            }
+                        )
+                        // VU 表样式只在"会显示 VU 表"时才有意义
+                        if (visualMode.showVu) {
+                            SDWDivider()
+                            val analogLabel = stringResource(R.string.vu_style_analog)
+                            val mixerLabel = stringResource(R.string.vu_style_mixer)
+                            SettingsChipGroup(
+                                options = com.sdw.music.player.ui.components.VuMeterStyle.entries.mapIndexed { idx, style ->
+                                    idx.toString() to when (style) {
+                                        com.sdw.music.player.ui.components.VuMeterStyle.ANALOG_NEEDLE -> analogLabel
+                                        com.sdw.music.player.ui.components.VuMeterStyle.MIXER -> mixerLabel
+                                    }
+                                },
+                                selectedKey = uiPrefs.getInt("vu_meter_style", 1).toString(),
+                                onSelect = { key ->
+                                    uiPrefs.edit().putInt("vu_meter_style", key.toInt()).apply()
                                     bump()
                                 }
                             )
-                            if (usbExclusiveEnabled && usbAvailable) {
-                                SettingsNoteRow(text = dacDetected, color = Color(0xFF4CAF50))
+                        }
+                    }
+                }
+                item {
+                    SettingsCard {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "cover_color_bg",
+                            defaultValue = true, icon = Icons.Default.Palette,
+                            title = stringResource(R.string.settings_cover_bg),
+                            subtitleOn = stringResource(R.string.settings_cover_bg_on),
+                            subtitleOff = offLabel
+                        )
+                        SDWDivider()
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "moto_edge_light",
+                            defaultValue = true, icon = Icons.Default.LightMode,
+                            title = stringResource(R.string.settings_edge_light),
+                            subtitleOn = stringResource(R.string.settings_edge_on),
+                            subtitleOff = offLabel
+                        )
+                    }
+                }
+                // === Immersive player [V8.71] ===
+                item {
+                    var immersivePlayer by remember(refreshTrigger) {
+                        mutableStateOf(uiPrefs.getBoolean("immersive_player", false))
+                    }
+                    SettingsCard {
+                        SettingsSwitchItem(
+                            icon = Icons.Default.Fullscreen,
+                            title = stringResource(R.string.settings_immersive_player),
+                            subtitle = if (immersivePlayer) stringResource(R.string.settings_immersive_on) else offLabel,
+                            checked = immersivePlayer,
+                            inCard = true,
+                            onCheckedChange = { enabled ->
+                                immersivePlayer = enabled
+                                uiPrefs.edit().putBoolean("immersive_player", enabled).apply()
+                                bump()
                             }
-
+                        )
+                        if (immersivePlayer) {
                             SDWDivider()
-                            // TPDF 抖动开关：降位到 16bit 输出时消除量化失真
                             SettingsPrefSwitch(
-                                refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "tpdf_dither",
-                                defaultValue = true, icon = Icons.Default.GraphicEq,
-                                title = stringResource(R.string.settings_tpdf_dither),
-                                subtitleOn = stringResource(R.string.settings_tpdf_dither_desc),
-                                subtitleOff = stringResource(R.string.settings_tpdf_dither_desc),
-                                onChange = { enabled ->
-                                    // 【2026-09-08】双路下发：DAC 独占走 UsbDacManager(driver)，Oboe 外放/蓝牙走 OboeDirectPlayer
-                                    // 历史只调 DAC 侧导致外放路径 dither 恒开无法关闭（底噪来源之一）
-                                    UsbDacManager.setDitherEnabled(enabled)
-                                    MusicService.instance?.oboeDirectPlayer?.setDitherEnabled(enabled)
+                                refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "hide_song_info",
+                                icon = Icons.Default.SubtitlesOff,
+                                title = stringResource(R.string.settings_hide_song_info),
+                                subtitleOn = stringResource(R.string.settings_immersive_on),
+                                subtitleOff = offLabel
+                            )
+                            SDWDivider()
+                            SettingsPrefSwitch(
+                                refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "hide_spec",
+                                icon = Icons.Default.Info,
+                                title = stringResource(R.string.settings_hide_spec),
+                                subtitleOn = stringResource(R.string.settings_immersive_on),
+                                subtitleOff = offLabel
+                            )
+                            SDWDivider()
+                            SettingsPrefSwitch(
+                                refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "hide_bottom",
+                                icon = Icons.Default.MoreHoriz,
+                                title = stringResource(R.string.settings_hide_bottom),
+                                subtitleOn = stringResource(R.string.settings_immersive_on),
+                                subtitleOff = offLabel
+                            )
+                        }
+                    }
+                }
+                // === 播放页底部按键自动隐藏 ===
+                item {
+                    SettingsCard {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs,
+                            key = "auto_hide_bottom", defaultValue = true,
+                            icon = Icons.Default.VisibilityOff,
+                            title = stringResource(R.string.settings_auto_hide_bottom),
+                            subtitleOn = stringResource(R.string.settings_auto_on),
+                            subtitleOff = stringResource(R.string.settings_auto_off)
+                        )
+                    }
+                }
+
+                item { SettingsGroupLabel(stringResource(R.string.settings_wallpaper)) }
+                item {
+                    val imagePicker = rememberLauncherForActivityResult(
+                        ActivityResultContracts.GetContent()
+                    ) { uri ->
+                        if (uri != null) {
+                            com.sdw.music.player.WallpaperManager.setWallpaper(context, uri)
+                            bump()
+                        }
+                    }
+                    SettingsCard {
+                        SettingsItem(
+                            icon = Icons.Default.Wallpaper,
+                            title = stringResource(R.string.settings_wallpaper_pick),
+                            subtitle = if (com.sdw.music.player.WallpaperManager.hasWallpaper())
+                                stringResource(R.string.settings_wallpaper_set)
+                            else stringResource(R.string.settings_wallpaper_none),
+                            inCard = true,
+                            onClick = { imagePicker.launch("image/*") }
+                        )
+                        if (com.sdw.music.player.WallpaperManager.hasWallpaper()) {
+                            SDWDivider()
+                            // 取色感知开关
+                            SettingsSwitchItem(
+                                icon = Icons.Default.Palette,
+                                title = stringResource(R.string.settings_wallpaper_color_aware),
+                                subtitle = stringResource(R.string.settings_wallpaper_color_aware_desc),
+                                checked = com.sdw.music.player.WallpaperManager.colorAwareEnabled.value,
+                                inCard = true,
+                                onCheckedChange = { enabled ->
+                                    com.sdw.music.player.WallpaperManager.setColorAware(context, enabled)
+                                    bump()
                                 }
                             )
-
                             SDWDivider()
-                            // [2026-09-10 soft-start] Mask DAC PLL re-lock pops on stream start.
-                            // Default OFF on purpose: the fade-in ramp modifies samples, so
-                            // bit-perfect output is only traded away when the user opts in.
-                            ThemeStagger(index = 4) {
-                                SettingsPrefSwitch(
-                                    refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "dac_soft_start",
-                                    icon = Icons.Default.GraphicEq,
-                                    title = stringResource(R.string.settings_dac_soft_start),
-                                    subtitleOn = stringResource(R.string.settings_dac_soft_start_on),
-                                    subtitleOff = stringResource(R.string.settings_dac_soft_start_off),
-                                    onChange = { enabled -> UsbDacManager.setSoftStartEnabled(enabled) }
-                                )
-                            }
-
+                            SettingsSliderRow(
+                                title = stringResource(R.string.settings_wallpaper_blur),
+                                value = com.sdw.music.player.WallpaperManager.blurAmount.value,
+                                valueRange = 0f..40f,
+                                valueText = com.sdw.music.player.WallpaperManager.blurAmount.value.toInt().toString(),
+                                onValueChange = { com.sdw.music.player.WallpaperManager.setBlur(context, it) }
+                            )
+                            SDWDivider()
+                            SettingsSliderRow(
+                                title = stringResource(R.string.settings_wallpaper_scrim),
+                                value = com.sdw.music.player.WallpaperManager.scrimAmount.value,
+                                valueRange = 0f..0.85f,
+                                valueText = "${(com.sdw.music.player.WallpaperManager.scrimAmount.value * 100).toInt()}%",
+                                onValueChange = { com.sdw.music.player.WallpaperManager.setScrim(context, it) }
+                            )
+                            SDWDivider()
+                            SettingsItem(
+                                icon = Icons.Default.Delete,
+                                title = stringResource(R.string.settings_wallpaper_clear),
+                                subtitle = stringResource(R.string.settings_wallpaper_clear_desc),
+                                inCard = true,
+                                onClick = {
+                                    com.sdw.music.player.WallpaperManager.clearWallpaper(context)
+                                    bump()
+                                }
+                            )
                         }
                     }
                 }
 
-                // 【V9.01】创意 DSP 开关（引擎 DSP 主开关 + 5 个子开关）置于「USB DAC 独占」模块下。
-                // 原声直通（direct_passthrough）最高优先级：开启后本组全部失效。
-                val dacLockedByPassthrough = settingsPrefs.getBoolean("direct_passthrough", false)
-                if (dacLockedByPassthrough) {
-                    item {
-                        Text(
-                            stringResource(R.string.settings_dac_locked_by_passthrough),
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                        )
-                    }
-                }
+                item { SettingsGroupLabel(stringResource(R.string.settings_lyrics_display)) }
                 item {
+                    var lyricFontSize by remember(refreshTrigger) {
+                        mutableStateOf(uiPrefs.getInt("lyric_font_size", 28))
+                    }
+                    var lyricVisibleLines by remember(refreshTrigger) {
+                        mutableStateOf(uiPrefs.getInt("lyric_visible_lines", 7))
+                    }
                     SettingsCard {
-                        val engineDspEnabled = remember(refreshTrigger) { settingsPrefs.getBoolean("engine_dsp_enabled", true) }
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "engine_dsp_enabled",
-                            defaultValue = true, icon = Icons.Default.Tune,
-                            enabled = !dacLockedByPassthrough,
-                            title = stringResource(R.string.settings_engine_dsp),
-                            subtitleOn = stringResource(R.string.settings_engine_dsp_on),
-                            subtitleOff = stringResource(R.string.settings_engine_dsp_off),
-                            note = stringResource(R.string.settings_engine_dsp_note),
-                            onChange = { enabled -> MusicService.instance?.applyEngineDspEnabled(enabled) }
+                        SettingsItem(
+                            icon = Icons.Default.FormatSize,
+                            title = stringResource(R.string.settings_lyric_font_size),
+                            subtitle = stringResource(R.string.settings_font_size_value, lyricFontSize),
+                            inCard = true
                         )
                         SDWDivider()
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "crossfade_bass_swap",
-                            defaultValue = true, icon = Icons.Default.GraphicEq,
-                            enabled = !dacLockedByPassthrough,
-                            title = stringResource(R.string.settings_dac_bass_swap),
-                            subtitleOn = stringResource(R.string.settings_dac_bass_swap_on),
-                            subtitleOff = stringResource(R.string.settings_dac_bass_swap_off),
-                            onChange = { enabled -> MusicService.instance?.applyBassSwapEnabled(enabled) }
-                        )
-                        SDWDivider()
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "mseb_enabled",
-                            defaultValue = true, icon = Icons.Default.Equalizer,
-                            enabled = !dacLockedByPassthrough,
-                            title = stringResource(R.string.settings_dac_mseb),
-                            subtitleOn = stringResource(R.string.settings_dac_mseb_on),
-                            subtitleOff = stringResource(R.string.settings_dac_mseb_off),
-                            onChange = { enabled -> MusicService.instance?.applyMsebEnabled(enabled) }
-                        )
-                        SDWDivider()
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "limiter_enabled",
-                            defaultValue = true, icon = Icons.Default.LineWeight,
-                            enabled = !dacLockedByPassthrough,
-                            title = stringResource(R.string.settings_dac_limiter),
-                            subtitleOn = stringResource(R.string.settings_dac_limiter_on),
-                            subtitleOff = stringResource(R.string.settings_dac_limiter_off),
-                            onChange = { enabled -> MusicService.instance?.applyLimiterEnabled(enabled) }
-                        )
-                        SDWDivider()
-                        // 【V8.690 修复】DTS 开关改为读写 "mseb" pref（与 DSP 界面 MsebScreen 同源）。
-                        // 旧实现读写 "settings" 的同名字段——两个 UI 各写各的永远不通，且
-                        // 播放器重建时旧 refreshDtsEnabled 也只认 "settings"，导致"开了没效果"。
-                        // key 恰好同为 "dts_enabled"，defaultValue 对齐 MsebCalculator 的 false。
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump,
-                            prefs = context.getSharedPreferences("mseb", android.content.Context.MODE_PRIVATE),
-                            key = "dts_enabled",
-                            defaultValue = false, icon = Icons.Default.SurroundSound,
-                            enabled = !dacLockedByPassthrough,
-                            title = stringResource(R.string.settings_dac_dts),
-                            subtitleOn = stringResource(R.string.settings_dac_dts_on),
-                            subtitleOff = stringResource(R.string.settings_dac_dts_off),
-                            onChange = { enabled ->
-                                val svc = MusicService.instance
-                                svc?.applyDtsEnabled(enabled)
-                                // 与 MsebScreen.toggleDts 等价：开时下发完整 M/S 曲线，关时 reset
-                                if (enabled) {
-                                    val p = MsebCalculator.load(context)
-                                    val ex = MsebCalculator.getDtsStageEx(context)
-                                    svc?.applyMsStage(p.soundstage, p.imaging, ex.surround, ex.height)
-                                } else {
-                                    svc?.resetMsStage()
-                                }
+                        // [fix] 字号选项显示「小/中/大」而非具体 sp 数值
+                        SettingsChipGroup(
+                            options = listOf(
+                                "24" to stringResource(R.string.size_small),
+                                "28" to stringResource(R.string.size_medium),
+                                "32" to stringResource(R.string.size_large)
+                            ),
+                            selectedKey = lyricFontSize.toString(),
+                            onSelect = { key ->
+                                lyricFontSize = key.toInt()
+                                uiPrefs.edit().putInt("lyric_font_size", key.toInt()).apply()
+                                bump()
                             }
                         )
                         SDWDivider()
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "autoeq_enabled",
-                            defaultValue = true, icon = Icons.Default.Headphones,
-                            enabled = !dacLockedByPassthrough,
-                            title = stringResource(R.string.settings_dac_autoeq),
-                            subtitleOn = stringResource(R.string.settings_dac_autoeq_on),
-                            subtitleOff = stringResource(R.string.settings_dac_autoeq_off),
-                            onChange = { enabled -> MusicService.instance?.applyAutoEqEnabled(enabled) }
+                        SettingsItem(
+                            icon = Icons.AutoMirrored.Filled.ViewList,
+                            title = stringResource(R.string.settings_lyric_visible_lines),
+                            subtitle = stringResource(R.string.settings_lines_value, lyricVisibleLines),
+                            inCard = true
                         )
                         SDWDivider()
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "parametric_eq_enabled",
-                            defaultValue = false, icon = Icons.Default.Speed,
-                            enabled = !dacLockedByPassthrough && engineDspEnabled,
-                            title = stringResource(R.string.settings_dac_parametric_eq),
-                            subtitleOn = stringResource(R.string.settings_dac_parametric_eq_on),
-                            subtitleOff = stringResource(R.string.settings_dac_parametric_eq_off),
-                            onChange = { enabled -> MusicService.instance?.applyParametricEqEnabled(enabled) }
+                        SettingsChipGroup(
+                            options = listOf("5", "7", "9").map { it to it },
+                            selectedKey = lyricVisibleLines.toString(),
+                            onSelect = { key ->
+                                lyricVisibleLines = key.toInt()
+                                uiPrefs.edit().putInt("lyric_visible_lines", key.toInt()).apply()
+                                bump()
+                            }
+                        )
+                        SDWDivider()
+                        // 【V8.428】全屏歌词页 3 秒无操作后隐藏顶部操作栏 + 底部切歌按钮。
+                        // 存 uiPrefs（sdw_music_prefs），与同一分组里的字号/行数放一起。
+                        var lyricAutoHide by remember(refreshTrigger) {
+                            mutableStateOf(uiPrefs.getBoolean("lyric_controls_auto_hide", true))
+                        }
+                        SettingsSwitchItem(
+                            icon = Icons.Default.VisibilityOff,
+                            title = stringResource(R.string.settings_lyric_auto_hide),
+                            subtitle = stringResource(R.string.settings_lyric_auto_hide_desc),
+                            checked = lyricAutoHide,
+                            inCard = true,
+                            onCheckedChange = { enabled ->
+                                lyricAutoHide = enabled
+                                uiPrefs.edit().putBoolean("lyric_controls_auto_hide", enabled).apply()
+                                bump()
+                            }
                         )
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_bt_output)) }
+                item { SettingsGroupLabel(stringResource(R.string.settings_widget)) }
                 item {
+                    val widgetPref = context.getSharedPreferences("widget_prefs", android.content.Context.MODE_PRIVATE)
                     SettingsCard {
                         SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "bt_pre_emphasis",
-                            defaultValue = true, icon = Icons.Default.Bluetooth,
-                            title = stringResource(R.string.settings_bt_pre),
-                            subtitleOn = stringResource(R.string.settings_bt_pre_desc),
-                            subtitleOff = stringResource(R.string.settings_bt_pre_desc),
-                            onChange = { enabled -> MusicService.instance?.applyBtPreEmphasis(enabled) }
+                            refreshKey = refreshTrigger, bump = bump, prefs = widgetPref, key = "transparent_bg",
+                            icon = Icons.Default.BlurOn,
+                            title = stringResource(R.string.settings_transparent_widget),
+                            subtitleOn = stringResource(R.string.settings_widget_transparent),
+                            subtitleOff = stringResource(R.string.settings_widget_gradient),
+                            onChange = {
+                                // 立即刷新所有 widget
+                                try {
+                                    com.sdw.music.player.widget.MusicWidgetProvider.updateAllWidgets(context)
+                                } catch (_: Exception) {}
+                            }
+                        )
+                    }
+                }
+
+                item { SettingsGroupLabel(stringResource(R.string.language)) }
+                item {
+                    val currentLang = AppLanguageManager.getCurrent(context)
+                    val langLabel = when (currentLang) {
+                        "zh" -> stringResource(R.string.language_chinese)
+                        "en" -> stringResource(R.string.language_english)
+                        "es" -> stringResource(R.string.language_spanish)
+                        "ja" -> stringResource(R.string.language_japanese)
+                        "ko" -> stringResource(R.string.language_korean)
+                        "fr" -> stringResource(R.string.language_french)
+                        "zh-TW" -> stringResource(R.string.language_traditional_chinese)
+                        "pt" -> stringResource(R.string.language_portuguese)
+                        "hi" -> stringResource(R.string.language_hindi)
+                        else -> stringResource(R.string.language_system)
+                    }
+                    SettingsCard {
+                        SettingsItem(
+                            icon = Icons.Default.Translate,
+                            title = stringResource(R.string.language),
+                            subtitle = langLabel,
+                            inCard = true,
+                            onClick = {
+                                // 循环切换：跟随系统 → 中文 → English → Español → 跟随系统
+                                val supported = AppLanguageManager.SUPPORTED
+                                val curIdx = supported.indexOf(currentLang).coerceAtLeast(0)
+                                val next = supported[(curIdx + 1) % supported.size]
+                                AppLanguageManager.set(context, next)
+                                bump()
+                            }
                         )
                     }
                 }
@@ -2045,435 +2629,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
 
             item {
                 SettingsSectionTitle(
-                    stringResource(R.string.settings_cat_interface),
-                    collapsible = true,
-                    expanded = isSectionOpen("cat_ui"),
-                    itemCount = 42,
-                    onToggle = { toggleSection("cat_ui") }
-                )
-            }
-            if (isSectionOpen("cat_ui")) {
-                item { SettingsGroupLabel(stringResource(R.string.settings_section_display)) }
-                item {
-                    // 【V8.439】进度条上方显示什么：四选一（VU 表 / 整曲波形 / 两者 / 都不显示）。
-                    // 原来是单一开关，只能"有VU 表 / 没 VU 表"。波形（djay 着色 + 进拍/出拍横线）
-                    // 一直写好了但没有入口，所以用户从来看不到它—— 现在给它一个常驻开关。
-                    var visualMode by remember(refreshTrigger) {
-                        mutableStateOf(com.sdw.music.player.ui.components.PlayerVisualMode.read(uiPrefs))
-                    }
-                    val vuOnlyLabel = stringResource(R.string.pv_mode_vu)
-                    val noneLabel = stringResource(R.string.pv_mode_none)
-                    SettingsCard {
-                        SettingsChipGroup(
-                            options = listOf(
-                                "0" to vuOnlyLabel,
-                                "3" to noneLabel
-                            ),
-                            selectedKey = visualMode.key.toString(),
-                            label = stringResource(R.string.pv_above_progress),
-                            onSelect = { key ->
-                                val m = com.sdw.music.player.ui.components.PlayerVisualMode.fromKey(key.toInt())
-                                visualMode = m
-                                com.sdw.music.player.ui.components.PlayerVisualMode.write(uiPrefs, m)
-                                bump()
-                            }
-                        )
-                        // VU 表样式只在"会显示 VU 表"时才有意义
-                        if (visualMode.showVu) {
-                            SDWDivider()
-                            val analogLabel = stringResource(R.string.vu_style_analog)
-                            val mixerLabel = stringResource(R.string.vu_style_mixer)
-                            SettingsChipGroup(
-                                options = com.sdw.music.player.ui.components.VuMeterStyle.entries.mapIndexed { idx, style ->
-                                    idx.toString() to when (style) {
-                                        com.sdw.music.player.ui.components.VuMeterStyle.ANALOG_NEEDLE -> analogLabel
-                                        com.sdw.music.player.ui.components.VuMeterStyle.MIXER -> mixerLabel
-                                    }
-                                },
-                                selectedKey = uiPrefs.getInt("vu_meter_style", 1).toString(),
-                                onSelect = { key ->
-                                    uiPrefs.edit().putInt("vu_meter_style", key.toInt()).apply()
-                                    bump()
-                                }
-                            )
-                        }
-                    }
-                }
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "cover_color_bg",
-                            defaultValue = true, icon = Icons.Default.Palette,
-                            title = stringResource(R.string.settings_cover_bg),
-                            subtitleOn = stringResource(R.string.settings_cover_bg_on),
-                            subtitleOff = offLabel
-                        )
-                        SDWDivider()
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "moto_edge_light",
-                            defaultValue = true, icon = Icons.Default.LightMode,
-                            title = stringResource(R.string.settings_edge_light),
-                            subtitleOn = stringResource(R.string.settings_edge_on),
-                            subtitleOff = offLabel
-                        )
-                    }
-                }
-                // === Immersive player [V8.71] ===
-                item {
-                    var immersivePlayer by remember(refreshTrigger) {
-                        mutableStateOf(uiPrefs.getBoolean("immersive_player", false))
-                    }
-                    SettingsCard {
-                        SettingsSwitchItem(
-                            icon = Icons.Default.Fullscreen,
-                            title = stringResource(R.string.settings_immersive_player),
-                            subtitle = if (immersivePlayer) stringResource(R.string.settings_immersive_on) else offLabel,
-                            checked = immersivePlayer,
-                            inCard = true,
-                            onCheckedChange = { enabled ->
-                                immersivePlayer = enabled
-                                uiPrefs.edit().putBoolean("immersive_player", enabled).apply()
-                                bump()
-                            }
-                        )
-                        if (immersivePlayer) {
-                            SDWDivider()
-                            SettingsPrefSwitch(
-                                refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "hide_song_info",
-                                icon = Icons.Default.SubtitlesOff,
-                                title = stringResource(R.string.settings_hide_song_info),
-                                subtitleOn = stringResource(R.string.settings_immersive_on),
-                                subtitleOff = offLabel
-                            )
-                            SDWDivider()
-                            SettingsPrefSwitch(
-                                refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "hide_spec",
-                                icon = Icons.Default.Info,
-                                title = stringResource(R.string.settings_hide_spec),
-                                subtitleOn = stringResource(R.string.settings_immersive_on),
-                                subtitleOff = offLabel
-                            )
-                            SDWDivider()
-                            SettingsPrefSwitch(
-                                refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "hide_bottom",
-                                icon = Icons.Default.MoreHoriz,
-                                title = stringResource(R.string.settings_hide_bottom),
-                                subtitleOn = stringResource(R.string.settings_immersive_on),
-                                subtitleOff = offLabel
-                            )
-                        }
-                    }
-                }
-                // === 播放页底部按键自动隐藏 ===
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs,
-                            key = "auto_hide_bottom", defaultValue = true,
-                            icon = Icons.Default.VisibilityOff,
-                            title = stringResource(R.string.settings_auto_hide_bottom),
-                            subtitleOn = stringResource(R.string.settings_auto_on),
-                            subtitleOff = stringResource(R.string.settings_auto_off)
-                        )
-                    }
-                }
-
-                item { SettingsGroupLabel(stringResource(R.string.settings_widget)) }
-                item {
-                    val widgetPref = context.getSharedPreferences("widget_prefs", android.content.Context.MODE_PRIVATE)
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = widgetPref, key = "transparent_bg",
-                            icon = Icons.Default.BlurOn,
-                            title = stringResource(R.string.settings_transparent_widget),
-                            subtitleOn = stringResource(R.string.settings_widget_transparent),
-                            subtitleOff = stringResource(R.string.settings_widget_gradient),
-                            onChange = {
-                                // 立即刷新所有 widget
-                                try {
-                                    com.sdw.music.player.widget.MusicWidgetProvider.updateAllWidgets(context)
-                                } catch (_: Exception) {}
-                            }
-                        )
-                    }
-                }
-
-                item { SettingsGroupLabel(stringResource(R.string.settings_appearance)) }
-                item {
-                    ThemeStagger(index = 6) {
-                        Box(modifier = Modifier.onGloballyPositioned { coords ->
-                            // [V8.110] 开关在行尾：取行的右侧 82% 处、垂直居中作为扩散中心
-                            val pos = coords.positionInRoot()
-                            val size = coords.size
-                            themeSwitchX = pos.x + size.width * 0.82f
-                            themeSwitchY = pos.y + size.height * 0.5f
-                        }) {
-                            SettingsCard {
-                                SettingsSwitchItem(
-                                    icon = Icons.Default.LightMode,
-                                    title = stringResource(R.string.settings_light_mode),
-                                    subtitle = if (com.sdw.music.player.ThemeManager.lightMode.value)
-                                        stringResource(R.string.settings_light_mode_on)
-                                    else stringResource(R.string.settings_light_mode_off),
-                                    checked = com.sdw.music.player.ThemeManager.lightMode.value,
-                                    inCard = true,
-                                    onCheckedChange = { enabled ->
-                                        // [V8.110] 先交扩散中心，再换色板（顺序不能反：换了色板这一帧
-                                        // MaterialTheme 已经重组，背景取到的就是新值了）
-                                        ThemeFlip.mark(Offset(themeSwitchX, themeSwitchY))
-                                        com.sdw.music.player.ThemeManager.setLightMode(context, enabled)
-                                        bump()
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-                // [V8.111] 浅色模式开关正下方：跟随系统深/浅色主题
-                item {
-                    ThemeStagger(index = 7) {
-                        Box(modifier = Modifier.onGloballyPositioned { coords ->
-                            val pos = coords.positionInRoot()
-                            val size = coords.size
-                            followSwitchX = pos.x + size.width * 0.82f
-                            followSwitchY = pos.y + size.height * 0.5f
-                        }) {
-                            SettingsCard {
-                                SettingsSwitchItem(
-                                    icon = Icons.Default.BrightnessAuto,
-                                    title = stringResource(R.string.settings_follow_system),
-                                    subtitle = if (com.sdw.music.player.ThemeManager.followSystem.value)
-                                        stringResource(R.string.settings_follow_system_on)
-                                    else stringResource(R.string.settings_follow_system_off),
-                                    checked = com.sdw.music.player.ThemeManager.followSystem.value,
-                                    inCard = true,
-                                    onCheckedChange = { enabled ->
-                                        ThemeFlip.mark(Offset(followSwitchX, followSwitchY))
-                                        com.sdw.music.player.ThemeManager.setFollowSystem(context, enabled)
-                                        bump()
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-
-                // 【V9.10】艺人头像（多源：本地文件夹 / Wikimedia / Last.fm），默认开
-                item {
-                    var showLastFmKey by remember { mutableStateOf(false) }
-                    var keyDraft by remember {
-                        mutableStateOf(uiPrefs.getString("lastfm_api_key", "") ?: "")
-                    }
-                    SettingsPrefSwitch(
-                        refreshKey = refreshTrigger,
-                        bump = bump,
-                        prefs = uiPrefs,
-                        key = "artist_avatar_enabled",
-                        icon = Icons.Default.Person,
-                        defaultValue = true,
-                        title = stringResource(R.string.settings_artist_avatar),
-                        subtitleOn = stringResource(R.string.settings_artist_avatar_on),
-                        subtitleOff = stringResource(R.string.settings_artist_avatar_off),
-                        note = stringResource(R.string.settings_artist_avatar_note)
-                    )
-                    val src = uiPrefs.getString("artist_avatar_source", "auto") ?: "auto"
-                    SettingsChipGroup(
-                        label = stringResource(R.string.settings_artist_avatar_source),
-                        options = listOf(
-                            "auto" to stringResource(R.string.settings_artist_avatar_source_auto),
-                            "netease" to stringResource(R.string.settings_artist_avatar_source_netease),
-                            "qq" to stringResource(R.string.settings_artist_avatar_source_qq),
-                            "wikimedia" to stringResource(R.string.settings_artist_avatar_source_wikimedia),
-                            "lastfm" to stringResource(R.string.settings_artist_avatar_source_lastfm),
-                            "local" to stringResource(R.string.settings_artist_avatar_source_local)
-                        ),
-                        selectedKey = src,
-                        onSelect = {
-                            uiPrefs.edit().putString("artist_avatar_source", it).apply()
-                            bump()
-                        }
-                    )
-                    if (src == "lastfm" || src == "auto") {
-                        SettingsItem(
-                            icon = Icons.Default.Lock,
-                            title = stringResource(R.string.settings_lastfm_key),
-                            subtitle = if (keyDraft.isBlank())
-                                stringResource(R.string.settings_lastfm_key_hint)
-                            else "••••••••",
-                            inCard = true,
-                            onClick = { showLastFmKey = true }
-                        )
-                    }
-                    if (showLastFmKey) {
-                        AlertDialog(
-                            onDismissRequest = { showLastFmKey = false },
-                            title = { Text(stringResource(R.string.settings_lastfm_key)) },
-                            text = {
-                                OutlinedTextField(
-                                    value = keyDraft,
-                                    onValueChange = { keyDraft = it },
-                                    label = { Text(stringResource(R.string.settings_lastfm_key_hint)) },
-                                    singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
-                                )
-                            },
-                            confirmButton = {
-                                TextButton(onClick = {
-                                    uiPrefs.edit().putString("lastfm_api_key", keyDraft.trim()).apply()
-                                    showLastFmKey = false
-                                    bump()
-                                }) { Text(stringResource(android.R.string.ok)) }
-                            },
-                            dismissButton = {
-                                TextButton(onClick = { showLastFmKey = false }) {
-                                    Text(stringResource(android.R.string.cancel))
-                                }
-                            }
-                        )
-                    }
-                }
-
-                item { SettingsGroupLabel(stringResource(R.string.settings_wallpaper)) }
-                item {
-                    val imagePicker = rememberLauncherForActivityResult(
-                        ActivityResultContracts.GetContent()
-                    ) { uri ->
-                        if (uri != null) {
-                            com.sdw.music.player.WallpaperManager.setWallpaper(context, uri)
-                            bump()
-                        }
-                    }
-                    SettingsCard {
-                        SettingsItem(
-                            icon = Icons.Default.Wallpaper,
-                            title = stringResource(R.string.settings_wallpaper_pick),
-                            subtitle = if (com.sdw.music.player.WallpaperManager.hasWallpaper())
-                                stringResource(R.string.settings_wallpaper_set)
-                            else stringResource(R.string.settings_wallpaper_none),
-                            inCard = true,
-                            onClick = { imagePicker.launch("image/*") }
-                        )
-                        if (com.sdw.music.player.WallpaperManager.hasWallpaper()) {
-                            SDWDivider()
-                            // 取色感知开关
-                            SettingsSwitchItem(
-                                icon = Icons.Default.Palette,
-                                title = stringResource(R.string.settings_wallpaper_color_aware),
-                                subtitle = stringResource(R.string.settings_wallpaper_color_aware_desc),
-                                checked = com.sdw.music.player.WallpaperManager.colorAwareEnabled.value,
-                                inCard = true,
-                                onCheckedChange = { enabled ->
-                                    com.sdw.music.player.WallpaperManager.setColorAware(context, enabled)
-                                    bump()
-                                }
-                            )
-                            SDWDivider()
-                            SettingsSliderRow(
-                                title = stringResource(R.string.settings_wallpaper_blur),
-                                value = com.sdw.music.player.WallpaperManager.blurAmount.value,
-                                valueRange = 0f..40f,
-                                valueText = com.sdw.music.player.WallpaperManager.blurAmount.value.toInt().toString(),
-                                onValueChange = { com.sdw.music.player.WallpaperManager.setBlur(context, it) }
-                            )
-                            SDWDivider()
-                            SettingsSliderRow(
-                                title = stringResource(R.string.settings_wallpaper_scrim),
-                                value = com.sdw.music.player.WallpaperManager.scrimAmount.value,
-                                valueRange = 0f..0.85f,
-                                valueText = "${(com.sdw.music.player.WallpaperManager.scrimAmount.value * 100).toInt()}%",
-                                onValueChange = { com.sdw.music.player.WallpaperManager.setScrim(context, it) }
-                            )
-                            SDWDivider()
-                            SettingsItem(
-                                icon = Icons.Default.Delete,
-                                title = stringResource(R.string.settings_wallpaper_clear),
-                                subtitle = stringResource(R.string.settings_wallpaper_clear_desc),
-                                inCard = true,
-                                onClick = {
-                                    com.sdw.music.player.WallpaperManager.clearWallpaper(context)
-                                    bump()
-                                }
-                            )
-                        }
-                    }
-                }
-
-                item { SettingsGroupLabel(stringResource(R.string.settings_lyrics_display)) }
-                item {
-                    var lyricFontSize by remember(refreshTrigger) {
-                        mutableStateOf(uiPrefs.getInt("lyric_font_size", 28))
-                    }
-                    var lyricVisibleLines by remember(refreshTrigger) {
-                        mutableStateOf(uiPrefs.getInt("lyric_visible_lines", 7))
-                    }
-                    SettingsCard {
-                        SettingsItem(
-                            icon = Icons.Default.FormatSize,
-                            title = stringResource(R.string.settings_lyric_font_size),
-                            subtitle = stringResource(R.string.settings_font_size_value, lyricFontSize),
-                            inCard = true
-                        )
-                        SDWDivider()
-                        // [fix] 字号选项显示「小/中/大」而非具体 sp 数值
-                        SettingsChipGroup(
-                            options = listOf(
-                                "24" to stringResource(R.string.size_small),
-                                "28" to stringResource(R.string.size_medium),
-                                "32" to stringResource(R.string.size_large)
-                            ),
-                            selectedKey = lyricFontSize.toString(),
-                            onSelect = { key ->
-                                lyricFontSize = key.toInt()
-                                uiPrefs.edit().putInt("lyric_font_size", key.toInt()).apply()
-                                bump()
-                            }
-                        )
-                        SDWDivider()
-                        SettingsItem(
-                            icon = Icons.AutoMirrored.Filled.ViewList,
-                            title = stringResource(R.string.settings_lyric_visible_lines),
-                            subtitle = stringResource(R.string.settings_lines_value, lyricVisibleLines),
-                            inCard = true
-                        )
-                        SDWDivider()
-                        SettingsChipGroup(
-                            options = listOf("5", "7", "9").map { it to it },
-                            selectedKey = lyricVisibleLines.toString(),
-                            onSelect = { key ->
-                                lyricVisibleLines = key.toInt()
-                                uiPrefs.edit().putInt("lyric_visible_lines", key.toInt()).apply()
-                                bump()
-                            }
-                        )
-                        SDWDivider()
-                        // 【V8.428】全屏歌词页 3 秒无操作后隐藏顶部操作栏 + 底部切歌按钮。
-                        // 存 uiPrefs（sdw_music_prefs），与同一分组里的字号/行数放一起。
-                        var lyricAutoHide by remember(refreshTrigger) {
-                            mutableStateOf(uiPrefs.getBoolean("lyric_controls_auto_hide", true))
-                        }
-                        SettingsSwitchItem(
-                            icon = Icons.Default.VisibilityOff,
-                            title = stringResource(R.string.settings_lyric_auto_hide),
-                            subtitle = stringResource(R.string.settings_lyric_auto_hide_desc),
-                            checked = lyricAutoHide,
-                            inCard = true,
-                            onCheckedChange = { enabled ->
-                                lyricAutoHide = enabled
-                                uiPrefs.edit().putBoolean("lyric_controls_auto_hide", enabled).apply()
-                                bump()
-                            }
-                        )
-                    }
-                }
-
-            }
-
-            item {
-                SettingsSectionTitle(
                     stringResource(R.string.settings_cat_system),
                     collapsible = true,
                     expanded = isSectionOpen("cat_system"),
-                    itemCount = 15,
+                    itemCount = 13,   // 【V9.20w】-2：语言移至「界面」
                     onToggle = { toggleSection("cat_system") }
                 )
             }
@@ -2544,6 +2703,37 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 bump()
                             }
                         )
+                        SDWDivider()
+                        // [Stage0 2026-10-23] Surface the battery-optimization state. When the system
+                        // restricts us, background USB transfers can be frozen mid-song, which is
+                        // exactly the "Stream goes off after long playback" symptom. This mirrors
+                        // NeriPlayer's background-behavior item: state the truth and give a one-tap
+                        // route to the system page where the user can exempt us.
+                        val powerCtx = LocalContext.current
+                        val batteryExempt = remember(refreshTrigger) {
+                            val pm = powerCtx.getSystemService(android.content.Context.POWER_SERVICE) as android.os.PowerManager
+                            pm.isIgnoringBatteryOptimizations(powerCtx.packageName)
+                        }
+                        SettingsItem(
+                            icon = Icons.Default.BatteryAlert,
+                            title = stringResource(R.string.settings_battery_optimization),
+                            subtitle = stringResource(
+                                if (batteryExempt) R.string.settings_battery_optimization_exempt
+                                else R.string.settings_battery_optimization_restricted
+                            ),
+                            inCard = true,
+                            onClick = {
+                                try {
+                                    powerCtx.startActivity(
+                                        android.content.Intent(
+                                            android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                                        ).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    )
+                                } catch (e: Exception) {
+                                    android.util.Log.w("SettingsScreen", "cannot open battery optimization settings", e)
+                                }
+                            }
+                        )
                     }
                 }
 
@@ -2608,10 +2798,13 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             }
                             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.End) {
                                 val clipboardManager = LocalClipboardManager.current
+                                val copyCtx = LocalContext.current
                                 TextButton(onClick = {
                                     (fullLog + "\n\n" + logAudioInfo + "\n" + (UsbDacManager.getDetailedDacInfo() ?: "") +
                                      "\n" + logStream.format(if (UsbDacManager.isStreaming()) statusOn else statusOff) +
-                                     "\n" + logUnderruns.format(UsbDacManager.getUnderrunCount())
+                                     "\n" + logUnderruns.format(UsbDacManager.getUnderrunCount()) +
+                                     // 【崩溃诊断】一次复制把崩溃堆栈也带上，免得用户分两次贴。
+                                     "\n\n=== LAST CRASH ===\n" + com.sdw.music.player.CrashHandler.peekCrashLog(copyCtx)
                                     ).also { clipboardManager.setText(AnnotatedString(it)) }
                                 }) { Text(stringResource(R.string.action_copy), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp) }
                                 TextButton(onClick = { com.sdw.music.player.core.audio.DebugLog.clear(); UsbDacManager.clearNativeDebugLog(); bump() }) {
@@ -2619,6 +2812,56 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 }
                                 TextButton(onClick = { bump() }) {
                                     Text(stringResource(R.string.action_refresh), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // === 【崩溃诊断 2026-10-23】上次崩溃报告 ===
+                // 故意放在 DebugLog.enabled 判断之外：调试日志默认关闭，若跟着一起隐藏，
+                // 用户崩了根本看不到。只有真的存在崩溃文件时才占版面（用非破坏性读取，
+                // 原 readCrashLog() 读完即删，直接显示会把日志吃掉）。
+                item {
+                    val crashCtx = LocalContext.current
+                    val crashLog = remember(refreshTrigger) {
+                        com.sdw.music.player.CrashHandler.peekCrashLog(crashCtx)
+                    }
+                    if (crashLog.isNotBlank()) {
+                        val crashScroll = rememberScrollState()
+                        // [V8.115] 与 USB 日志框同一套玻璃语言。
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                                .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
+                                .padding(vertical = 6.dp)
+                        ) {
+                            Text(
+                                text = stringResource(R.string.settings_last_crash),
+                                color = Color(0xFFFF6B6B),
+                                fontSize = 12.sp,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                            )
+                            Column(modifier = Modifier.heightIn(max = 240.dp)) {
+                                Text(
+                                    text = crashLog,
+                                    color = Color(0xFFFFB4A2),
+                                    fontSize = 9.sp,
+                                    lineHeight = 12.sp,
+                                    fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                                    modifier = Modifier.padding(8.dp).verticalScroll(crashScroll)
+                                )
+                            }
+                            Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp), horizontalArrangement = Arrangement.End) {
+                                val clipboardManager = LocalClipboardManager.current
+                                TextButton(onClick = { clipboardManager.setText(AnnotatedString(crashLog)) }) {
+                                    Text(stringResource(R.string.action_copy), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+                                }
+                                TextButton(onClick = {
+                                    com.sdw.music.player.CrashHandler.clearCrashLog(crashCtx)
+                                    bump()
+                                }) {
+                                    Text(stringResource(R.string.action_clear), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                                 }
                             }
                         }
@@ -2658,36 +2901,171 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.language)) }
+                // === DAC 自适应探测面板 — P1 描述符自动探测 + P2 静音回退 + P3 码率实测 ===
+                // 紧接「USB DAC Debug Log」面板下方。仅在已连接 DAC 时渲染；结构与 Audio
+                // Info Panel 并列，使用同样的玻璃卡 + 等宽字体风格。数据为刷新快照
+                // （remember(refreshTrigger)），连接/断开或点「刷新」即更新。
                 item {
-                    val currentLang = AppLanguageManager.getCurrent(context)
-                    val langLabel = when (currentLang) {
-                        "zh" -> stringResource(R.string.language_chinese)
-                        "en" -> stringResource(R.string.language_english)
-                        "es" -> stringResource(R.string.language_spanish)
-                        "ja" -> stringResource(R.string.language_japanese)
-                        "ko" -> stringResource(R.string.language_korean)
-                        "fr" -> stringResource(R.string.language_french)
-                        "zh-TW" -> stringResource(R.string.language_traditional_chinese)
-                        "pt" -> stringResource(R.string.language_portuguese)
-                        "hi" -> stringResource(R.string.language_hindi)
-                        else -> stringResource(R.string.language_system)
-                    }
-                    SettingsCard {
-                        SettingsItem(
-                            icon = Icons.Default.Translate,
-                            title = stringResource(R.string.language),
-                            subtitle = langLabel,
-                            inCard = true,
-                            onClick = {
-                                // 循环切换：跟随系统 → 中文 → English → Español → 跟随系统
-                                val supported = AppLanguageManager.SUPPORTED
-                                val curIdx = supported.indexOf(currentLang).coerceAtLeast(0)
-                                val next = supported[(curIdx + 1) % supported.size]
-                                AppLanguageManager.set(context, next)
-                                bump()
+                    val dacDev = remember(refreshTrigger) { UsbDacManager.getDacDevice() }
+                    if (dacDev != null) {
+                        val vid = dacDev.vendorId
+                        val pid = dacDev.productId
+                        val profile = remember(refreshTrigger) { DacProfile.find(vid, pid) }
+                        val desc = UsbDacManager.activeDescriptor
+                        val verified = remember(refreshTrigger) { UsbDacManager.getVerifiedRates() }
+                        val supported = remember(refreshTrigger) { UsbDacManager.getSupportedRates() }
+                        val forcedOboe = remember(refreshTrigger) { UsbDacManager.isForcedOboe(vid, pid) }
+                        val fmtRate: (Int) -> String = { hz ->
+                            val khz = hz / 1000.0
+                            if (khz == khz.toInt().toDouble()) "${khz.toInt()}k" else "%.1fk".format(khz)
+                        }
+                        val useOboe = DacProfile.shouldUseSystemRoute(vid, pid)
+                        val route = when {
+                            forcedOboe -> stringResource(R.string.dacdiag_route_oboe_fb)
+                            useOboe -> stringResource(R.string.dacdiag_route_oboe)
+                            else -> stringResource(R.string.dacdiag_route_host)
+                        }
+                        val routeColor = when {
+                            forcedOboe -> Color(0xFFFF9800)
+                            useOboe -> MaterialTheme.colorScheme.primary
+                            else -> Color(0xFF00FF88)
+                        }
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                                .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
+                                .padding(12.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.BugReport, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(stringResource(R.string.dacdiag_title), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                                Spacer(Modifier.weight(1f))
+                                Text("P1–P5", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                             }
-                        )
+                            Spacer(Modifier.height(8.dp))
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_device), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text("${dacDev.productName ?: "USB DAC"}  0x${vid.toString(16)}:0x${pid.toString(16)}", color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+
+                            // —— 描述符自动探测（P1 native 解析）——
+                            Text(stringResource(R.string.dacdiag_sec_descriptor), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_uac_version), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text("UAC ${desc?.uacVersion ?: 2}", color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_wire_bits), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text("${desc?.wireBits ?: 16}-bit", color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text("subslotMax", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(84.dp))
+                                Text("${desc?.subslotMax ?: "—"}", color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text("FeatureUnit", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(84.dp))
+                                Text(if ((desc?.featureUnitId ?: 0) > 0) "id=${desc?.featureUnitId} ch=${desc?.featureUnitChannel}/${desc?.featureUnitChannels}" else stringResource(R.string.dacdiag_none), color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_clock_44k), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text(if (profile.lacks44k1Clock) stringResource(R.string.dacdiag_clock_missing) else stringResource(R.string.dacdiag_clock_ok), color = if (profile.lacks44k1Clock) Color(0xFFFF9800) else Color(0xFF00FF88), fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                            }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_clock_probe), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text(if (desc?.hasClockInfo == true) stringResource(R.string.dacdiag_yes) else stringResource(R.string.dacdiag_no), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                            }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_alt_fb_hs), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(84.dp))
+                                Text("alt=${desc?.altCount ?: "—"} fb=${if (desc?.hasFeedbackEp == true) stringResource(R.string.dacdiag_yes) else stringResource(R.string.dacdiag_no)} hs=${if (desc?.highSpeed == true) "HS" else "FS"}", color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+
+                            // —— quirk 库命中（P4 收窄后仅固件 bug 字段）——
+                            Text(stringResource(R.string.dacdiag_sec_quirk), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_match), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text(if (profile.autoProbe) stringResource(R.string.dacdiag_match_generic) else profile.name, color = if (profile.autoProbe) Color(0xFFFF9800) else Color(0xFF00FF88), fontSize = 11.sp)
+                            }
+                            val quirkSummary = mutableListOf<String>().apply {
+                                if (profile.skipSetCur) add("skipSetCur")
+                                if (profile.skipSetCurQuirk) add("skipSetCurQuirk")
+                                if (profile.forceUac1) add("forceUac1")
+                                if (profile.forceIfaceReset) add("forceIfaceReset")
+                                if (profile.ctlMsgDelayUs > 0) add("ctlMsgDelayUs=${profile.ctlMsgDelayUs}")
+                                if (profile.urbPacketsOverride > 0) add("urbPackets=${profile.urbPacketsOverride}")
+                                if (profile.ifaceDelayUs > 0) add("ifaceDelay=${profile.ifaceDelayUs}")
+                            }.joinToString(" ")
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_fields), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text(if (quirkSummary.isEmpty()) stringResource(R.string.dacdiag_fields_none) else quirkSummary, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+
+                            // —— 码率：P3 实测 vs 描述符声明 ——
+                            Text(stringResource(R.string.dacdiag_sec_rates), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_p3_verified), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text(if (verified.isNotEmpty()) verified.joinToString(" ") { fmtRate(it) } else stringResource(R.string.dacdiag_no_probe_data), color = Color(0xFF00FF88), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_declared), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text(if (supported.isNotBlank()) supported else "—", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                            }
+
+                            // —— 路由决策 + 回退原因（P5 核心）——
+                            Text(stringResource(R.string.dacdiag_sec_route), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_route), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text(route, color = routeColor, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                            }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dacdiag_auto), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                Text(if (profile.autoProbe) stringResource(R.string.dacdiag_auto_yes) else stringResource(R.string.dacdiag_auto_no), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                            }
+                            // [P5] 诊断结论：跟随语言（英文模式只显示英文，中文模式只显示中文）
+                            val reasonText = when {
+                                forcedOboe -> stringResource(R.string.dacdiag_reason_forced)
+                                useOboe -> stringResource(R.string.dacdiag_reason_quirk, profile.name)
+                                profile.autoProbe -> stringResource(R.string.dacdiag_reason_autoprobe)
+                                else -> stringResource(R.string.dacdiag_reason_known, profile.name)
+                            }
+                            val reasonColor = when {
+                                forcedOboe -> Color(0xFFFF9800)
+                                useOboe -> MaterialTheme.colorScheme.primary
+                                else -> Color(0xFF00FF88)
+                            }
+                            Spacer(Modifier.height(4.dp))
+                            Text(stringResource(R.string.dacdiag_diag_label, reasonText), color = reasonColor, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, modifier = Modifier.fillMaxWidth())
+
+                            // —— [P6] 异步反馈闭环状态（仅 DAC 已连接时显示）——
+                            val fbActive = remember(refreshTrigger) { UsbDacManager.isFeedbackActive() }
+                            val fbRate = remember(refreshTrigger) { UsbDacManager.getFeedbackMeasuredRate() }
+                            val fbPpm = remember(refreshTrigger) { UsbDacManager.getFeedbackCorrectionPpm() }
+                            Row(Modifier.padding(vertical = 2.dp)) {
+                                Text(stringResource(R.string.dac_fb_status_label), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
+                                if (fbActive) {
+                                    Text(stringResource(R.string.dac_fb_active).format(fbRate / 1000.0, fbPpm), color = Color(0xFF00FF88), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                                } else {
+                                    Text(stringResource(R.string.dac_fb_inactive), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                                }
+                            }
+                        }
+                    } else if (usbExclusiveEnabled) {
+                        // [DAC status] USB DAC 独占已开启但没检测到/没认领 DAC 时，也给出明确状态卡，
+                        // 不再整块消失（之前 dacDev==null 时 P5 面板完全不渲染，用户看不到认领状态）。
+                        Column(
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
+                                .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
+                                .padding(12.dp)
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(Icons.Default.BugReport, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(stringResource(R.string.dacdiag_title), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text(stringResource(R.string.dacdiag_not_connected), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
+                            Spacer(Modifier.height(4.dp))
+                            Text(stringResource(R.string.dacdiag_not_connected_hint), color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f), fontSize = 10.sp, lineHeight = 14.sp)
+                        }
                     }
                 }
 
@@ -2973,6 +3351,253 @@ private fun SettingsOptionRow(
         Spacer(Modifier.height(8.dp))
         SettingsChipFlow(options, selectedKey, onSelect)
     }
+}
+
+/**
+ * [NeriPlayer 引擎] USB 独占输出画质卡：选项集与 NeriPlayer 的
+ * UsbExclusiveQualityContent 一致（采样率/位深/缓冲/不支持格式策略 +
+ * 比特完美 + 三项兼容 + 前后台缓冲 + 音量风险阈值 + 设备能力/运行状态）。
+ */
+@Composable
+private fun UsbExclusiveQualityCard(bump: () -> Unit) {
+    val context = LocalContext.current
+    var prefs by remember { mutableStateOf(UsbExclusivePrefs.read(context)) }
+
+    fun save(next: com.sdw.music.player.core.audio.engine.UsbExclusivePreferences) {
+        prefs = next
+        UsbExclusivePrefs.write(context, next)
+        bump()
+    }
+
+    // ── 采样率策略 ──
+    SettingsOptionRow(
+        title = stringResource(R.string.settings_usb_ex_rate_policy),
+        options = listOf(
+            "follow_source" to stringResource(R.string.settings_usb_ex_rate_follow),
+            "44100" to "44.1 kHz", "48000" to "48 kHz",
+            "88200" to "88.2 kHz", "96000" to "96 kHz",
+            "176400" to "176.4 kHz", "192000" to "192 kHz",
+            "352800" to "352.8 kHz", "384000" to "384 kHz",
+        ),
+        selectedKey = prefs.sampleRateMode.storageValue,
+        onSelect = { key ->
+            save(prefs.copy(sampleRateMode = UsbExclusiveSampleRateMode.fromStorageValue(key)))
+        }
+    )
+    SettingsNoteRow(stringResource(R.string.settings_usb_ex_rate_follow_desc))
+    SDWDivider()
+
+    // ── 位深策略 ──
+    SettingsOptionRow(
+        title = stringResource(R.string.settings_usb_ex_bits_policy),
+        options = listOf(
+            "auto" to stringResource(R.string.settings_usb_ex_bits_auto),
+            "16" to "16 bit", "24" to "24 bit", "32" to "32 bit",
+        ),
+        selectedKey = prefs.bitDepthMode.storageValue,
+        onSelect = { key ->
+            save(prefs.copy(bitDepthMode = UsbExclusiveBitDepthMode.fromStorageValue(key)))
+        }
+    )
+    SDWDivider()
+
+    // ── 缓冲策略 ──
+    SettingsOptionRow(
+        title = stringResource(R.string.settings_usb_ex_buffer_policy),
+        options = listOf(
+            "low_latency" to stringResource(R.string.settings_usb_ex_buf_low_latency),
+            "balanced" to stringResource(R.string.settings_usb_ex_buf_balanced),
+            "stable" to stringResource(R.string.settings_usb_ex_buf_stable),
+        ),
+        selectedKey = prefs.bufferProfile.storageValue,
+        onSelect = { key ->
+            save(prefs.copy(bufferProfile = UsbExclusiveBufferProfile.fromStorageValue(key)))
+        }
+    )
+    SDWDivider()
+
+    // ── 不支持格式时策略 ──
+    SettingsOptionRow(
+        title = stringResource(R.string.settings_usb_ex_unsupported_policy),
+        options = listOf(
+            "closest_supported" to stringResource(R.string.settings_usb_ex_unsupported_closest),
+            "system_fallback" to stringResource(R.string.settings_usb_ex_unsupported_fallback),
+        ),
+        selectedKey = prefs.unsupportedFormatPolicy.storageValue,
+        onSelect = { key ->
+            save(prefs.copy(unsupportedFormatPolicy = UsbExclusiveUnsupportedFormatPolicy.fromStorageValue(key)))
+        }
+    )
+    SDWDivider()
+
+    // ── 比特完美 ──
+    SettingsPrefSwitch(
+        refreshKey = 0, bump = bump, prefs = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE),
+        key = UsbExclusivePrefs.KEY_BIT_PERFECT,
+        defaultValue = USB_EX_DEFAULT_BIT_PERFECT, icon = Icons.Default.HighQuality,
+        title = stringResource(R.string.settings_usb_ex_bit_perfect),
+        subtitleOn = stringResource(R.string.settings_usb_ex_bit_perfect_on),
+        subtitleOff = stringResource(R.string.settings_usb_ex_bit_perfect_off),
+        onChange = { enabled ->
+            save(prefs.copy(bitPerfect = enabled))
+            UsbDacManager.neriSession.setBitPerfect(enabled)
+        }
+    )
+    SDWDivider()
+
+    // ── 三项兼容开关 ──
+    SettingsPrefSwitch(
+        refreshKey = 0, bump = bump, prefs = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE),
+        key = UsbExclusivePrefs.KEY_RATE_COMPAT,
+        defaultValue = USB_EX_DEFAULT_SAMPLE_RATE_COMPATIBILITY, icon = Icons.Default.Sync,
+        title = stringResource(R.string.settings_usb_ex_rate_compat),
+        subtitleOn = stringResource(R.string.settings_usb_ex_rate_compat_on),
+        subtitleOff = stringResource(R.string.settings_usb_ex_rate_compat_off),
+        onChange = { enabled -> save(prefs.copy(sampleRateCompatibilityEnabled = enabled)) }
+    )
+    SDWDivider()
+    SettingsPrefSwitch(
+        refreshKey = 0, bump = bump, prefs = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE),
+        key = UsbExclusivePrefs.KEY_BITS_COMPAT,
+        defaultValue = USB_EX_DEFAULT_BIT_DEPTH_COMPATIBILITY, icon = Icons.Default.GraphicEq,
+        title = stringResource(R.string.settings_usb_ex_bits_compat),
+        subtitleOn = stringResource(R.string.settings_usb_ex_bits_compat_on),
+        subtitleOff = stringResource(R.string.settings_usb_ex_bits_compat_off),
+        onChange = { enabled -> save(prefs.copy(bitDepthCompatibilityEnabled = enabled)) }
+    )
+    SDWDivider()
+    SettingsPrefSwitch(
+        refreshKey = 0, bump = bump, prefs = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE),
+        key = UsbExclusivePrefs.KEY_CH_COMPAT,
+        defaultValue = USB_EX_DEFAULT_CHANNEL_COMPATIBILITY, icon = Icons.Default.SurroundSound,
+        title = stringResource(R.string.settings_usb_ex_ch_compat),
+        subtitleOn = stringResource(R.string.settings_usb_ex_ch_compat_on),
+        subtitleOff = stringResource(R.string.settings_usb_ex_ch_compat_off),
+        onChange = { enabled -> save(prefs.copy(channelCompatibilityEnabled = enabled)) }
+    )
+    SDWDivider()
+
+    // ── 前台缓冲 ──
+    var fgBuf by remember { mutableFloatStateOf(prefs.foregroundBufferMs.toFloat()) }
+    SettingsSliderRow(
+        title = stringResource(R.string.settings_usb_ex_fg_buffer),
+        value = fgBuf,
+        valueRange = USB_EX_MIN_FOREGROUND_BUFFER_MS.toFloat()..USB_EX_MAX_FOREGROUND_BUFFER_MS.toFloat(),
+        valueText = stringResource(R.string.settings_usb_ex_ms, normalizeUsbExclusiveForegroundBufferMs(fgBuf.toInt())),
+        onValueChange = { fgBuf = it },
+        onValueChangeFinished = {
+            save(prefs.copy(foregroundBufferMs = normalizeUsbExclusiveForegroundBufferMs(fgBuf.toInt())))
+            UsbDacManager.neriSession.configureBufferDuration(prefs.reservedBufferDurationMs())
+        }
+    )
+    SDWDivider()
+
+    // ── 后台缓冲 ──
+    var bgBuf by remember { mutableFloatStateOf(prefs.backgroundBufferMs.toFloat()) }
+    SettingsSliderRow(
+        title = stringResource(R.string.settings_usb_ex_bg_buffer),
+        value = bgBuf,
+        valueRange = USB_EX_MIN_BACKGROUND_BUFFER_MS.toFloat()..USB_EX_MAX_BACKGROUND_BUFFER_MS.toFloat(),
+        valueText = stringResource(R.string.settings_usb_ex_ms, normalizeUsbExclusiveBackgroundBufferMs(bgBuf.toInt())),
+        onValueChange = { bgBuf = it },
+        onValueChangeFinished = {
+            save(prefs.copy(backgroundBufferMs = normalizeUsbExclusiveBackgroundBufferMs(bgBuf.toInt())))
+            UsbDacManager.neriSession.configureBufferDuration(prefs.reservedBufferDurationMs())
+        }
+    )
+    SDWDivider()
+
+    // ── 高音量风险阈值 ──
+    var riskDb by remember { mutableFloatStateOf(prefs.volumeRiskThresholdDbfs.toFloat()) }
+    SettingsSliderRow(
+        title = stringResource(R.string.settings_usb_ex_volume_risk),
+        value = riskDb,
+        valueRange = USB_EX_MIN_VOLUME_RISK_THRESHOLD_DBFS.toFloat()..USB_EX_MAX_VOLUME_RISK_THRESHOLD_DBFS.toFloat(),
+        valueText = stringResource(R.string.settings_usb_ex_dbfs, normalizeUsbExclusiveVolumeRiskThresholdDbfs(riskDb.toInt())),
+        onValueChange = { riskDb = it },
+        onValueChangeFinished = {
+            save(prefs.copy(volumeRiskThresholdDbfs = normalizeUsbExclusiveVolumeRiskThresholdDbfs(riskDb.toInt())))
+        }
+    )
+    SDWDivider()
+
+    // ── 设备能力 / 运行状态（来自原生 runtimeReport） ──
+    val reportText = remember { UsbDacManager.neriRuntimeReport() }
+    if (reportText.isNotEmpty()) {
+        val fields = remember(reportText) { NeriUsbReport.parseFields(reportText) }
+        SettingsItem(
+            icon = Icons.Default.Usb,
+            title = stringResource(R.string.settings_usb_ex_cap_rates),
+            subtitle = fields["descriptorRates"]?.takeIf { it.isNotBlank() && it != "none" }
+                ?: stringResource(R.string.settings_usb_ex_not_reported)
+        )
+        SDWDivider()
+        SettingsItem(
+            icon = Icons.Default.SurroundSound,
+            title = stringResource(R.string.settings_usb_ex_cap_channels),
+            subtitle = fields["channels"]?.let { stringResource(R.string.settings_usb_ex_ch_value, it) }
+                ?: stringResource(R.string.settings_usb_ex_not_reported)
+        )
+        SDWDivider()
+        SettingsItem(
+            icon = Icons.Default.GraphicEq,
+            title = stringResource(R.string.settings_usb_ex_cap_bits),
+            subtitle = fields["bits"]?.let { stringResource(R.string.settings_usb_ex_bits_value, it) }
+                ?: stringResource(R.string.settings_usb_ex_not_reported)
+        )
+        SDWDivider()
+        SettingsItem(
+            icon = Icons.Default.Info,
+            title = stringResource(R.string.settings_usb_ex_status),
+            subtitle = buildString {
+                append(fields["feedbackMode"] ?: "-")
+                append(" / ")
+                append(fields["feedbackState"] ?: "-")
+                append(" · ppm=")
+                append(fields["feedbackRatePpm"] ?: "-")
+                append(" · fifo=")
+                append(fields["fifoMs"] ?: "-")
+                append("ms · ")
+                append(fields["errorCode"] ?: "-")
+            }
+        )
+    } else {
+        SettingsItem(
+            icon = Icons.Default.Info,
+            title = stringResource(R.string.settings_usb_ex_status),
+            subtitle = stringResource(R.string.settings_usb_ex_no_session)
+        )
+    }
+    SDWDivider()
+
+    // ── 响应设备插入（NeriPlayer "响应 USB_DEVICE_ATTACHED" 开关）──
+    SettingsPrefSwitch(
+        refreshKey = 0, bump = bump, prefs = context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE),
+        key = UsbExclusivePrefs.KEY_RESPOND_ATTACH,
+        defaultValue = USB_EX_DEFAULT_RESPOND_TO_ATTACH, icon = Icons.Default.Usb,
+        title = stringResource(R.string.settings_usb_ex_respond_attach),
+        subtitleOn = stringResource(R.string.settings_usb_ex_respond_attach_on),
+        subtitleOff = stringResource(R.string.settings_usb_ex_respond_attach_off),
+        onChange = { enabled -> save(prefs.copy(respondToAttach = enabled)) }
+    )
+    SDWDivider()
+
+    // ── USB 授权（NeriPlayer 设备卡 "USB 授权" 项）──
+    val dacDevice = UsbDacManager.getDacDevice()
+    val usbPermGranted = dacDevice != null && UsbDacManager.hasUsbPermission()
+    SettingsItem(
+        icon = Icons.Default.VerifiedUser,
+        title = stringResource(R.string.settings_usb_ex_usb_permission),
+        subtitle = when {
+            dacDevice == null -> stringResource(R.string.settings_usb_ex_usb_permission_none)
+            usbPermGranted -> stringResource(R.string.settings_usb_ex_usb_permission_granted)
+            else -> stringResource(R.string.settings_usb_ex_usb_permission_needed)
+        },
+        inCard = true,
+        onClick = {
+            if (dacDevice != null && !usbPermGranted) UsbDacManager.requestUsbPermission(context)
+        }
+    )
 }
 
 @OptIn(ExperimentalLayoutApi::class)

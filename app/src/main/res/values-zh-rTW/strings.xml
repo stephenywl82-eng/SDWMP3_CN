@@ -275,6 +275,8 @@
 <string name="mseb_slider_transient">瞬態</string>
 <string name="mseb_slider_transient_desc">瞬態響應速度與凌厲感</string>
 <string name="eq_dsp_equalizer">DSP 等化器</string>
+<string name="eq_master_on">等化器 · 開啟</string>
+<string name="eq_master_off">等化器 · 關閉</string>
 <string name="eq_mseb_psychoacoustic">MSEB 心理聲學 EQ</string>
 <string name="eq_brand_presets">品牌預設</string>
 <string name="eq_autoeq_calibration">AutoEQ 耳機校準</string>
@@ -386,6 +388,10 @@
     <string name="settings_dac_soft_start">防爆音淡入（軟啟動）</string>
     <string name="settings_dac_soft_start_on">ON - 150ms 淡入遮住 DAC 時鐘重新鎖定的爆音</string>
     <string name="settings_dac_soft_start_off">OFF - 保持 bit-perfect 原樣輸出</string>
+    <!-- [2026-10-22] 按裝置強制軟體音量（白名單逃生通道） -->
+    <string name="settings_dac_force_sw_vol">強制軟體音量（此裝置）</string>
+    <string name="settings_dac_force_sw_vol_on">開 - 音量由軟體增益控制（立即生效）</string>
+    <string name="settings_dac_force_sw_vol_off">關 - 預設：白名單裝置走硬體音量，其它走軟體增益</string>
     <string name="eq_autoeq_search">搜尋型號或品牌</string>
     <string name="eq_autoeq_hint">輸入型號或品牌搜尋共 6000+ 款，或點下方品牌</string>
     <string name="eq_autoeq_results">找到 %1$d 款</string>
@@ -469,6 +475,7 @@
     <string name="settings_section_playback">播放與過渡</string>
     <string name="settings_section_system">系統與除錯</string>
     <string name="action_play_all">播放全部</string>
+    <string name="queue_single_song">播放列表只有一首歌</string>
     <string name="diag_dac_capabilities">DAC 能力</string>
     <string name="diag_usb_host_exclusive">USB 主機獨占</string>
     <string name="diag_dsp_chain">DSP 處理鏈</string>

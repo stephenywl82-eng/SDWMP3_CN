@@ -2,6 +2,7 @@ package com.sdw.music.player.ui.screens
 import com.sdw.music.player.core.audio.playback.MusicService
 import com.sdw.music.player.core.audio.playback.WaveformCache
 
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -155,7 +156,7 @@ fun DjLandscapeSurface(
             Box(
                 modifier = Modifier
                     .size(96.dp)
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(SDWShapes.Thumb)
                     .background(Color(0xFF1E1E22)),
                 contentAlignment = Alignment.Center
             ) {

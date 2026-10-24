@@ -1,6 +1,7 @@
 package com.sdw.music.player.ui.screens
 import com.sdw.music.player.core.audio.playback.MusicService
 
+import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
@@ -119,7 +120,7 @@ fun DjPortraitSurface(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(1f)
-                .clip(RoundedCornerShape(10.dp))
+                .clip(SDWShapes.Thumb)
                 .background(Color(0xFF1A1A1E)),
             contentAlignment = Alignment.Center
         ) {

@@ -258,6 +258,8 @@
 <string name="mseb_slider_transient">Transitoire</string>
 <string name="mseb_slider_transient_desc">Vitesse et netteté de la réponse transitoire</string>
 <string name="eq_dsp_equalizer">Égaliseur DSP</string>
+<string name="eq_master_on">Égaliseur · Activé</string>
+<string name="eq_master_off">Égaliseur · Désactivé</string>
 <string name="eq_mseb_psychoacoustic">EQ psychoacoustique MSEB</string>
 <string name="eq_brand_presets">Préréglages de marque</string>
 <string name="eq_autoeq_calibration">Calibration casque AutoEQ</string>

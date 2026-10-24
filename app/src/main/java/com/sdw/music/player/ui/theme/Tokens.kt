@@ -17,14 +17,18 @@ import androidx.compose.ui.unit.sp
  * 常量，任何新页面只允许引用本文件，不允许再出现字面量。
  *
  * ── 圆角阶梯（只准用这四个，不准再自己 new）──
- *   Row(16)   列表行 / 卡片
- *   Media(12) 专辑级封面
- *   Thumb(8)  行内缩略封面
+ *   Row(20)   列表行 / 卡片
+ *   Media(16) 专辑级封面
+ *   Thumb(10) 行内缩略封面
  *   Badge(4)  小角标（HR / BPM）
  *
  * 历史遗留的一堆 2/3/4/6/8/10/12dp 全部按「就近归档」收敛到上面四档：
  *   2~4 → Badge，6~10 → Thumb，12 → Media，16 → Row。
  * 这是纯编码口径统一，实际像素差异在 1~2dp，视觉上不会跳，但全站不再有第五种圆角。
+ *
+ * [2026-10-22] 整体调糯一档（M3 Expressive 审美取向）：Row 16→20、Media 12→16、
+ * Thumb 8→10。只改这四个值即全站生效（SDWShapes 是 get() 派生）。
+ * EQ 的 2/3dp 微滑块帽、DJ 的 23dp 面板是有意微调，不并入、不改。
  *
  * ── 间距阶梯 ──
  *   Gutter(16)   页级左右安全边距（贴顶栏/底栏的内容）
@@ -47,9 +51,9 @@ import androidx.compose.ui.unit.sp
  *                       有的页面手写 titleMedium = 16sp，同一个 App 里标题字号差了一档。
  */
 object SDWShape {
-    val Row = 16.dp
-    val Media = 12.dp
-    val Thumb = 8.dp
+    val Row = 20.dp
+    val Media = 16.dp
+    val Thumb = 10.dp
     val Badge = 4.dp
 
     /** 全圆角胶囊：播放键、Pill 按钮、标签。 */

@@ -66,7 +66,8 @@ fun WaveSeekBar(
         targetValue = 2f * PI.toFloat(),
         animationSpec = infiniteRepeatable(tween(2000, easing = LinearEasing))
     )
-    val phase = if (isPlaying) animatedPhase else 0f
+    // [V9.20t] phase 挪到下方 Canvas 绘制期读取：2s 周期的波形流动照常 60fps 重绘，
+    // 但组合期不再每帧重组整条进度条（亮屏播放刷新源之一，已实测）。
 
     // V8.69 - one Path reused across frames (rewind instead of reallocate). The gradient
     // only depends on the track bounds and the two theme colours, so keep the last one and
@@ -92,6 +93,7 @@ fun WaveSeekBar(
     ) {
         val w = size.width
         val h = size.height
+        val phase = if (isPlaying) animatedPhase else 0f  // [V9.20t] draw-phase read
         val left = pad
         val right = w - pad
         val centerY = h / 2f

@@ -104,7 +104,10 @@ private fun OboeEqFullScreen(
                 },
                 actions = {
                     Text(
-                        text = if (eqEnabled) "On" else "Off",
+                        // [V9.20v] 原为硬编码的 "On"/"Off"（无本地化，中文界面也显示英文）。
+                        // 这里改成「均衡器 · 开 / 均衡器 · 关」——开关只管 5 段图形 EQ + AutoEQ，
+                        // 光秃秃的 On/Off 看不出管的是什么。
+                        text = stringResource(if (eqEnabled) R.string.eq_master_on else R.string.eq_master_off),
                         style = MaterialTheme.typography.labelMedium,
                         modifier = Modifier.padding(end = 4.dp)
                     )

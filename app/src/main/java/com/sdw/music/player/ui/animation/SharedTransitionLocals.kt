@@ -81,7 +81,8 @@ fun Modifier.sharedCoverArt(
     val overlayClip = sharedScope.OverlayClip(effectiveClip)
     return with(sharedScope) {
         this@sharedCoverArt.sharedElement(
-            state = contentState,
+            // [Compose 1.8] 参数 state → sharedContentState
+            sharedContentState = contentState,
             animatedVisibilityScope = visibilityScope,
             boundsTransform = CoverBoundsTransform,
             clipInOverlayDuringTransition = overlayClip

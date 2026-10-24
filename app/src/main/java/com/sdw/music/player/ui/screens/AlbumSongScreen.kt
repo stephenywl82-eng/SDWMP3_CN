@@ -89,7 +89,7 @@ fun AlbumSongScreen(
                         isPlaying = song.id == currentSongId && isPlaying,
                         onClick = { onSongClick(song) },
                         onLongClick = { longPressSong = song },
-                        modifier = Modifier.animateItemPlacement()
+                        modifier = Modifier
                     )
                 }
             }

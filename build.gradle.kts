@@ -1,6 +1,9 @@
 plugins {
     id("com.android.application") version "8.7.3" apply false
-    id("org.jetbrains.kotlin.android") version "1.9.25" apply false
-    id("com.google.dagger.hilt.android") version "2.50" apply false
-    id("org.jetbrains.kotlin.kapt") version "1.9.25" apply false
+    id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+    id("com.google.dagger.hilt.android") version "2.52" apply false
+    id("org.jetbrains.kotlin.kapt") version "2.0.21" apply false
+    // [K2 migration 2026-10-24] Compose 编译器改为 K2 插件（与 Kotlin 版本对齐），
+    // 替代旧的 composeOptions.kotlinCompilerExtensionVersion 方式
+    id("org.jetbrains.kotlin.plugin.compose") version "2.0.21" apply false
 }

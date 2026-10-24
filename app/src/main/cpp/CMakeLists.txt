@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.22.1)
 project("oboe_bridge")
 
+# ── [NeriPlayer 引擎] USB 独占输出原生模块（独立 .so：libneri_usb.so） ──
+# 源码移植自 NeriPlayer（署名见 neri/NOTICE.md）；JNI 符号已重命名到本包。
+add_subdirectory(neri)
+
 # Prebuilt liboboe.so from jniLibs (already in APK)
 add_library(oboe SHARED IMPORTED)
 set_target_properties(oboe PROPERTIES

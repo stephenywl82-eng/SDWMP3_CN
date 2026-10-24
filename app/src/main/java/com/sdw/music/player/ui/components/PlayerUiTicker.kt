@@ -21,8 +21,10 @@ import androidx.compose.runtime.mutableStateOf
  */
 object PlayerUiTicker {
 
-    /** 统一节拍 10Hz。 */
-    const val INTERVAL_MS = 100L
+    /** 统一节拍 5Hz（装饰相位专用；VU 频段走独立 60Hz 通道，不受影响）。
+     * V9.20t 改动→ 5Hz：消负方全是 8~44s 周期的慢速装饰（墨滴漂移/边缘光带/呼吸），200ms一帧眼无差别，
+     * 但全屏梯度重绘次数误半——亮屏播放的 GPU 开销重点。 */
+    const val INTERVAL_MS = 200L
 
     data class Frame(
         /** 单调毫秒时间戳；消费者用它算 dt，替代各自的 60fps 帧时钟。 */

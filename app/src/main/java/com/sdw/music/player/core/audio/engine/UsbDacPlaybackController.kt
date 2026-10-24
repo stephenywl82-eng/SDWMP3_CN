@@ -35,6 +35,17 @@ class UsbDacPlaybackController(
         const val CROSS_RATE_PREBUFFER_MS = 500L
         /** [2026-09-10 C] Normal (same-rate / first-claim) prebuffer target. */
         const val DEFAULT_PREBUFFER_MS = PREBUFFER_TARGET_MS
+
+        // [V9.20 ②] Stall self-heal tuning (hoisted from the monitor loops so both
+        // alac/flac/onPushStall share one source of truth).
+        // 经验教训（9.20ad 实测）：STALL_STATS_ONLY=true 把 forceReset 自愈全关后，stall 只统计、
+        // 到 STALL_GIVEUP_AT 直接 onError 跳下一首 —— 开环漂移本就容易触发 stall，等于撤掉唯一能
+        // 救活的手段，表现为「歌放不出/跳到下一首」的功能性回退。因此改回有界自愈：stall 到阈值
+        // 仍 forceReset（取消卡住的 URB），最多 STALL_MAX_RECOVER 次，仍保留 STALL_GIVEUP_AT 硬止损。
+        const val STALL_RECOVER_AT = 40      // 连续 stall ~2s(50ms/poll) 触发一次自愈
+        const val STALL_GIVEUP_AT  = 120     // 连续 stall ~6s → 干净停止(报错而非永久冻结)
+        const val STALL_MAX_RECOVER = 3      // 自愈最大尝试次数（超限后不再 forceReset，等硬止损）
+        const val STALL_STATS_ONLY = false   // [V9.20 ②] false=保留有界自愈（恢复"以前能放"的行为）
     }
 
 
@@ -118,6 +129,10 @@ class UsbDacPlaybackController(
     private val pauseLock = Object()
     @Volatile private var paused = false
     @Volatile private var shouldStop = false
+    // [V9.20n] Session generation: stamped from UsbDacManager.beginSession() in play().
+    // Any self-heal path (STALL recovery / pushPcm stall) checks it first: a stale
+    // session must exit quietly instead of forceReset-ing the CURRENT session's stream.
+    @Volatile private var myGen = 0
     @Volatile private var outputPcmEncoding = android.media.AudioFormat.ENCODING_PCM_16BIT
 
     // 【V3.2.7】WAV 直读路径：Android raw decoder 会把 24bit 转成 16bit，
@@ -127,6 +142,13 @@ class UsbDacPlaybackController(
 
     // 【2026-08-25】ALAC 直解：native Apple codec + MP4 box 解析直入 ring，绕开 MediaCodec
     @Volatile private var alacDirect = false
+
+    // 【V9.20af】对外标记：本 controller 当前是否持有进程级 native FLAC/ALAC 单例解码器
+    // （gFlac/gAlac）。open() 已把该单例换成本曲文件，而 detachForReuse() 内的
+    // flacStop()/alacStop() 会顺手关掉这个全局解码器并把 gEos 置真，导致新曲立即 EOS 跳歌。
+    // 因此该类格式在 MusicService 的 ⑤ 会话复用判定中必须被排除，退化到完整重开路径。
+    val isNativeSingletonDecode: Boolean
+        get() = flacDirect || alacDirect
 
     // 【V3.3.0】CUE 整轨模式：同 FLAC 相邻轨 gapless 切换（不重建 decoder）
     @Volatile private var cueDirect = false
@@ -388,8 +410,13 @@ class UsbDacPlaybackController(
 
             DebugLog.add(TAG, "open: mime=$mime srcSr=$sourceSampleRate srcCh=$sourceChannelCount srcBits=$sourceBits dacSr=$dacSampleRate dacCh=$dacChannels dur=${extractorDurationMs}ms")
 
-            val codec = MediaCodec.createDecoderByType(mime)
-            val cfgFmt = MediaFormat.createAudioFormat(mime, sourceSampleRate, sourceChannelCount)
+        val codec = MediaCodec.createDecoderByType(mime)
+        // 【多声道修复】DAC 只有 2ch alt；源 >2ch(5.1/7.1 的 AAC/Opus/FLAC，如电影音轨 m4a)时
+        // 必须让 decoder 输出 2ch，否则 decodeLoop 的 fc=f.size/dacChannels(2) 会把 6ch 数据
+        // 当 2ch 解释 → 帧数错乱、播放速度/内容全乱。Android decoder 支持按 KEY_CHANNEL_COUNT
+        // 请求 downmix(AAC/Opus/FLAC 均支持 5.1→2.0)。
+        val decoderChannels = if (sourceChannelCount > 2) 2 else sourceChannelCount
+        val cfgFmt = MediaFormat.createAudioFormat(mime, sourceSampleRate, decoderChannels)
             val isRawPassthrough = mime == "audio/raw"
             // 【V3.2.9】FLAC 24bit 解码：MediaExtractor/MediaCodec 可能把 24bit 降成 16bit
             // 但 outputFormat 打假标签 enc=21，需要实测 bpf (bytes-per-frame) 判断真实位深
@@ -444,6 +471,14 @@ class UsbDacPlaybackController(
             requestState(DacState.ERROR, "play: not ready")
             onError("Not ready"); return
         }
+        // [V9.20n] Stamp a fresh session generation BEFORE any decode/monitor thread
+        // starts. Older sessions' threads fail the gen check and exit quietly — they
+        // must never forceReset (that kills the current session's live stream).
+        myGen = UsbDacManager.beginSession()
+        // [V9.20p] 上报源位深/源率：DAC 信息条的音质标识按源算（MP3=16bit 不亮 Hi-Res），
+        // 而不是线位深（32bit alt 打包会把有损显示成 Hi-Res）。
+        UsbDacManager.activeSourceBits = sourceBits
+        UsbDacManager.activeSourceRate = sourceSampleRate
         shouldStop = false; paused = false; isPlaying = true
 
         decodeThread = Thread({
@@ -453,18 +488,32 @@ class UsbDacPlaybackController(
 
             // 【2026-08-25】ALAC 直解：native 解码线程自行填 ring，Kotlin 只做预缓冲等待+监控（同 flac）
             if (alacDirect) {
+                // [NeriPlayer 引擎] pull 模式：无 native 解码线程，Kotlin 拉块喂 session pipeline
+                if (UsbDacManager.useNeriEngine()) {
+                    val alacOutBits = if (sourceBits > 16) 24 else playbackWireBits
+                    if (!streamAlreadyRunning && !UsbDacManager.startStreaming(dacSampleRate, dacChannels, alacOutBits)) {
+                        requestState(DacState.ERROR, "play(alac/neri): startStreaming FAIL")
+                        onError("startStreaming FAIL"); return@Thread
+                    }
+                    requestState(DacState.STREAMING, "play(alac/neri): pull loop")
+                    neriPullDecodeLoop(isFlac = false)
+                    DebugLog.v(TAG, "play(alac/neri): neriPullDecodeLoop RETURNED")
+                    return@Thread
+                }
                 UsbDacManager.alacStart()
                 val ringTarget = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt()
                 val t0 = System.currentTimeMillis()
+                // 【V9.20p】3s→1.5s，同 flac 路径：切歌体感优先，不等完美预缓冲
                 while (!shouldStop && UsbDacManager.getRingFill() < ringTarget &&
-                    !UsbDacManager.alacIsEos() && System.currentTimeMillis() - t0 < 3000) {
+                    !UsbDacManager.alacIsEos() && System.currentTimeMillis() - t0 < 1500) {
                     try { Thread.sleep(10) } catch (_: InterruptedException) { return@Thread }
                 }
                 DebugLog.v(TAG, "play(alac): prebuffer ${UsbDacManager.getRingFill()} frames in ${System.currentTimeMillis() - t0}ms")
                 // 【V8.11 fix】ALAC 直解位深必须用 wireBits（DAC 硬件 alt 位深），
                 // 不能用源位深——单 alt 24bit DAC（如 Qudelix-5K）收 16bit 打包会字节错位爆音
                 val alacOutBits = if (sourceBits > 16) 24 else playbackWireBits
-                if (!UsbDacManager.startStreaming(dacSampleRate, dacChannels, alacOutBits)) {
+                // [V9.20 ⑤] streamAlreadyRunning=true → 复用已打开的 native 流（⑤ 会话复用），跳过 startStreaming 重开
+                if (!streamAlreadyRunning && !UsbDacManager.startStreaming(dacSampleRate, dacChannels, alacOutBits)) {
                     requestState(DacState.ERROR, "play(alac): startStreaming FAIL")
                     onError("startStreaming FAIL"); return@Thread
                 }
@@ -477,6 +526,24 @@ class UsbDacPlaybackController(
 
             // 【V3.3.0】FLAC 直解：native 解码线程自行填 ring，Kotlin 只做预缓冲等待+监控
             if (flacDirect) {
+                // [NeriPlayer 引擎] pull 模式：无 native 解码线程，Kotlin 拉块喂 session pipeline
+                if (UsbDacManager.useNeriEngine()) {
+                    if (targetSample > 0) {
+                        // 同文件相邻轨：只设 pending seek，pull 循环首次读取时消费
+                        if (!UsbDacManager.flacGaplessSeek(currentFilePath, targetSample)) {
+                            DebugLog.add(TAG, "play(flacGapless/neri): seek FAIL")
+                        }
+                    }
+                    val flacOutBits = if (sourceBits > 16) 24 else playbackWireBits
+                    if (!streamAlreadyRunning && !UsbDacManager.startStreaming(dacSampleRate, dacChannels, flacOutBits)) {
+                        requestState(DacState.ERROR, "play(flac/neri): startStreaming FAIL")
+                        onError("startStreaming FAIL"); return@Thread
+                    }
+                    requestState(DacState.STREAMING, "play(flac/neri): pull loop")
+                    neriPullDecodeLoop(isFlac = true)
+                    DebugLog.v(TAG, "play(flac/neri): neriPullDecodeLoop RETURNED")
+                    return@Thread
+                }
                 // Gapless seek：同文件相邻轨不重建 decoder，跨文件比 Kotlin open 更快
                 if (targetSample > 0) {
                     DebugLog.v(TAG, "play(flacGapless): path=${currentFilePath.take(60)} sample=$targetSample")
@@ -499,8 +566,10 @@ class UsbDacPlaybackController(
 
                 val ringTarget = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt()
                 val t0 = System.currentTimeMillis()
+                // 【V9.20p】3s→1.5s：预缓冲目标是 ~200ms 数据，等 3 秒纯属过度设计。
+                // 起播不等完美预缓冲——soft-start 150ms 淡入 + 边播边填兜底，切歌体感优先。
                 while (!shouldStop && UsbDacManager.getRingFill() < ringTarget &&
-                    !UsbDacManager.flacIsEos() && System.currentTimeMillis() - t0 < 3000) {
+                    !UsbDacManager.flacIsEos() && System.currentTimeMillis() - t0 < 1500) {
                     try { Thread.sleep(10) } catch (_: InterruptedException) { return@Thread }
                 }
                 DebugLog.v(TAG, "play(flac): prebuffer ${UsbDacManager.getRingFill()} frames in ${System.currentTimeMillis() - t0}ms")
@@ -509,7 +578,8 @@ class UsbDacPlaybackController(
                 // 【V8.11 fix】FLAC 直解位深必须用 wireBits（DAC 硬件 alt 位深），
                 // 不能用源位深——单 alt 24bit DAC（如 Qudelix-5K）收 16bit 打包会字节错位爆音
                 val flacOutBits = if (sourceBits > 16) 24 else playbackWireBits
-                if (!UsbDacManager.startStreaming(dacSampleRate, dacChannels, flacOutBits)) {
+                // [V9.20 ⑤] streamAlreadyRunning=true → 复用已打开的 native 流，跳过 startStreaming 重开
+                if (!streamAlreadyRunning && !UsbDacManager.startStreaming(dacSampleRate, dacChannels, flacOutBits)) {
                     requestState(DacState.ERROR, "play(flac): startStreaming FAIL")
                     onError("startStreaming FAIL"); return@Thread
                 }
@@ -521,17 +591,15 @@ class UsbDacPlaybackController(
                 return@Thread
             }
 
-            // Pre-buffer before starting DAC stream (Salt pattern: fill ring, then open tap)
-            val targetFrames = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt() * dacChannels
-            val preBufFrames = preBuffer(targetFrames)
-            DebugLog.v(TAG, "play: prebuffer done, $preBufFrames frames")
-
-            // Start DAC stream NOW — ring buffer is full, no underruns
-            // 【V3.2.9】Fail-Fast 位深联动：preBuffer 已实测 decoder 真实输出（bpf），
-            // 声明位深必须跟实测一致：
-            //   真 24bit（WAV 直读 / decoder 实出 24bit）→ alt=2 / MPS=288 / 6B帧
-            //   decoder 降级 16bit（enc16Forced）→ 诚实走 alt=1 / MPS=192 / 4B帧，显式告知
-            // 严禁声明 24bit 却喂 16bit 精度数据（隐式降级）
+            // Start DAC stream FIRST, then pre-buffer.
+            // 【fix14】反序(preBuffer→startStreaming)是 WAV/MP3 切歌 6 秒不出声的根因：
+            // 流未启动时 native writePlayerPcm 立即拒写(source!=PlayerPCM 返回 0)，
+            // 而 NeriUsbSession.writeFloats 把"拒写"当"ring 满背压"每 2ms 重试、
+            // 死等 STALL_TIMEOUT(2s)/chunk 才放弃 → 200ms 预缓冲(≈2 chunk)白等 4-6s。
+            // 先起流后写入：soft-start 150ms 淡入 + 边播边填兜底(与 FLAC pull 路径同一策略)。
+            // 流认 float 输入(prepare 声明 ENCODING_PCM_FLOAT)，位深只选 DAC alt，
+            // 故起流先后不影响"声明位深 vs 喂入数据"一致性；enc16Forced 实测仍有效。
+            // 【V3.2.9】Fail-Fast 位深联动：decoder 实出 16bit（enc16Forced）→ 诚实走 alt=1/16bit
             val outBits = if (sourceBits > 16 && !enc16Forced) 24 else 16
             if (outBits > playbackWireBits) playbackWireBits = outBits  // [v6.0.14] but never downgrade S32_LE
             if (sourceBits > 16 && enc16Forced) {
@@ -544,7 +612,12 @@ class UsbDacPlaybackController(
                 onError("startStreaming FAIL"); return@Thread
             }
             requestState(DacState.STREAMING, "play: stream started (wavDirect=$wavDirect)")
-            DebugLog.v(TAG, "play: DAC stream started after prebuffer, entering decode loop (wavDirect=$wavDirect)")
+            DebugLog.v(TAG, "play: DAC stream started, entering prebuffer+decode loop (wavDirect=$wavDirect)")
+
+            // Pre-buffer AFTER stream start: writes now land in the live ring immediately (no stall).
+            val targetFrames = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt() * dacChannels
+            val preBufFrames = preBuffer(targetFrames)
+            DebugLog.v(TAG, "play: prebuffer done, $preBufFrames frames")
             if (wavDirect) wavDecodeLoop() else decodeLoop()
         }, "UsbDacDecode").apply { isDaemon = true; start() }
     }
@@ -595,7 +668,8 @@ class UsbDacPlaybackController(
         // 等 ring 预缓冲 ~200ms，避免开流瞬间 underrun + 数据跳变爆音
         val ringTarget = ((dacSampleRate * prebufferTargetMs) / 1000L).toInt()
         val t0 = System.currentTimeMillis()
-        while (!shouldStop && UsbDacManager.getRingFill() < ringTarget && System.currentTimeMillis() - t0 < 2000) {
+        // 【V9.20p】2s→1s：resume 同样优先体感，soft-start 兜底
+        while (!shouldStop && UsbDacManager.getRingFill() < ringTarget && System.currentTimeMillis() - t0 < 1000) {
             try { Thread.sleep(10) } catch (_: InterruptedException) { break }
         }
 
@@ -617,6 +691,8 @@ class UsbDacPlaybackController(
         requestState(DacState.RELEASING, "stop(${state})")
         shouldStop = true; paused = false; isPlaying = false
         synchronized(pauseLock) { (pauseLock as java.lang.Object).notifyAll() }
+        // 【V9.20】先停流放行堵在 pushPcm 的解码线程，再 join + 释放，避免 codec 竞争冻死
+        UsbDacManager.pauseStream()
         decodeThread?.interrupt(); decodeThread?.join(2000); decodeThread = null
         // 【方向1】RELEASING 动作内强制顺序：先 join 解码线程（上面）→ flacStop（releaseResources 内）→ stopAndRelease
         releaseResources()  // flacStop/alacStop join native 解码线程 + codec/extractor 释放（在 stopAndRelease 前！）
@@ -633,8 +709,9 @@ class UsbDacPlaybackController(
         requestState(DacState.EOS_HOLD, "stopDecode(${state})")
         shouldStop = true; paused = false; isPlaying = false
         synchronized(pauseLock) { (pauseLock as java.lang.Object).notifyAll() }
+        // 【V9.20】先停流（放行堵在 pushPcm 的解码线程）再 join，避免 codec 被从活跃线程脚下抽走
+        UsbDacManager.pauseStream()
         decodeThread?.interrupt(); decodeThread?.join(600); decodeThread = null  // [V3.3.3] shorter join, avoid main-thread ANR
-        UsbDacManager.pauseStream()  // stop streamLoop, prevent underruns during silence
         assertRingResetSafe("stopDecode")
         UsbDacManager.resetRingBuffer()  // 【V3.3.16】清空残留数据，避免切歌噪音
         releaseResources()
@@ -652,16 +729,62 @@ class UsbDacPlaybackController(
         // 【方向1】同 stopDecode 语义：保留 claim 停止（keep-claim 切歌专用）
         if (state == DacState.IDLE || state == DacState.OPEN) return
         if (state == DacState.PAUSED || state == DacState.EOS_HOLD) return
+        // [V9.20n] Invalidate this session's generation IMMEDIATELY: from this point
+        // any still-alive decode/monitor thread of ours fails the gen check in its
+        // self-heal paths and exits quietly — it can no longer forceReset the stream
+        // that the next song is about to start (that race was the switch freeze).
+        myGen = -1
         requestState(DacState.EOS_HOLD, "stopMonitor(${state})")
         shouldStop = true; paused = false; isPlaying = false
         synchronized(pauseLock) { (pauseLock as java.lang.Object).notifyAll() }
-        decodeThread?.interrupt()  // wake monitor from sleep, don't block on join
+        // 【V9.20 切歌冻结修复】MP3/AAC/WAV 走 Kotlin decodeLoop，旧解码线程很可能正堵在
+        // native pushPcm（ring 满，usleep 等 USB 消费）。必须先 pauseStream（native
+        // streaming_=false）把它放出来，再有界 join，最后才 releaseResources——
+        // 老顺序是"不 join 直接抽 codec"，活跃解码线程脚下的 MediaCodec/Extractor
+        // 被 release → 竞争冻死（用户观感：MP3 无法切歌）。
+        UsbDacManager.pauseStream()  // stop streamLoop (keep USB claim); unblocks pushPcm waiters
+        decodeThread?.interrupt()
+        // [V9.20 v2] 500ms was too tight: MP3 decodeLoop can be inside a MediaCodec
+        // dequeue (up to 10s timeout) when we land here; a timed-out join leaves the
+        // thread alive holding the codec -> releaseResources() below then races it.
+        // 1500ms covers the dequeue timeout; on true timeout log it (daemon thread
+        // still dies with the process, and codec ops are guarded below).
+        val joinStart = System.currentTimeMillis()
+        decodeThread?.join(1500)
+        if (decodeThread != null && decodeThread!!.isAlive) {
+            DebugLog.add(TAG, "stopMonitor: decode thread still alive after 1500ms join (state=${decodeThread?.state}) — proceeding with guarded release")
+        }
         decodeThread = null
-        UsbDacManager.pauseStream()  // stop streamLoop (keep USB claim)
         assertRingResetSafe("stopMonitor")
         UsbDacManager.resetRingBuffer()  // 清旧歌残留 PCM（streamLoop 已停，安全）
         releaseResources()  // 停旧格式 native 解码线程（flacStop/alacStop/codec.stop）+ 释放 extractor
         DebugLog.v(TAG, "stopMonitor (monitor killed, stream paused, ring cleared, decoder released, claim kept) state=$state")
+    }
+
+    // [V9.20 ⑤] Detach this controller from the live native stream for SESSION REUSE:
+    // stop the decode thread + release per-controller decode resources, but DO NOT
+    // pauseStream / resetRing / stop the shared native streaming thread. The next
+    // controller reuses that still-running stream via play(streamAlreadyRunning=true),
+    // eliminating the reopen latency on a same-format track switch (vs stopMonitor's
+    // full pauseStream+resetRing+reclaim path).
+    fun detachForReuse() {
+        if (state == DacState.IDLE || state == DacState.OPEN) return
+        if (state != DacState.EOS_HOLD) requestState(DacState.EOS_HOLD, "detachForReuse(${state})")
+        // [V9.20n] invalidate generation so any still-alive decode thread exits quietly
+        // (no forceReset on the stream we're about to hand to the next controller)
+        myGen = -1
+        shouldStop = true; paused = false; isPlaying = false
+        synchronized(pauseLock) { (pauseLock as java.lang.Object).notifyAll() }
+        decodeThread?.interrupt()
+        decodeThread?.join(1500)
+        if (decodeThread != null && decodeThread!!.isAlive) {
+            DebugLog.add(TAG, "detachForReuse: decode thread still alive after 1500ms join — proceeding with guarded release")
+        }
+        decodeThread = null
+        // releaseResources() 停旧格式 native 解码线程(flacStop/alacStop/codec.stop)+释放 extractor，
+        // 但不碰 streaming 线程 / 不清 ring / 不 pauseStream —— 活动流保留给下一首复用。
+        releaseResources()
+        DebugLog.v(TAG, "detachForReuse: decode thread stopped, native stream KEPT running for reuse (claim kept)")
     }
 
     // 【V3.2.8】seek 改为挂起请求：主线程直接 codec.flush() 会和解码线程的
@@ -721,6 +844,8 @@ class UsbDacPlaybackController(
         requestState(DacState.RELEASING, reason)
         shouldStop = true; paused = false; isPlaying = false
         synchronized(pauseLock) { (pauseLock as java.lang.Object).notifyAll() }
+        // 【V9.20】先停流放行堵在 pushPcm 的解码线程，再 join + 释放，避免 codec 竞争冻死
+        UsbDacManager.pauseStream()
         decodeThread?.interrupt(); decodeThread?.join(1000); decodeThread = null
         releaseResources()
         UsbDacManager.stopAndRelease()
@@ -730,8 +855,14 @@ class UsbDacPlaybackController(
     private fun releaseResources() {
         if (flacDirect) { UsbDacManager.flacStop(); flacDirect = false; cueDirect = false; currentCueTrackIndex = -1; cueTrackList = emptyList() }  // 【V3.3.0】join native 解码线程，清理 CUE 状态
         if (alacDirect) { UsbDacManager.alacStop(); alacDirect = false }  // 【2026-08-25】join native 解码线程
-        codec?.stop(); codec?.release(); codec = null
-        extractor?.release(); extractor = null
+        // [V9.20 v2] Guard every codec op: if the decode thread somehow survived the
+        // join above and is inside a codec call, stop()/release() throw
+        // IllegalStateException — which used to propagate up and freeze the switch.
+        try { codec?.stop() } catch (e: Exception) { DebugLog.add(TAG, "releaseResources: codec.stop() guarded: ${e.javaClass.simpleName}") }
+        try { codec?.release() } catch (e: Exception) { DebugLog.add(TAG, "releaseResources: codec.release() guarded: ${e.javaClass.simpleName}") }
+        codec = null
+        try { extractor?.release() } catch (e: Exception) { DebugLog.add(TAG, "releaseResources: extractor.release() guarded: ${e.javaClass.simpleName}") }
+        extractor = null
         try { wavFile?.close() } catch (_: Exception) {}
         wavFile = null; wavDirect = false; wavReadBytes = 0L
         audioTrackIndex = -1; extractorDurationMs = 0L
@@ -741,8 +872,12 @@ class UsbDacPlaybackController(
 
     // 【2026-08-25】ALAC 直解监控循环：native 线程自行解码+推流，Kotlin 只同步进度/检测 EOS 排空（同 flac）
     private fun alacMonitorLoop() {
-        var lastPosMs = 0L; var stallCount = 0; var lastDebug = 0L
+        var lastPosMs = 0L; var stallCount = 0; var stallTotal = 0; var lastDebug = 0L; var lastMetricsLog = 0L
         val prebufferGraceMs = 3000L
+        // 【V9.20 A/卡死自愈】STALL 有界自愈：playback 位长时间不动 = USB OUT 端点 stall / DAC 不消费。
+        // 原监控只报不救 → 永久卡死 + 无限刷 STALL 日志。这里加有界自愈 + 硬上限止损。
+        // [V9.20 ②] 自愈常量已上提到 companion object；STALL_STATS_ONLY=true 时只统计不 forceReset。
+        var recoveryAttempts = 0
         var prebufferEndTime = System.currentTimeMillis() + prebufferGraceMs
         try {
             var drainWaitMs = 0
@@ -751,6 +886,18 @@ class UsbDacPlaybackController(
                     synchronized(pauseLock) { while (paused && !shouldStop) (pauseLock as java.lang.Object).wait() }
                 }
                 if (shouldStop) break
+                // [V9.20x] Surprise removal: native URB submission saw consecutive ENODEV and
+                // latched "device vanished". Not a stall — forceReset would hammer a dead
+                // endpoint. Run the detach path so the position is remembered for auto-resume.
+                if (UsbDacManager.pollDeviceVanished()) {
+                    DebugLog.add(TAG, "alacMonitor: USB device vanished (ENODEV) — detach path, no self-heal")
+                    releaseResources(); isPlaying = false
+                    UsbDacManager.pauseStream()
+                    requestState(DacState.ERROR, "usb device removed")
+                    onError("USB DAC removed")
+                    shouldStop = true
+                    break
+                }
                 val pos = UsbDacManager.alacPositionMs()
                 positionMs = pos
                 if (pos == lastPosMs && !paused) {
@@ -758,8 +905,38 @@ class UsbDacPlaybackController(
                         Thread.sleep(50)
                         continue
                     }
-                    stallCount++
+                    stallCount++; stallTotal++
                     if (stallCount >= 4) DebugLog.add(TAG, "alacMonitor: STALL pos=$pos stallCount=$stallCount ringFill=${UsbDacManager.getRingFill()} alacEos=${UsbDacManager.alacIsEos()}")
+                    // [V9.20n] Stale-session gate (see flacMonitorLoop): an old session's
+                    // forceReset would kill the current session's live stream.
+                    if (myGen != UsbDacManager.sessionGen) {
+                        DebugLog.add(TAG, "alacMonitor: stale session (gen=$myGen cur=${UsbDacManager.sessionGen}) — exiting quietly")
+                        shouldStop = true
+                        break
+                    }
+                    // 【V9.20 A】有界自愈：到阈值先 forceReset(取消卡住的 URB，native 设计的总线复位兜底)，
+                    // 给一个观察窗口；耗尽次数仍不前进则硬止损(干净停止+报错，不再无限卡死)。
+                    // [V9.20 ②] STALL_STATS_ONLY=true 时只统计不自愈：记录一次 stall 自愈被跳过，不动流。
+                    if (stallCount == STALL_RECOVER_AT && recoveryAttempts < STALL_MAX_RECOVER) {
+                        recoveryAttempts++
+                        if (STALL_STATS_ONLY) {
+                            DebugLog.add(TAG, "alacMonitor: STALL recovery SKIPPED (stats-only; forceReset disabled) attempt #$recoveryAttempts")
+                        } else {
+                            DebugLog.add(TAG, "alacMonitor: STALL recovery attempt #$recoveryAttempts (forceReset cancels wedged URBs)")
+                            UsbDacManager.forceReset()
+                            stallCount = 0
+                        }
+                        Thread.sleep(50); continue
+                    }
+                    if (stallCount >= STALL_GIVEUP_AT) {
+                        DebugLog.add(TAG, "alacMonitor: STALL unrecoverable after $recoveryAttempts recovery attempt(s); stopping playback")
+                        releaseResources(); isPlaying = false
+                        UsbDacManager.pauseStream()
+                        requestState(DacState.ERROR, "playback stalled (USB endpoint not consuming)")
+                        onError("USB stall: DAC stopped consuming audio")
+                        shouldStop = true
+                        break
+                    }
                 } else {
                     stallCount = 0
                     if (pos != 0L) prebufferEndTime = 0
@@ -774,6 +951,14 @@ class UsbDacPlaybackController(
                 }
                 val now = System.currentTimeMillis()
                 if (now - lastDebug > 10_000) { DebugLog.v(TAG, "alacMonitor: pos=${pos}ms ring=${UsbDacManager.getRingFill()} eos=${UsbDacManager.alacIsEos()}"); lastDebug = now }
+                // 【V9.20x】每 5s 打印一次运行时诊断指标（借鉴 NeriPlayer RuntimeMetrics），便于排查爆音/卡顿/无声
+                if (now - lastMetricsLog > 5000) {
+                    lastMetricsLog = now
+                    val m = UsbDacManager.getRuntimeMetrics()
+                    val peakLin = if (m.channel0Peak >= m.channel1Peak) m.channel0Peak else m.channel1Peak
+                    UsbDacManager.checkLoudPlayback(peakLin)
+                    DebugLog.add(TAG, "metrics: underrun=${m.underrunCount} bpEv=${m.backpressureEvents} bpMax=${m.backpressureMaxMs}ms zeroFill=${m.zeroFillBytes}B sig=${m.signalFrames} sil=${m.silentFrames} peakL=${"%.2f".format(m.channel0Peak)} peakR=${"%.2f".format(m.channel1Peak)} drop=${m.droppedBytes}B stallBrk=${m.stallBreaks} stallTot=$stallTotal vanish=${m.vanishEvents}")
+                }
                 Thread.sleep(50)
             }
         } catch (_: InterruptedException) {
@@ -795,9 +980,133 @@ class UsbDacPlaybackController(
     }
 
     // 【V3.3.0】FLAC 直解监控循环：native 线程自行解码+推流，Kotlin 只同步进度/检测 EOS 排空
+    /**
+     * [NeriPlayer 引擎] FLAC/ALAC pull 模式主循环。
+     * native 单例解码 → 拉块 → pushPcm（neri session pipeline：背压/重采样/位深转换）。
+     * 与 flacMonitorLoop/alacMonitorLoop 二选一；EOS 排空后同样走
+     * EOS_HOLD + onCompletion 收尾，会话保留给下一曲（零间隙切歌的关键）。
+     */
+    private fun neriPullDecodeLoop(isFlac: Boolean) {
+        val codec = if (isFlac) "flac" else "alac"
+        // FLAC chunk 上限 4096 帧；ALAC packet ≤ frameLen（通常 4096）。按 8 声道上限分配。
+        val buf = FloatArray(4096 * 8)
+        var lastPosMs = -1L
+        var stallMs = 0L
+        var lastMetricsLog = 0L
+        try {
+            while (!shouldStop) {
+                if (paused) {
+                    synchronized(pauseLock) { while (paused && !shouldStop) (pauseLock as java.lang.Object).wait() }
+                }
+                if (shouldStop) break
+
+                // 设备掉线检测（neri：runtimeReport 的 deviceOnline / terminalFailure）
+                if (UsbDacManager.neriDeviceOffline()) {
+                    DebugLog.add(TAG, "neriPull($codec): USB device offline — detach path")
+                    releaseResources(); isPlaying = false
+                    UsbDacManager.pauseStream()
+                    requestState(DacState.ERROR, "usb device removed")
+                    onError("USB DAC removed")
+                    shouldStop = true
+                    break
+                }
+
+                val n = if (isFlac) UsbDacManager.flacReadChunk(buf, 4096)
+                        else UsbDacManager.alacReadChunk(buf, 4096)
+                if (n < 0) { try { Thread.sleep(30) } catch (_: InterruptedException) { break }; continue }  // 暂停中
+                if (n == 0) {
+                    // EOS：重采样排空 + 等环形缓冲排空
+                    UsbDacManager.neriDrain()
+                    val t0 = System.currentTimeMillis()
+                    while (!shouldStop && UsbDacManager.getRingFill() > EOS_DRAIN_RESIDUE_FRAMES &&
+                        System.currentTimeMillis() - t0 < 10_000) {
+                        try { Thread.sleep(50) } catch (_: InterruptedException) { break }
+                    }
+                    // CUE gapless：同文件下一轨（pending seek，下次 read 消费）
+                    if (cueDirect && currentCueTrackIndex >= 0 && isFlac) {
+                        val cueTracks = cueTrackList
+                        if (currentCueTrackIndex < cueTracks.size - 1) {
+                            currentCueTrackIndex++
+                            val nextTrack = cueTracks[currentCueTrackIndex]
+                            val startSample = CueParser.cdFramesToSamples(
+                                nextTrack.index00Samples ?: nextTrack.index01Samples, sourceSampleRate)
+                            if (UsbDacManager.flacGaplessSeek(currentFilePath, startSample)) continue
+                            DebugLog.add(TAG, "neriPull(flac): CUE gapless seek FAIL, ending")
+                        }
+                    }
+                    DebugLog.add(TAG, "neriPull($codec): EOS drain complete")
+                    break
+                }
+
+                val pushed = UsbDacManager.pushPcm(buf, n)
+                if (pushed < 0) {
+                    // 【fix15】切歌停流中(shouldStop)：push 失败是预期(stopMonitor 只 join 600ms，
+                    // pushPcm stall 超时 2s 期间新 controller 已接管会话)——静默退出，
+                    // 不进 ERROR/onError，避免旧线程毒化新曲的全局播放状态。
+                    if (shouldStop) {
+                        DebugLog.v(TAG, "neriPull($codec): pushPcm=$pushed during stop — silent exit")
+                        break
+                    }
+                    DebugLog.add(TAG, "neriPull($codec): pushPcm=$pushed — session lost")
+                    releaseResources(); isPlaying = false
+                    UsbDacManager.pauseStream()
+                    requestState(DacState.ERROR, "pcm push failed")
+                    onError("PCM push failed")
+                    shouldStop = true
+                    break
+                }
+
+                val pos = if (isFlac) UsbDacManager.flacPositionMs() else UsbDacManager.alacPositionMs()
+                positionMs = pos
+                if (pos == lastPosMs) stallMs += 50 else { stallMs = 0; lastPosMs = pos }
+                // stall 仅在原生明确 terminal failure 时止损——neri 自带恢复 latch，不 forceReset
+                if (stallMs >= 10_000 && UsbDacManager.neriTerminalFailed()) {
+                    DebugLog.add(TAG, "neriPull($codec): terminal failure after ${stallMs}ms stall — stopping")
+                    releaseResources(); isPlaying = false
+                    UsbDacManager.pauseStream()
+                    requestState(DacState.ERROR, "playback stalled (transport failed)")
+                    onError("USB transport failed")
+                    shouldStop = true
+                    break
+                }
+
+                val now = System.currentTimeMillis()
+                if (now - lastMetricsLog > 5000) {
+                    lastMetricsLog = now
+                    val peak = UsbDacManager.neriOutputPeak()
+                    UsbDacManager.checkLoudPlayback(peak)
+                    DebugLog.add(TAG, "neriPull($codec): pos=${pos}ms queued=${UsbDacManager.getRingFill()} " +
+                        "eos=${if (isFlac) UsbDacManager.flacIsEos() else UsbDacManager.alacIsEos()} peak=${"%.2f".format(peak)}")
+                }
+            }
+        } catch (_: InterruptedException) {
+            DebugLog.v(TAG, "neriPull($codec): interrupted (shouldStop=$shouldStop)")
+        } catch (e: Exception) {
+            if (!shouldStop) {
+                requestState(DacState.ERROR, "neriPull: ${e.message}")
+                DebugLog.add(TAG, "neriPull($codec) err: ${e.message}")
+                onError("Decode: ${e.message}")
+            }
+        } finally {
+            if (!shouldStop) {
+                releaseResources(); isPlaying = false
+                UsbDacManager.pauseStream()  // EOS keep-claim：会话保留，下一曲零间隙
+                requestState(DacState.EOS_HOLD, "neriPull: EOS")
+                DebugLog.v(TAG, "neriPull($codec) done, calling onCompletion")
+                onCompletion()
+            } else {
+                DebugLog.v(TAG, "neriPull($codec) aborted (shouldStop=true) state=$state")
+            }
+        }
+    }
+
     private fun flacMonitorLoop() {
-        var lastPosMs = 0L; var stallCount = 0; var lastDebug = 0L
+        var lastPosMs = 0L; var stallCount = 0; var stallTotal = 0; var lastDebug = 0L; var lastMetricsLog = 0L
         val prebufferGraceMs = 3000L  // [v6.0.7] first 3s pos stays 0 during native prebuffer, skip stall detection
+        // 【V9.20 A/卡死自愈】STALL 有界自愈：playback 位长时间不动 = USB OUT 端点 stall / DAC 不消费。
+        // 原监控只报不救 → 永久卡死 + 无限刷 STALL 日志。这里加有界自愈 + 硬上限止损。
+        // [V9.20 ②] 自愈常量已上提到 companion object；STALL_STATS_ONLY=true 时只统计不 forceReset。
+        var recoveryAttempts = 0
         var prebufferEndTime = System.currentTimeMillis() + prebufferGraceMs
         try {
             var drainWaitMs = 0
@@ -806,6 +1115,18 @@ class UsbDacPlaybackController(
                     synchronized(pauseLock) { while (paused && !shouldStop) (pauseLock as java.lang.Object).wait() }
                 }
                 if (shouldStop) break
+                // [V9.20x] Surprise removal: native URB submission saw consecutive ENODEV and
+                // latched "device vanished". Not a stall — forceReset would hammer a dead
+                // endpoint. Run the detach path so the position is remembered for auto-resume.
+                if (UsbDacManager.pollDeviceVanished()) {
+                    DebugLog.add(TAG, "flacMonitor: USB device vanished (ENODEV) — detach path, no self-heal")
+                    releaseResources(); isPlaying = false
+                    UsbDacManager.pauseStream()
+                    requestState(DacState.ERROR, "usb device removed")
+                    onError("USB DAC removed")
+                    shouldStop = true
+                    break
+                }
                 val pos = UsbDacManager.flacPositionMs()
                 positionMs = pos
                 if (pos == lastPosMs && !paused) {
@@ -814,8 +1135,39 @@ class UsbDacPlaybackController(
                         Thread.sleep(50)
                         continue
                     }
-                    stallCount++
+                    stallCount++; stallTotal++
                     if (stallCount >= 4) DebugLog.add(TAG, "flacMonitor: STALL pos=$pos stallCount=$stallCount ringFill=${UsbDacManager.getRingFill()} flacEos=${UsbDacManager.flacIsEos()}")
+                    // 【V9.20 A】有界自愈：到阈值先 forceReset(取消卡住的 URB，native 设计的总线复位兜底)，
+                    // 给一个观察窗口；耗尽次数仍不前进则硬止损(干净停止+报错，不再无限卡死)。
+                    // [V9.20n] Stale-session gate FIRST: if this monitor belongs to a session the
+                    // user already switched away from, its forceReset would kill the CURRENT
+                    // session's live stream (that ping-pong was the multi-second freeze).
+                    // Exit quietly instead — the current session owns recovery from now on.
+                    if (myGen != UsbDacManager.sessionGen) {
+                        DebugLog.add(TAG, "flacMonitor: stale session (gen=$myGen cur=${UsbDacManager.sessionGen}) — exiting quietly, current session owns recovery")
+                        shouldStop = true
+                        break
+                    }
+                    if (stallCount == STALL_RECOVER_AT && recoveryAttempts < STALL_MAX_RECOVER) {
+                        recoveryAttempts++
+                        if (STALL_STATS_ONLY) {
+                            DebugLog.add(TAG, "flacMonitor: STALL recovery SKIPPED (stats-only; forceReset disabled) attempt #$recoveryAttempts")
+                        } else {
+                            DebugLog.add(TAG, "flacMonitor: STALL recovery attempt #$recoveryAttempts (forceReset cancels wedged URBs)")
+                            UsbDacManager.forceReset()
+                            stallCount = 0
+                        }
+                        Thread.sleep(50); continue
+                    }
+                    if (stallCount >= STALL_GIVEUP_AT) {
+                        DebugLog.add(TAG, "flacMonitor: STALL unrecoverable after $recoveryAttempts recovery attempt(s); stopping playback")
+                        releaseResources(); isPlaying = false
+                        UsbDacManager.pauseStream()
+                        requestState(DacState.ERROR, "playback stalled (USB endpoint not consuming)")
+                        onError("USB stall: DAC stopped consuming audio")
+                        shouldStop = true
+                        break
+                    }
                 } else {
                     stallCount = 0
                     if (pos != 0L) prebufferEndTime = 0  // prebuffer done, disable grace window permanently
@@ -851,6 +1203,14 @@ class UsbDacPlaybackController(
                 // 每 10s 一次心跳
                 val now = System.currentTimeMillis()
                 if (now - lastDebug > 10_000) { DebugLog.v(TAG, "flacMonitor: pos=${pos}ms ring=${UsbDacManager.getRingFill()} eos=${UsbDacManager.flacIsEos()}"); lastDebug = now }
+                // 【V9.20x】每 5s 打印一次运行时诊断指标（借鉴 NeriPlayer RuntimeMetrics），便于排查爆音/卡顿/无声
+                if (now - lastMetricsLog > 5000) {
+                    lastMetricsLog = now
+                    val m = UsbDacManager.getRuntimeMetrics()
+                    val peakLin = if (m.channel0Peak >= m.channel1Peak) m.channel0Peak else m.channel1Peak
+                    UsbDacManager.checkLoudPlayback(peakLin)
+                    DebugLog.add(TAG, "metrics: underrun=${m.underrunCount} bpEv=${m.backpressureEvents} bpMax=${m.backpressureMaxMs}ms zeroFill=${m.zeroFillBytes}B sig=${m.signalFrames} sil=${m.silentFrames} peakL=${"%.2f".format(m.channel0Peak)} peakR=${"%.2f".format(m.channel1Peak)} drop=${m.droppedBytes}B stallBrk=${m.stallBreaks} stallTot=$stallTotal vanish=${m.vanishEvents}")
+                }
                 Thread.sleep(50)
             }
         } catch (_: InterruptedException) {
@@ -873,6 +1233,7 @@ class UsbDacPlaybackController(
     // 【V3.2.7】WAV 直读主循环：读文件→float→pushPcm（背压限速），EOS 排空后 onCompletion
     private fun wavDecodeLoop() {
         var normalEos = false
+        var pushErrors = 0
         try {
             while (!shouldStop) {
                 if (paused) synchronized(pauseLock) { while (paused && !shouldStop) (pauseLock as java.lang.Object).wait() }
@@ -883,7 +1244,9 @@ class UsbDacPlaybackController(
                 val f = wavReadChunk(8192)
                 if (f.isEmpty()) break  // EOF
                 val fc = f.size / sourceChannelCount
-                UsbDacManager.pushPcm(f, fc)
+                // [V9.20] 同 decodeLoop：pushPcm 停顿有界自愈，不再永久冻死
+                val pushed = UsbDacManager.pushPcm(f, fc)
+                if (pushed < 0) { pushErrors = onPushStall(pushErrors); if (shouldStop) break }
                 positionMs = wavReadBytes * 1000L / (sourceSampleRate.toLong() * wavBlockAlign)
             }
             normalEos = true  // 循环自然结束（EOF）＝正常播完
@@ -998,6 +1361,50 @@ class UsbDacPlaybackController(
         return pushed
     }
 
+    // [V9.20] pushPcm 停顿有界自愈（MP3/AAC/WAV 切歌冻结修复）：
+    // native pushPcm 在 ring 满 2s 无人消费时返回 -2（旧实现 usleep 死等 → 解码线程永久冻死）。
+    // 同 flacMonitorLoop 的有界自愈节奏：先 forceReset 取消卡死的 URB 给窗口；
+    // 耗尽则干净报错停止（可重新点歌恢复），绝不再永久冻结。
+    private fun onPushStall(errors: Int): Int {
+        // [V9.20x] Surprise removal first: native URB submission saw consecutive ENODEV
+        // and latched "device vanished". This is NOT a stall — forceReset would just
+        // hammer a dead endpoint and burn the recovery budget. Run the detach path so the
+        // playback position is remembered and auto-resume works when the DAC comes back.
+        if (UsbDacManager.pollDeviceVanished()) {
+            DebugLog.add(TAG, "decodeLoop: USB device vanished (ENODEV) — detach path, no self-heal")
+            requestState(DacState.ERROR, "usb device removed")
+            onError("USB DAC removed")
+            shouldStop = true
+            return errors + 1
+        }
+        val n = errors + 1
+        // [V9.20n] Stale-session gate: a decode thread from a session the user already
+        // switched away from must NOT forceReset — that tears down the CURRENT
+        // session's stream (forceReset ping-pong = the multi-second switch freeze).
+        // Exit quietly; the current session's own stall handling owns recovery.
+        if (myGen != UsbDacManager.sessionGen) {
+            DebugLog.add(TAG, "decodeLoop: pushPcm stalled in stale session (gen=$myGen cur=${UsbDacManager.sessionGen}) — exiting quietly")
+            shouldStop = true
+            return n
+        }
+        DebugLog.add(TAG, "decodeLoop: pushPcm stalled (consumer not draining) x$n ring=${UsbDacManager.getRingFill()}")
+        if (n == 2) {
+            if (STALL_STATS_ONLY) {
+                DebugLog.add(TAG, "decodeLoop: STALL recovery SKIPPED (stats-only; forceReset disabled)")
+            } else {
+                DebugLog.add(TAG, "decodeLoop: STALL recovery (forceReset cancels wedged URBs)")
+                UsbDacManager.forceReset()
+            }
+        }
+        if (n >= 6) {
+            DebugLog.add(TAG, "decodeLoop: STALL unrecoverable after forceReset; stopping playback")
+            requestState(DacState.ERROR, "playback stalled (USB endpoint not consuming)")
+            onError("USB stall: DAC stopped consuming audio")
+            shouldStop = true
+        }
+        return n
+    }
+
     private fun decodeLoop() {
         val ex = extractor ?: return; val cd = codec ?: return
         val info = MediaCodec.BufferInfo()
@@ -1056,10 +1463,10 @@ class UsbDacPlaybackController(
                         val f = decodeToFloat(outBuf, info.size)
                         if (f.isNotEmpty()) {
                             val fc = f.size / sampleCount
-                            if (UsbDacManager.pushPcm(f, fc) < 0) {
-                                pushErrors++
-                                if (pushErrors > 100) { DebugLog.add(TAG, "pushPcm: too many errors, stopping"); break }
-                            } else pushErrors = 0
+                            // [V9.20] pushPcm < 0 = 停顿（-2）或错误：有界自愈，不再永久冻死
+                            val pushed = UsbDacManager.pushPcm(f, fc)
+                            pushErrors = if (pushed < 0) onPushStall(pushErrors) else 0
+                            if (shouldStop) break
                         }
                     }
                     cd.releaseOutputBuffer(outIdx, false)

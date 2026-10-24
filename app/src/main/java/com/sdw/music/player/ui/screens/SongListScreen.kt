@@ -72,11 +72,13 @@ import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
 import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 import androidx.activity.compose.BackHandler
@@ -101,6 +103,8 @@ import androidx.compose.ui.geometry.Size
 import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.Song
 import com.sdw.music.player.ui.theme.*
+import com.kyant.backdrop.liquidGlassLens
+import com.kyant.backdrop.internal.chain
 import com.sdw.music.player.ui.theme.LocalWallpaperEffectiveLight
 import androidx.media3.common.Player
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -479,6 +483,10 @@ fun SongListScreen(
         // minSdk 24：低版本 backdropLayer 传 null，条子保持原有便携玻璃，行为与旧版一致。
         val realBlurSupported = android.os.Build.VERSION.SDK_INT >= 31
         val backdropLayer = rememberGraphicsLayer()
+        // 【液态玻璃】胶囊尺寸模糊层：把全屏 backdropLayer 平移 -miniShift 录下迷你条正后方的列表，
+        // 喂给 Kyant Backdrop 的 lens 折射（liquidGlassLens），得到真·液态玻璃而非便携玻璃。
+        // 仅 API31+ 才有真模糊，低版本传 null 走原便携玻璃。
+        val capsuleLayer = if (realBlurSupported) rememberGraphicsLayer() else null
         // 【性能修复】全屏 BlurEffect 图层只在「列表内容真变了」时重录，
         // 不再被正在播放行的 60fps 无限动画（光晕呼吸 / 跳动条）每帧触发整列重模糊。
         // 否则空闲时 GPU 常驻 ~39%，飞回列表的转场动画抢不到预算而掉帧。
@@ -902,6 +910,9 @@ fun SongListScreen(
                     coverVisible = miniCoverVisible,
                     coverFlightEnabled = sharedCoverState?.rowFlightSongId == null,
                     backdropLayer = if (realBlurSupported) backdropLayer else null,
+                    capsuleLayer = capsuleLayer,
+                    coverAnimating = coverAnimating,
+                    blurRadiusPx = blurRadiusPx,
                     containerOrigin = backdropContainerOrigin,
                     positionMs = positionMs,
                     durationMs = durationMs,
@@ -1449,6 +1460,11 @@ fun MiniPlayer(
     coverFlightEnabled: Boolean = true,
     // [V8.111] 真·背景模糊：主界面传入已录好列表内容的图层，null = 低版本不做（保持便携玻璃）。
     backdropLayer: GraphicsLayer? = null,
+    // 【液态玻璃】胶囊尺寸模糊层（已用 miniShift 对齐），非空时迷你条走真·折射玻璃。
+    capsuleLayer: GraphicsLayer? = null,
+    // 共享元素飞行（进/出播放页）期间冻结全屏模糊，这里同步冻结胶囊层折射，避免转场掉帧。
+    coverAnimating: Boolean = false,
+    blurRadiusPx: Float = 0f,
     containerOrigin: Offset = Offset.Zero,
     modifier: Modifier = Modifier
 ) {
@@ -1485,6 +1501,23 @@ fun MiniPlayer(
 
     // [V8.111] 条子在 root 里的位置 - 容器原点 = 图层内的平移量（把背景层对齐到条子下面）
     var miniShift by remember { mutableStateOf(Offset.Zero) }
+    var capsuleSize by remember { mutableStateOf(IntSize.Zero) }
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    SideEffect {
+        capsuleLayer?.let { layer ->
+            if (capsuleSize != IntSize.Zero) {
+                val blur = BlurEffect(blurRadiusPx, blurRadiusPx, TileMode.Clamp)
+                val lens = liquidGlassLens(
+                    Size(capsuleSize.width.toFloat(), capsuleSize.height.toFloat()),
+                    with(density) { 26.dp.toPx() },
+                    with(density) { 18.dp.toPx() },
+                    with(density) { 20.dp.toPx() }
+                )
+                layer.renderEffect = if (coverAnimating) null else (lens?.let { blur.chain(it) } ?: blur)
+                layer.compositingStrategy = CompositingStrategy.Offscreen
+            }
+        }
+    }
     // [V8.112] 模糊层之上再压的一层极薄主题色薄纱：统一色调、压住过碎的细节，
     // 读起来是透亮的液态玻璃而不是"一块死板的黑/白"。
     val blurVeil = MaterialTheme.colorScheme.surface.copy(alpha = 0.16f)
@@ -1513,7 +1546,10 @@ fun MiniPlayer(
             )
             .clickable(interactionSource = interactionSource, indication = null) { onClick() }
             .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
-            .onGloballyPositioned { coords -> miniShift = coords.positionInRoot() - containerOrigin }
+            .onGloballyPositioned { coords ->
+                miniShift = coords.positionInRoot() - containerOrigin
+                capsuleSize = coords.size
+            }
             .then(
                 // [V8.113] 胶囊底层始终铺一层不透明磨砂底，挡住背后常驻的壁纸/主题渐变，
                 // 否则迷你条（自身极薄填充）会把背景透上来，与模糊列表叠影。
@@ -1530,7 +1566,18 @@ fun MiniPlayer(
                     clipPath(capsule) {
                         // 不透明磨砂底：用当前配色 surface（深/浅自动适配），alpha 拉到 0.95 挡住背景。
                         drawPath(capsule, miniBase)
-                        if (backdropLayer != null) {
+                        if (capsuleLayer != null && backdropLayer != null) {
+                            // 【液态玻璃】把全屏 backdropLayer 平移 -miniShift 裁出迷你条正后方列表，
+                            // 录进胶囊尺寸层，drawLayer 时叠加 blur+lens 折射（见 SideEffect）。
+                            capsuleLayer.record(
+                                size = IntSize(size.width.toInt(), size.height.toInt())
+                            ) {
+                                translate(left = -miniShift.x, top = -miniShift.y) {
+                                    drawLayer(backdropLayer)
+                                }
+                            }
+                            drawLayer(capsuleLayer)
+                        } else if (backdropLayer != null) {
                             translate(left = -miniShift.x, top = -miniShift.y) {
                                 drawLayer(backdropLayer)
                             }

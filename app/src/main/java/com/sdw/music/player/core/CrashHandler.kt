@@ -43,6 +43,33 @@ class CrashHandler private constructor() : Thread.UncaughtExceptionHandler {
             file.delete()
             return content
         }
+
+        /**
+         * 【崩溃诊断 2026-10-23】非破坏性读取崩溃日志（不删除文件）。
+         *
+         * 原 [readCrashLog] 读完即删，直接拿它去 UI 显示会把日志吃掉：重组一次内容就没了，
+         * 旋转屏幕更是彻底丢失，用户根本来不及复制。显示一律走这里，
+         * 清理交给 [clearCrashLog] 由用户显式触发。
+         */
+        fun peekCrashLog(context: Context): String {
+            val file = File(context.filesDir, CRASH_FILE_NAME)
+            if (!file.exists()) return ""
+            return try {
+                file.readText()
+            } catch (e: Exception) {
+                Log.e("CrashHandler", "peekCrashLog failed", e)
+                ""
+            }
+        }
+
+        /** 【崩溃诊断 2026-10-23】显式清除崩溃日志（设置页「清除」按钮用）。 */
+        fun clearCrashLog(context: Context) {
+            try {
+                File(context.filesDir, CRASH_FILE_NAME).delete()
+            } catch (e: Exception) {
+                Log.e("CrashHandler", "clearCrashLog failed", e)
+            }
+        }
     }
 
     override fun uncaughtException(thread: Thread, exception: Throwable) {

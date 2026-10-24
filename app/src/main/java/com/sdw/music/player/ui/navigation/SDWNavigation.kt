@@ -670,13 +670,18 @@ fun SDWNavHost(
                         .toList()
                         .sortedBy { it.first }
                 }
-                AlbumListScreen(
-                    albums = groupedAlbums,
-                    onAlbumClick = { albumName ->
-                        navController.navigate(Screen.AlbumSong.createRoute(albumName))
-                    },
-                    onNavigateBack = { navController.popBackStack() }
-                )
+                SharedElementDestination(
+                    sharedScope = sharedTransitionScope,
+                    visibilityScope = this
+                ) {
+                    AlbumListScreen(
+                        albums = groupedAlbums,
+                        onAlbumClick = { albumName ->
+                            navController.navigate(Screen.AlbumSong.createRoute(albumName))
+                        },
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                }
             }}
 
             composable(Screen.AlbumSong.route) { backStackEntry ->PageReveal {
@@ -685,22 +690,27 @@ fun SDWNavHost(
                 val filtered = remember(albumName, state.songList) {
                     state.songList.filter { it.album == albumName }
                 }
-                AlbumSongScreen(
-                    albumName = albumName,
-                    songs = filtered,
-                    currentSongId = state.currentSongId,
-                    isPlaying = isPlaying,
-                    onSongClick = { song ->
-                        val index = filtered.indexOfFirst { it.id == song.id }
-                        if (index >= 0) vm.handleIntent(PlayerIntent.PlaySongList(filtered, startIndex = index))
-                        navigateToPlayer()
-                    },
-                    onPlayAll = {
-                        vm.handleIntent(PlayerIntent.PlaySongList(filtered))
-                        navigateToPlayer()
-                    },
-                    onNavigateBack = { navController.popBackStack() }
-                )
+                SharedElementDestination(
+                    sharedScope = sharedTransitionScope,
+                    visibilityScope = this
+                ) {
+                    AlbumSongScreen(
+                        albumName = albumName,
+                        songs = filtered,
+                        currentSongId = state.currentSongId,
+                        isPlaying = isPlaying,
+                        onSongClick = { song ->
+                            val index = filtered.indexOfFirst { it.id == song.id }
+                            if (index >= 0) vm.handleIntent(PlayerIntent.PlaySongList(filtered, startIndex = index))
+                            navigateToPlayer()
+                        },
+                        onPlayAll = {
+                            vm.handleIntent(PlayerIntent.PlaySongList(filtered))
+                            navigateToPlayer()
+                        },
+                        onNavigateBack = { navController.popBackStack() }
+                    )
+                }
             }}
 
             // === Artist Views ===

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Declares SDWMP3_CN as an Android Auto / Automotive OS media app
+     (browse tree + playback). Mirrors the standard media3 MediaLibraryService
+     declaration used by Aurora / NeriPlayer-class players. -->
+<automotiveApp>
+    <uses name="media" />
+</automotiveApp>

@@ -195,6 +195,34 @@ Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetUnderrunCount
     return driver->getUnderrunCount();
 }
 
+// ── nativeGetRuntimeMetrics 【V9.20x】─────────────────────────────────────
+// Returns a fixed-length jlong array (kMetricsCount) snapshot. Order must match
+// UsbDacManager.METRIC_* on the Kotlin side. Peaks are scaled by 1e5.
+
+JNIEXPORT jlongArray JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetRuntimeMetrics(JNIEnv* env, jobject) {
+    jlongArray arr = env->NewLongArray(UsbAudioDriver::kMetricsCount);
+    if (!arr) return nullptr;
+    jlong buf[UsbAudioDriver::kMetricsCount];
+    memset(buf, 0, sizeof(buf));
+    if (auto* driver = getDriver()) {
+        int n = driver->fillMetrics(reinterpret_cast<int64_t*>(buf), UsbAudioDriver::kMetricsCount);
+        env->SetLongArrayRegion(arr, 0, n, buf);
+    }
+    return arr;
+}
+
+// ── nativeConsumeDeviceVanished [V9.20x hotplug fallback] ───────────────
+// One-shot: returns JNI_TRUE at most once per vanish event so both consumers
+// (pushPcm -3 and any polling caller) cannot double-fire the detach path.
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeConsumeDeviceVanished(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    if (!driver) return JNI_FALSE;
+    return driver->consumeDeviceVanished() ? JNI_TRUE : JNI_FALSE;
+}
+
 // ── nativeGetCurrentSampleRate ───────────────────────────────────────────
 
 JNIEXPORT jint JNICALL
@@ -268,6 +296,15 @@ JNIEXPORT void JNICALL
 Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetVolume(JNIEnv*, jobject, jfloat volume) {
     auto* driver = getDriver();
     if (driver) driver->setVolume(volume);
+}
+
+// ── nativeForceSoftwareVolume [2026-10-22] ──────────────────────────────
+// 设备 quirk：硬件 FU 已实证不衰减（31B2:1112 SET_CUR 全 ACK 但音量不变）→
+// 禁用硬件音量，此后 setVolume 全部走软件增益（packer 乘 volume_）。幂等。
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeForceSoftwareVolume(JNIEnv*, jobject) {
+    auto* driver = getDriver();
+    if (driver) driver->forceSoftwareVolume();
 }
 
 // ── nativeSetDitherEnabled ──────────────────────────────────────────────
@@ -347,6 +384,36 @@ Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetSoftStartEnab
     if (!d) return;
     d->setSoftStartEnabled(enabled == JNI_TRUE);
     LOGI("nativeSetSoftStartEnabled: %s", enabled ? "ON (150ms fade-in)" : "OFF (bit-perfect)");
+}
+
+// ── nativeSetFeedbackEnabled [P6] ──────────────────────────────────────────────
+// [2026-10-20 async feedback loop] Toggle the closed-loop clock recovery.
+// Default OFF: open-loop (bit-perfect) is the safe default; only true-async
+// DACs (XMOS/Amanero) need the loop, so the user opts in.
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeSetFeedbackEnabled(JNIEnv*, jobject, jboolean enabled) {
+    UsbAudioDriver* d = getDriver();
+    if (!d) return;
+    d->setFeedbackEnabled(enabled == JNI_TRUE);
+    LOGI("nativeSetFeedbackEnabled: %s", enabled ? "ON (async closed-loop)" : "OFF (open-loop)");
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeIsFeedbackActive(JNIEnv*, jobject) {
+    UsbAudioDriver* d = getDriver();
+    return (d && d->isFeedbackActive()) ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetFeedbackMeasuredRate(JNIEnv*, jobject) {
+    UsbAudioDriver* d = getDriver();
+    return d ? (jdouble)d->getFeedbackMeasuredRate() : 0.0;
+}
+
+JNIEXPORT jdouble JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeGetFeedbackCorrectionPpm(JNIEnv*, jobject) {
+    UsbAudioDriver* d = getDriver();
+    return d ? (jdouble)d->getFeedbackCorrectionPpm() : 0.0;
 }
 
 // ── nativeSetQuirkOverride ────────────────────────────────────────────────

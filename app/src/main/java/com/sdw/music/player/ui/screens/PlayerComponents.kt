@@ -159,6 +159,12 @@ fun PlayerTopBar(
     // 存在 settings/player_inline_lyrics（与 DTS / AGC 同一份 prefs），默认开。
     inlineLyrics: Boolean = true,
     onToggleInlineLyrics: () -> Unit = {},
+    // 【VU 表开关】三点菜单里的「VU 表」开关，与进度条上方 VuMeter 共用 player_visual_mode（VU ↔ NONE）
+    vuEnabled: Boolean = false,
+    onToggleVu: () -> Unit = {},
+    // 【V9.20t】三点菜单里的「沉浸模式」开关（与设置页同一把 key：sdw_music_prefs/immersive_player）
+    immersivePlayer: Boolean = false,
+    onToggleImmersive: () -> Unit = {},
     // 【音频诊断】右上角三点菜单入口：跳到 AudioDiagnosticScreen（输出路由 / 采样率 / bit-perfect 实时诊断）
     onNavigateToAudioDiagnostic: () -> Unit = {},
     // [UI-TIDY] Razr 外屏 / 紧凑屏的复用出口：占位符换成自定义中间内容、压掉竖向内边距、挂外屏专属 modifier。
@@ -287,6 +293,30 @@ fun PlayerTopBar(
                             )
                         }
                     )
+                    // 【VU 表开关】VU 表开关：紧跟三行歌词（同属「进度条上方可视化」），删除留在最后。
+                    DropdownMenuItem(
+                        text = { Text(stringResource(if (vuEnabled) R.string.menu_vu_on else R.string.menu_vu_off)) },
+                        onClick = { onDismissMenu(); onToggleVu() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.BarChart,
+                                stringResource(if (vuEnabled) R.string.menu_vu_on else R.string.menu_vu_off),
+                                tint = if (vuEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    )
+                    // 【V9.20t】沉浸模式开关：与设置页共用 sdw_music_prefs/immersive_player，两边永远一致。
+                    DropdownMenuItem(
+                        text = { Text(stringResource(if (immersivePlayer) R.string.menu_immersive_on else R.string.menu_immersive_off)) },
+                        onClick = { onDismissMenu(); onToggleImmersive() },
+                        leadingIcon = {
+                            Icon(
+                                Icons.Default.Fullscreen,
+                                stringResource(if (immersivePlayer) R.string.menu_immersive_on else R.string.menu_immersive_off),
+                                tint = if (immersivePlayer) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    )
                     // 【音频诊断】跳到 AudioDiagnosticScreen：实时显示输出路由 / 采样率 / bit-perfect 状态等。
                     DropdownMenuItem(
                         text = { Text(stringResource(R.string.settings_audio_diag)) },
@@ -313,7 +343,11 @@ fun PlayerCoverArt(
     songArtist: String,
     accentColor: Color,
     isPlaying: Boolean,
-    rotation: Float,
+    // [V9.20s] 旋转角以 lambda 提供：值在下方 graphicsLayer 块里读取（绘制期），
+    // 60fps 旋转只失效封面图层、不再让整个 PlayerScreen 每帧重组。V8.177 试过
+    // 「传 Animatable / 在子组件组合期读 .value」都失败（参数不变被跳过 → 停转），
+    // graphicsLayer 块的状态读取由图层级 observer 驱动，不会过期（同文件 breathe 缩放即此写法）。
+    rotation: () -> Float,
     sizeDp: androidx.compose.ui.unit.Dp,
     glowSizeDp: androidx.compose.ui.unit.Dp,
     onCoverPositioned: ((Offset, Size) -> Unit)? = null,
@@ -471,7 +505,9 @@ fun PlayerCoverArt(
         Box(
             modifier = Modifier
                 .size(sizeDp)
-                .then(if (noRotation) Modifier else Modifier.rotate(rotation))
+                // [V9.20s] rotate() 在组合期读角度 → 每帧重组；graphicsLayer 块在绘制期读，
+                // 只失效图层。视觉与 rotate() 完全一致（rotate 本身就是 graphicsLayer 封装）。
+                .then(if (noRotation) Modifier else Modifier.graphicsLayer { rotationZ = rotation() })
                 // [V8.76] 沉浸模式封面：加一层极淡的主色调扩散阴影（soft drop shadow），
                 // 让它"浮"在毛玻璃背景之上而不是平铺贴上去。shadow 的 ambient/spot 取
                 // accentColor（API28+ 着色，以下自动退化为中性阴影），比自绘 blur 便宜且
@@ -1097,6 +1133,8 @@ fun PlayerControlBar(
     onPause: () -> Unit,
     onNext: () -> Unit,
     onCycleRepeat: () -> Unit,
+    /** [2026-10-22] 防呆：队列只剩一首时下一首/上一首必重播，置灰提示（仍可点，服务端弹说明）。 */
+    canSkip: Boolean = true,
     modifier: Modifier = Modifier,
     playButtonSize: Dp = SDWTransport.Play,
     onInteract: () -> Unit = {}
@@ -1116,7 +1154,10 @@ fun PlayerControlBar(
                 modifier = Modifier.size(24.dp)
             )
         }
-        LiquidIconButton(onClick = { onInteract(); onPrevious() }, modifier = Modifier.size(stepSize)) {
+        LiquidIconButton(
+            onClick = { onInteract(); onPrevious() },
+            modifier = Modifier.size(stepSize).alpha(if (canSkip) 1f else 0.35f)
+        ) {
             Icon(Icons.Default.SkipPrevious, stringResource(R.string.player_previous), tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(36.dp))
         }
         Spacer(Modifier.width(6.dp))
@@ -1183,7 +1224,10 @@ fun PlayerControlBar(
             }
         }
         Spacer(Modifier.width(6.dp))
-        LiquidIconButton(onClick = { onInteract(); onNext() }, modifier = Modifier.size(stepSize)) {
+        LiquidIconButton(
+            onClick = { onInteract(); onNext() },
+            modifier = Modifier.size(stepSize).alpha(if (canSkip) 1f else 0.35f)
+        ) {
             Icon(Icons.Default.SkipNext, stringResource(R.string.player_next), tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(36.dp))
         }
         LiquidIconButton(onClick = { onInteract(); onCycleRepeat() }, modifier = Modifier.size(sideSize)) {
@@ -1779,14 +1823,23 @@ fun InlineWordHighlight(
  * 与全屏歌词页同款：仅在播放中推进，暂停即冻结在当前词（不会继续「超前点亮」）。
  */
 @Composable
-private fun rememberPlayerLyricClock(anchorMs: Long, running: Boolean): State<Long> {
+internal fun rememberPlayerLyricClock(anchorMs: Long, running: Boolean): State<Long> {
     val holder = remember { PlayerLyricClockHolder() }
     LaunchedEffect(anchorMs) { holder.onAnchor(anchorMs) }
     LaunchedEffect(running) {
         if (!running) return@LaunchedEffect
+        // [V9.20v] 该时钟现在有两个消费者：① 逐字进度（WORD_FADE_MS=160ms 淡入，30Hz 有 5 步，
+        // 观感顺滑）；② 行索引推导（PlayerScreen 顶层，与全屏歌词页同款）。
+        // 节流到 ~30Hz 而非 60fps：重组只限当前行叶子，但 160ms 淡入在 30Hz 下已无阶梯感，
+        // 省一半无效重组。seek/切歌的大跳仍由 onAnchor 立即重锚，不受节流影响。
+        var lastAdvanceMs = 0L
         while (true) {
             withFrameNanos { }
-            holder.advance()
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastAdvanceMs >= 33L) {
+                lastAdvanceMs = now
+                holder.advance()
+            }
         }
     }
     return holder.state
@@ -1968,6 +2021,9 @@ fun DacInfoBar(
     var sr by remember { mutableIntStateOf(0) }
     var bits by remember { mutableIntStateOf(0) }
     var diagCount by remember { mutableIntStateOf(0) }
+    var outSr by remember { mutableIntStateOf(0) }
+    var outBits by remember { mutableIntStateOf(0) }
+    var bitPerfect by remember { mutableStateOf(false) }
     
     // [V3.3.6] 只在 DAC 激活时轮询，避免主线程卡顿
     LaunchedEffect(Unit) {
@@ -1975,10 +2031,16 @@ fun DacInfoBar(
             val claimed = try { com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed() } catch (_: Throwable) { false }
             if (claimed) {
                 dacName = com.sdw.music.player.core.audio.engine.UsbDacManager.getDacDisplayName()
-                sr = com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveSampleRate()
-                bits = com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveBits()
-            } else { 
+                // [V9.20p] 显示源率/源位深（用户感知的音质），不是 DAC 线位深——
+                // MP3(16bit 源) 走 32bit alt 打包时旧逻辑显示 "32bit"+Hi-Res，误导。
+                sr = com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveSourceRate()
+                bits = com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveSourceBits()
+                outSr = com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveSampleRate()
+                outBits = com.sdw.music.player.core.audio.engine.UsbDacManager.queryActiveBits()
+                bitPerfect = com.sdw.music.player.core.audio.engine.UsbDacManager.isBitPerfectEnabled()
+            } else {
                 dacName = ""; sr = 0; bits = 0
+                outSr = 0; outBits = 0; bitPerfect = false
             }
             if (diagCount % 5 == 0) {
                 android.util.Log.d("DacInfoBar", "claimed=$claimed dacName='$dacName' sr=$sr bits=$bits")
@@ -1998,7 +2060,7 @@ fun DacInfoBar(
         initialValue = 0.35f, targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "dacDotA"
     )
-    val dotAlpha = if (isPlaying) pulse else 1f
+    // [V9.20t] 圆点脉冲挪到 graphicsLayer 绘制期读：6dp 小点的 900ms 呼吸不再 60fps 重组整条信息栏
 
     AnimatedVisibility(
         visible = dacBarVisible && show,
@@ -2016,23 +2078,60 @@ fun DacInfoBar(
             .padding(horizontal = 14.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(6.dp).background(textAccentColor.copy(alpha = dotAlpha), CircleShape))
+        Box(Modifier.size(6.dp).graphicsLayer { alpha = if (isPlaying) pulse else 1f }.background(textAccentColor, CircleShape))
         Spacer(Modifier.width(7.dp))
         Text(
             dacName,
             fontSize = androidx.compose.ui.unit.TextUnit(11f, androidx.compose.ui.unit.TextUnitType.Sp),
             fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
             color = textAccentColor, maxLines = 1, overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.widthIn(max = 130.dp)
+            modifier = Modifier.widthIn(max = 110.dp)
         )
         DacInfoDivider(textAccentColor)
+        // [A] 输出格式（NeriPlayer 风格：源 → 输出；二者一致时只显示一份）
+        val outSrText = if (outSr > 0) (if (outSr % 1000 == 0) "${outSr / 1000}kHz" else String.format("%.1fkHz", outSr / 1000f)) else ""
+        val showOut = outSr > 0 && (outSr != sr || outBits != bits)
         Text(
-            "$srText / ${bits}bit",
+            if (showOut) "$srText / ${bits}bit → $outSrText / ${outBits}bit" else "$srText / ${bits}bit",
             fontSize = androidx.compose.ui.unit.TextUnit(11f, androidx.compose.ui.unit.TextUnitType.Sp),
             fontWeight = androidx.compose.ui.text.font.FontWeight.Medium,
             color = textAccentColor,
             style = androidx.compose.ui.text.TextStyle(fontFeatureSettings = "tnum")
         )
+        // [A] 独占模式标识（胶囊仅在 DAC 独占占用时可见，此处显式标注）
+        DacInfoDivider(textAccentColor)
+        Box(
+            Modifier
+                .clip(SDWShapes.Badge)
+                .background(accentColor.copy(alpha = 0.18f))
+                .padding(horizontal = 6.dp, vertical = 2.dp)
+        ) {
+            Text(
+                stringResource(R.string.player_dac_exclusive),
+                fontSize = androidx.compose.ui.unit.TextUnit(9f, androidx.compose.ui.unit.TextUnitType.Sp),
+                fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                color = textAccentColor,
+                letterSpacing = androidx.compose.ui.unit.TextUnit(0.2f, androidx.compose.ui.unit.TextUnitType.Sp)
+            )
+        }
+        // [A] 比特完美状态
+        if (bitPerfect) {
+            DacInfoDivider(textAccentColor)
+            Box(
+                Modifier
+                    .clip(SDWShapes.Badge)
+                    .background(Brush.verticalGradient(listOf(Color(0xFFF5D061), Color(0xFFC9A227))))
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    stringResource(R.string.player_dac_bitperfect),
+                    fontSize = androidx.compose.ui.unit.TextUnit(9f, androidx.compose.ui.unit.TextUnitType.Sp),
+                    fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+                    color = Color(0xFF1A1200),
+                    letterSpacing = androidx.compose.ui.unit.TextUnit(0.2f, androidx.compose.ui.unit.TextUnitType.Sp)
+                )
+            }
+        }
         if (hiRes) {
             DacInfoDivider(textAccentColor)
             Box(
@@ -2098,7 +2197,7 @@ fun OutputDeviceBar(
         initialValue = 0.35f, targetValue = 1f,
         animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "btDotA"
     )
-    val dotAlpha = if (isPlaying) pulse else 1f
+    // [V9.20t] 圆点脉冲挪到 graphicsLayer 绘制期读：6dp 小点的 900ms 呼吸不再 60fps 重组整条信息栏
 
     AnimatedVisibility(
         visible = btBarVisible && show,
@@ -2115,7 +2214,7 @@ fun OutputDeviceBar(
             .padding(horizontal = 14.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Box(Modifier.size(6.dp).background(textAccentColor.copy(alpha = dotAlpha), CircleShape))
+        Box(Modifier.size(6.dp).graphicsLayer { alpha = if (isPlaying) pulse else 1f }.background(textAccentColor, CircleShape))
         Spacer(Modifier.width(7.dp))
         Text(
             btName,

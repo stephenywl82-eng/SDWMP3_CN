@@ -23,8 +23,8 @@ android {
         applicationId = "com.sdw.music.player.cn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 919
-        versionName = "9.19"    // 【V9.19】修扫描「永远卡在一处」：① readFlacVorbisComments 加退化护栏（blockType=0&dataLength=0&非末块→break，防损坏/全零 FLAC 死循环）；② probeDurationMs 改用独立线程+8s 硬超时（MediaMetadataRetriever.setDataSource 对特殊字符路径/损坏文件会原生挂死、无取消手段，旧实现走 MediaProbe 单线程会拖垮整轮扫描）；③ 扫描循环对 probeDurationMs 与 readBpmAndKey 各加 8s withTimeoutOrNull 兜底+记日志。纯 Kotlin 改动，不碰 .so；蓝牙/环绕修复与 V9.18 引擎不变。
+        versionCode = 920
+        versionName = "9.20"    // 【V9.20】DAC 独占：P6 单 reaper 闭环修噪音 + C DISCONNECT 分级 + D start 真实状态；继承 V9.19 扫描修复。
 
         ndk {
             abiFilters += listOf("arm64-v8a")

@@ -258,6 +258,8 @@
 <string name="mseb_slider_transient">過渡応答</string>
 <string name="mseb_slider_transient_desc">過渡応答の速度と鋭さ</string>
 <string name="eq_dsp_equalizer">DSPイコライザー</string>
+<string name="eq_master_on">イコライザー · オン</string>
+<string name="eq_master_off">イコライザー · オフ</string>
 <string name="eq_mseb_psychoacoustic">MSEB音響心理EQ</string>
 <string name="eq_brand_presets">ブランドプリセット</string>
 <string name="eq_autoeq_calibration">AutoEQヘッドフォンキャリブレーション</string>

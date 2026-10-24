@@ -301,7 +301,7 @@ private fun PlaylistSongItem(
             Box(
                 modifier = Modifier
                     .size(20.dp)
-                    .clip(RoundedCornerShape(6.dp))
+                    .clip(SDWShapes.Thumb)
                     .background(Color(EnergyColor.colorInt(song)).copy(alpha = 0.85f)),
                 contentAlignment = Alignment.Center
             ) {

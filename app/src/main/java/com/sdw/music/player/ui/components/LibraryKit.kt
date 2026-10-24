@@ -34,6 +34,8 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import com.sdw.music.player.ui.components.SDWDivider
+import com.sdw.music.player.ui.animation.ListDetailKeys
+import com.sdw.music.player.ui.animation.sharedCoverArt
 import com.sdw.music.player.ui.theme.sectionTitleStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -159,11 +161,19 @@ fun RowCover(
     size: Dp = 48.dp,
     isPlaying: Boolean = false,
     accent: Color = MaterialTheme.colorScheme.primary,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    /** 非空时该封面参与列表→详情共享飞行；key 与飞行圆角两端必须一致才会配对。 */
+    sharedKey: String? = null
 ) {
     val shape: Shape = RoundedCornerShape(SDWShape.forCover(size.value.toInt()))
+    // 共享飞行修饰符：无 key 时是空 Modifier（全站其它调用零影响/零开销）。
+    val sharedModifier = if (sharedKey != null) {
+        Modifier.sharedCoverArt(sharedKey, clipShape = ListDetailKeys.AlbumFlightShape)
+    } else {
+        Modifier
+    }
     Box(
-        modifier = modifier.size(size),
+        modifier = modifier.size(size).then(sharedModifier),
         contentAlignment = Alignment.Center
     ) {
         // 正在播放的呼吸光晕必须在封面 Box 内部：它是比封面更大的装饰层，得溢出绘制
@@ -475,7 +485,9 @@ fun DetailHero(
     onPlayAll: () -> Unit,
     modifier: Modifier = Modifier,
     /** 歌手页传艺人名：头部改用艺人头像（圆形），否则用专辑/歌单封面。 */
-    artistName: String? = null
+    artistName: String? = null,
+    /** 详情页封面参与共享飞行的 key（由列表页传入，两端一致才会配对）。 */
+    heroSharedKey: String? = null
 ) {
     Row(
         modifier = modifier
@@ -491,7 +503,8 @@ fun DetailHero(
                 title = coverTitle,
                 artist = coverArtist,
                 uri = coverUri,
-                size = coverSize
+                size = coverSize,
+                sharedKey = heroSharedKey
             )
         }
         Spacer(Modifier.width(16.dp))
@@ -514,33 +527,38 @@ fun DetailHero(
     SDWDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.05f))
 }
 
-/** 「播放全部」胶囊按钮：描边 + 主色文字，比 TextButton 有分量，比 FAB 克制。 */
+/**
+ * 「播放全部」主 CTA：实心主色胶囊 + 弹簧按压。
+ *
+ * 与播放页那颗播放键同语言（实心 + 回弹），主操作一眼可见。
+ * 前景一律 onPrimary（主色容器专用前景）——曾误用 background 当前景，
+ * 深色模式纯黑背景下黑字印主色底糊成一片，勿再犯。
+ */
 @Composable
 fun PlayAllPill(onClick: () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
+    val primary = MaterialTheme.colorScheme.primary
+    val onPrimary = MaterialTheme.colorScheme.onPrimary
     Box(
         modifier = Modifier
             .clip(SDWShapes.Pill)
-            .border(
-                width = 1.dp,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.45f),
-                shape = SDWShapes.Pill
-            )
+            .background(primary)
+            .springPress(interaction, pressedScale = 0.95f)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 7.dp),
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         contentAlignment = Alignment.CenterStart
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 Icons.Default.PlayArrow,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
+                tint = onPrimary,
                 modifier = Modifier.size(16.dp)
             )
             Spacer(Modifier.width(6.dp))
             Text(
                 text = stringResource(R.string.action_play_all),
-                color = MaterialTheme.colorScheme.primary,
+                color = onPrimary,
                 style = itemSubtitleStyle().copy(fontWeight = FontWeight.SemiBold)
             )
         }

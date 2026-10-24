@@ -55,6 +55,10 @@ static std::atomic<int64_t> gCurrentPcmFrame{0};
 // Gapless: cached path for cross-file gapless seek
 static std::string gCurrentPath;
 
+// [NeriPlayer 引擎] pull 模式标志：为 true 时 nativeFlacGaplessSeek 的跨文件路径
+// 不再 spawn decodeLoop 线程（Kotlin 侧用 nativeFlacReadChunk 拉取，避免两套解码同时跑）。
+static std::atomic<bool> gPullMode{false};
+
 // ── Forward declarations ────────────────────────────────────────────────────
 static void decodeLoop();
 
@@ -315,6 +319,13 @@ Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacGaplessSeek(
     gSeekTargetPcmFrame = targetSample;
     gSeekPending = true;
 
+    if (gPullMode) {
+        // [NeriPlayer 引擎] pull 模式：不起线程，等 Kotlin 下次 readChunk 时消费 seek
+        LOGI("nativeFlacGaplessSeek(cross/pull): new file, targetPcm=%lld (no thread)",
+             (long long)targetSample);
+        return JNI_TRUE;
+    }
+
     gRunning = true;
     gDecodeThread = new std::thread(decodeLoop);
     LOGI("nativeFlacGaplessSeek(cross): new file, targetPcm=%lld", (long long)targetSample);
@@ -325,6 +336,61 @@ JNIEXPORT jlong JNICALL
 Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacTotalSamples(
     JNIEnv* /*env*/, jobject /*this*/) {
     return gTotalPcmFrames.load();
+}
+
+// [NeriPlayer 引擎] 设置 pull 模式（Kotlin 侧 neri 引擎启用时调用）
+JNIEXPORT void JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacSetPullMode(
+    JNIEnv* /*env*/, jobject /*this*/, jboolean enabled) {
+    gPullMode = enabled == JNI_TRUE;
+    LOGI("nativeFlacSetPullMode: %s", gPullMode ? "PULL" : "THREAD");
+}
+
+// ── [NeriPlayer 引擎] Pull 模式解码 ─────────────────────────────────────────
+// NeriPlayer USB 引擎启用时，Kotlin 直接拉取解码块喂给原生 session 的 PcmPipeline
+// （不再经过 UsbAudioDriver 环形缓冲）。与 decodeLoop 二选一，不会并发运行。
+// 返回：>0 = 解码出的帧数（已写入 out）；0 = EOS；-1 = 暂停中（调用方应等待）。
+JNIEXPORT jint JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeFlacReadChunk(
+    JNIEnv* env, jobject /*this*/, jfloatArray out, jint maxFrames) {
+    if (!gFlac || out == nullptr || maxFrames <= 0) return 0;
+    const int channels = gChannels.load();
+    if (channels < 1 || channels > 8) return 0;
+
+    // 消费挂起的 seek（与 decodeLoop 同语义；pull 模式无 ring 需要 reset）
+    if (gSeekPending.exchange(false)) {
+        int64_t targetFrame = gSeekTargetMs.load() > 0
+            ? msToPcmFrames(gSeekTargetMs.load())
+            : gSeekTargetPcmFrame.load();
+        if (targetFrame < 0) targetFrame = 0;
+        if (targetFrame >= gTotalPcmFrames) targetFrame = gTotalPcmFrames - 1;
+        if (targetFrame < 0) targetFrame = 0;
+        if (drflac_seek_to_pcm_frame(gFlac, (drflac_uint64)targetFrame)) {
+            gCurrentPcmFrame = targetFrame;
+            LOGI("nativeFlacReadChunk: seek to frame %lld", (long long)targetFrame);
+        } else {
+            LOGW("nativeFlacReadChunk: seek to frame %lld FAILED, staying",
+                 (long long)targetFrame);
+        }
+        gSeekTargetMs = 0;
+        gSeekTargetPcmFrame = 0;
+        gEos = false;
+    }
+
+    if (gPaused) return -1;
+
+    const int kPullMaxFrames = 4096;
+    int toRead = maxFrames < kPullMaxFrames ? maxFrames : kPullMaxFrames;
+    static thread_local float pullBuf[kPullMaxFrames * 8];
+    drflac_uint64 framesRead = drflac_read_pcm_frames_f32(gFlac, (drflac_uint64)toRead, pullBuf);
+    if (framesRead == 0) {
+        LOGI("nativeFlacReadChunk: EOS at frame %lld", (long long)gCurrentPcmFrame.load());
+        gEos = true;
+        return 0;
+    }
+    env->SetFloatArrayRegion(out, 0, (jsize)(framesRead * (drflac_uint64)channels), pullBuf);
+    gCurrentPcmFrame += (int64_t)framesRead;
+    return (jint)framesRead;
 }
 
 // 读 FLAC 内嵌歌词（Vorbis comment LYRICS / UNSYNCEDLYRICS 字段）

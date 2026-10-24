@@ -473,6 +473,15 @@ static bool buildSampleTable() {
     return true;
 }
 
+// ── [NeriPlayer 引擎] Pull 模式状态（仅 nativeAlacReadChunk 使用） ──────────
+// 与 decodeLoop 二选一，不会并发运行；nativeAlacOpen 时复位。
+static int64_t gPullSampleIdx = 0;
+static int64_t gPullFramePos = 0;
+static std::vector<uint8_t> gPullIntPcm;
+static std::vector<uint8_t> gPullPacket;
+static std::vector<float>    gPullFloatBuf;
+static bool gPullReady = false;
+
 // ── int → float conversion (ALAC Decode outputs interleaved int PCM) ────────
 static inline float int16ToFloat(const uint8_t* p) {
     int16_t v = (int16_t)((p[0] << 8) | p[1]);  // big-endian? No: Decode outputs native little-endian on ARM
@@ -551,6 +560,7 @@ Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacOpen(
     gPaused = false;
     gSeekPending = false;
     gCurrentPcmFrame = 0;
+    gPullReady = false;  // [NeriPlayer 引擎] pull 模式下重新分配缓冲并复位进度
 
     LOGI("nativeAlacOpen: OK sr=%d ch=%d bits=%d dur=%lldms",
          gSampleRate.load(), gChannels.load(), gBitsPerSample.load(), (long long)gDurationMs.load());
@@ -643,6 +653,101 @@ JNIEXPORT jlong JNICALL
 Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacTotalSamples(
     JNIEnv* /*env*/, jobject /*this*/) {
     return gTotalPcmFrames.load();
+}
+
+// ── [NeriPlayer 引擎] Pull 模式解码 ─────────────────────────────────────────
+// NeriPlayer USB 引擎启用时，Kotlin 直接拉取解码块喂给原生 session 的 PcmPipeline
+// （不再经过 UsbAudioDriver 环形缓冲）。与 decodeLoop 二选一，不会并发运行。
+// 每次调用解码一个 ALAC packet（≤ frameLen 帧）。
+// 返回：>0 = 解码出的帧数（已写入 out）；0 = EOS；-1 = 暂停中。
+JNIEXPORT jint JNICALL
+Java_com_sdw_music_player_core_audio_engine_UsbDacManager_nativeAlacReadChunk(
+    JNIEnv* env, jobject /*this*/, jfloatArray out, jint maxFrames) {
+    if (!gAlac || !gFile || out == nullptr || maxFrames <= 0) return 0;
+    const int channels = gChannels.load();
+    const int bits     = gBitsPerSample.load();
+    const int frameLen = gFrameLength.load();
+    if (channels < 1 || channels > 8 || frameLen < 1) return 0;
+
+    // 首次调用分配 pull 缓冲区（线程模式下这些是 decodeLoop 的栈上局部变量）
+    if (!gPullReady) {
+        const size_t maxOutputBytes = (size_t)frameLen * channels * 4;
+        gPullIntPcm.resize(maxOutputBytes);
+        gPullPacket.assign(maxOutputBytes + 16, 0);
+        gPullFloatBuf.resize((size_t)frameLen * channels);
+        gPullSampleIdx = 0;
+        gPullFramePos = 0;
+        gPullReady = true;
+    }
+
+    // 消费挂起的 seek（与 decodeLoop 同语义；pull 模式无 ring 需要 reset）
+    if (gSeekPending.exchange(false)) {
+        int64_t targetFrame = msToPcmFrames(gSeekTargetMs.load());
+        if (targetFrame < 0) targetFrame = 0;
+        if (targetFrame >= gTotalPcmFrames.load()) targetFrame = gTotalPcmFrames.load() - 1;
+        int64_t acc = 0;
+        int64_t newIdx = 0;
+        for (int64_t i = 0; i < (int64_t)gSamples.size(); i++) {
+            if (acc + gSamples[i].duration > targetFrame) { newIdx = i; break; }
+            acc += gSamples[i].duration;
+            newIdx = i;
+        }
+        gPullSampleIdx = newIdx;
+        gPullFramePos = acc;
+        gCurrentPcmFrame = acc;
+        gSeekTargetMs = 0;
+        gEos = false;
+        LOGI("nativeAlacReadChunk: seek to frame %lld (sample %lld)",
+             (long long)targetFrame, (long long)gPullSampleIdx);
+    }
+
+    if (gPaused) return -1;
+
+    if (gPullSampleIdx >= (int64_t)gSamples.size()) {
+        LOGI("nativeAlacReadChunk: EOS at frame %lld", (long long)gPullFramePos);
+        gEos = true;
+        return 0;
+    }
+
+    const AlacSample& smp = gSamples[gPullSampleIdx];
+    if (smp.size == 0 || smp.size > gPullPacket.size()) {
+        LOGE("nativeAlacReadChunk: bad packet size %u at sample %lld", smp.size, (long long)gPullSampleIdx);
+        gPullSampleIdx++;
+        return 0;
+    }
+    fseek(gFile, (long)smp.offset, SEEK_SET);
+    size_t got = fread(gPullPacket.data(), 1, smp.size, gFile);
+    if (got != smp.size) {
+        LOGE("nativeAlacReadChunk: short read %zu/%u at sample %lld", got, smp.size, (long long)gPullSampleIdx);
+        gPullSampleIdx++;
+        return 0;
+    }
+
+    BitBuffer bitBuf;
+    BitBufferInit(&bitBuf, gPullPacket.data(), smp.size);
+    uint32_t outFrames = 0;
+    int32_t status = gAlac->Decode(&bitBuf, gPullIntPcm.data(), (uint32_t)frameLen, (uint32_t)channels, &outFrames);
+    if (status != 0) {
+        LOGE("nativeAlacReadChunk: Decode failed status=%d at sample %lld", status, (long long)gPullSampleIdx);
+        gPullSampleIdx++;
+        return 0;
+    }
+    if (outFrames == 0) { gPullSampleIdx++; return 0; }
+
+    convertToFloat(gPullIntPcm.data(), gPullFloatBuf.data(), (int)outFrames, channels, bits);
+
+    // 防御：调用方缓冲区不足时只拷贝能放下的部分（宁可截断也不越界）
+    const uint32_t copyFrames = outFrames > (uint32_t)maxFrames ? (uint32_t)maxFrames : outFrames;
+    if (copyFrames < outFrames) {
+        LOGW("nativeAlacReadChunk: buffer too small (%d < %u frames) — truncated",
+             maxFrames, outFrames);
+    }
+    env->SetFloatArrayRegion(out, 0, (jsize)(copyFrames * (uint32_t)channels), gPullFloatBuf.data());
+
+    gCurrentPcmFrame += (int64_t)outFrames;
+    gPullFramePos += (int64_t)outFrames;
+    gPullSampleIdx++;
+    return (jint)copyFrames;
 }
 
 } // extern "C"

@@ -5,6 +5,7 @@ import com.sdw.music.player.core.audio.dsp.MsebParams
 import com.sdw.music.player.core.audio.dsp.MsebPreset
 import com.sdw.music.player.core.audio.engine.BtCodecTracker
 import com.sdw.music.player.core.audio.dsp.MsebCalculator
+import com.sdw.music.player.ui.theme.SDWShapes
 import com.sdw.music.player.core.audio.dsp.MsebDeviceAdapt
 import com.sdw.music.player.core.audio.dsp.MsebPresets
 import com.sdw.music.player.core.audio.playback.MusicService
@@ -63,7 +64,7 @@ fun HrtfFieldPanner(yaw: Float, pitch: Float, onYawPitch: (Float, Float) -> Unit
             .size(sizeDp)
             .background(
                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f),
-                RoundedCornerShape(16.dp)
+                SDWShapes.Row
             )
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
@@ -705,7 +706,7 @@ fun MsebScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .glassSurface(shape = RoundedCornerShape(16.dp), selected = enabled, fillBoost = 0f)
+                    .glassSurface(shape = SDWShapes.Row, selected = enabled, fillBoost = 0f)
             ) {
                 Row(
                     modifier = Modifier
@@ -970,7 +971,7 @@ fun MsebScreen(
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .glassSurface(shape = RoundedCornerShape(16.dp), selected = false, fillBoost = 0f)
+                        .glassSurface(shape = SDWShapes.Row, selected = false, fillBoost = 0f)
                 ) {
                     Column(
                         modifier = Modifier
@@ -1457,7 +1458,7 @@ private fun DspModuleCard(
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .glassSurface(shape = RoundedCornerShape(16.dp), selected = checked && !dimmed, fillBoost = 0f)
+            .glassSurface(shape = SDWShapes.Row, selected = checked && !dimmed, fillBoost = 0f)
     ) {
         Column(
             modifier = Modifier
@@ -1536,7 +1537,7 @@ private fun MsebBandGainsDebug(gains: FloatArray) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .glassSurface(shape = RoundedCornerShape(16.dp), fillBoost = 0f)
+            .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(
@@ -1636,7 +1637,7 @@ private fun MsebFftBars(levels: FloatArray) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .glassSurface(shape = RoundedCornerShape(16.dp), fillBoost = 0f)
+            .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
             Text(

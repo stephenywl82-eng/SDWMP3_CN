@@ -258,6 +258,8 @@
 <string name="mseb_slider_transient">트랜지언트</string>
 <string name="mseb_slider_transient_desc">트랜지언트 응답 속도와 선명함</string>
 <string name="eq_dsp_equalizer">DSP 이퀄라이저</string>
+<string name="eq_master_on">이퀄라이저 · 켜짐</string>
+<string name="eq_master_off">이퀄라이저 · 꺼짐</string>
 <string name="eq_mseb_psychoacoustic">MSEB 심리음향 EQ</string>
 <string name="eq_brand_presets">브랜드 프리셋</string>
 <string name="eq_autoeq_calibration">AutoEQ 헤드폰 보정</string>

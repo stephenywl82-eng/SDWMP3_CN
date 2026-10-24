@@ -22,6 +22,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.infiniteRepeatable
@@ -493,15 +494,31 @@ fun PlayerScreen(
     val lyricsLines = remember(state.currentLyrics) {
         if (!state.currentLyrics.isNullOrBlank()) LrcParser.parse(state.currentLyrics) else emptyList<LyricLine>()
     }
-    val currentLyricLine = if (lyricsLines.isNotEmpty()) {
-        val idx = LrcParser.findCurrentLineIndex(lyricsLines, positionMs)
-        if (idx in lyricsLines.indices) lyricsLines[idx].text else null
-    } else null
+    // [V9.20v] 帧级平滑歌词时钟（与全屏歌词页 rememberSmoothPositionMs 同算法同参数）。
+    // 行索引与逐字进度都以它为准——上游 positionMs 约 1 秒才采样一次，直接用它找「当前行」
+    // 会整句唱完才翻行（用户报「播放页逐字不准、全屏页准」的真因：全屏页的行索引走
+    // 帧级平滑位置，播放页却走 1 秒采样的 positionMs）。
+    // derivedStateOf 保证只有算出的行号/文本真的变了才通知读者，整页不会每帧重组。
+    val lyricClock = rememberPlayerLyricClock(positionMs, isPlaying)
+    val currentLyricLine by remember(lyricsLines) {
+        derivedStateOf {
+            if (lyricsLines.isEmpty()) null
+            else {
+                val idx = LrcParser.findCurrentLineIndex(lyricsLines, lyricClock.value)
+                if (idx in lyricsLines.indices) lyricsLines[idx].text else null
+            }
+        }
+    }
     // 【V8.7】三行歌词：当前行索引（用于取上一行/下一行）
-    val currentLyricIdx = if (lyricsLines.isNotEmpty()) {
-        val idx = LrcParser.findCurrentLineIndex(lyricsLines, positionMs)
-        if (idx in lyricsLines.indices) idx else -1
-    } else -1
+    val currentLyricIdx by remember(lyricsLines) {
+        derivedStateOf {
+            if (lyricsLines.isEmpty()) -1
+            else {
+                val idx = LrcParser.findCurrentLineIndex(lyricsLines, lyricClock.value)
+                if (idx in lyricsLines.indices) idx else -1
+            }
+        }
+    }
 
     // [V8.135] 播放界面同步全屏歌词页的「逐字开关」（同一偏好键 sdw_music_prefs / lyric_word_by_word）。
     // 与全屏歌词页保持完全一致：不再要求「必须带真实逐字时间戳」，普通整行 LRC
@@ -578,6 +595,11 @@ fun PlayerScreen(
     val coverInTransition by rememberUpdatedState(sharedCoverState?.isAnimating == true)
     LaunchedEffect(Unit) {
         var lastT = 0L
+        // [V9.20s] 旋转角节流到 ~30fps：12°/s 的转速下 30fps 每步 0.4°，与 60fps 肉眼无差，
+        // 但图层失效（RenderThread 全量重栅格化旋转封面）直接减半。实测 60fps 图层失效时
+        // render+hwui 吃到 73%（总 CPU 不降反升——主线程空了，GPU 管线成新瓶颈）；
+        // 角度本身按真实经过时间积分（跳过的帧累计进 dt），转速恒定不受节流影响。
+        var lastSnapMs = 0L
         while (true) {
             if (!rotateNow || coverInTransition) {
                 // 暂停/熄屏/转场：不跑帧循环（省电 + 让出主线程给飞行动画）；
@@ -589,9 +611,11 @@ fun PlayerScreen(
             // withFrameMillis 的 lambda 不是 suspend（只有 withFrameMillis 自己是），
             // 所以 snapTo 必须写在 lambda 外面：只是拿这一帧的时间戳。
             val t = withFrameMillis { it }
-            if (lastT == 0L) lastT = t
+            if (lastT == 0L) { lastT = t; lastSnapMs = t; continue }
             val dt = (t - lastT).coerceIn(0L, 100L) / 1000f
             lastT = t
+            if (t - lastSnapMs < 33L) continue  // ~30fps 节流；dt 已累计，角度不会丢
+            lastSnapMs = t
             val v = rotation.value + dt * COVER_ROT_DPS
             rotation.snapTo(if (v >= 360f) v - 360f else v)
         }
@@ -659,6 +683,17 @@ fun PlayerScreen(
     var visualMode by remember {
         mutableStateOf(PlayerVisualMode.read(vuPrefs))
     }
+
+    // 【VU 表开关】三点菜单里的「VU 表」开关：与进度条上方 VuMeter 共用 player_visual_mode（VU ↔ NONE）。
+    // V8.485 已移除波形（showWave 恒 false），故本质上就是「显示 VU / 不显示」两态，
+    // 与 if (visualMode.showVu) { VuMeter } 的渲染判断完全一致。
+    fun toggleVu() {
+        val newOn = visualMode == PlayerVisualMode.NONE   // 当前关闭 → 打开
+        val newMode = if (newOn) PlayerVisualMode.VU else PlayerVisualMode.NONE
+        PlayerVisualMode.write(vuPrefs, newMode)
+        visualMode = newMode
+    }
+
     LaunchedEffect(Unit) {
         // 【v8.165 省电】EQ 状态轮询（500ms）在熄屏/后台没有意义，跳过
         // 【V8.227】uiActive → uiActiveState：修 stale 捕获（启动于熄屏时永不恢复的隐患）
@@ -813,7 +848,7 @@ fun PlayerScreen(
             val playing = isPlayingState
             if (uiActiveState && playing) {
                 // VU 跟帧走：60Hz 推频段（仅 VU Canvas 读，红绘不重排，保平滑）；
-                // 装饰相位（PlayerUiTicker.frame）压到 10Hz，避免整页 60fps 重组——这是亮屏播放电耗主因。
+                // 装饰相位（PlayerUiTicker.frame）压到 5Hz，避免整页 60fps 重组——这是亮屏播放电耗主因。
                 publishBands()
                 val nowMs = System.currentTimeMillis()
                 if (nowMs - lastTickerPublishMs >= PlayerUiTicker.INTERVAL_MS) {
@@ -885,7 +920,17 @@ fun PlayerScreen(
     val coverColorBgEnabled = edgeLightPref.getBoolean("cover_color_bg", true)
     // [V8.71] Immersive player: square non-rotating cover + hide the three capsules
     // (MSEB / Bluetooth+output / DTS). Toggled in Settings.
-val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
+    // [V8.71] Immersive player: square non-rotating cover + hide the three capsules
+    // (MSEB / Bluetooth+output / DTS). Toggled in Settings AND the player overflow menu.
+    // 【V9.20t】状态化：原为普通 val，三点菜单切换后播放页不会重组。与设置页共用
+    // sdw_music_prefs/immersive_player（edgeLightPref 即该文件），两边永远一致。
+    var immersivePlayer by remember { mutableStateOf(edgeLightPref.getBoolean("immersive_player", false)) }
+    /** 【V9.20t】沉浸模式一键切换：写 pref（与设置页同一把 key） + 更新 state 即时重组 */
+    fun toggleImmersivePlayer() {
+        val newOn = !immersivePlayer
+        edgeLightPref.edit().putBoolean("immersive_player", newOn).apply()
+        immersivePlayer = newOn
+    }
     // [V8.72] fine-grained trim switches (only meaningful when immersive is on)
     val hideSongInfo = immersivePlayer && edgeLightPref.getBoolean("hide_song_info", false)
     val hideSpec = immersivePlayer && edgeLightPref.getBoolean("hide_spec", false)
@@ -894,11 +939,14 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
     // 沉浸模式里 hideBottom 已经把整排拿掉了，两者叠加没有意义，所以这里要排除掉。
     val bottomAutoHide = rememberBottomAutoHide(enabled = !hideBottom && edgeLightPref.getBoolean("auto_hide_bottom", true))
     // Freeze the cover spin in immersive mode (0 deg = original square artwork).
-    // 【V8.177】角度必须在这里读成 Float 再往下传。试过把 Animatable 整个传下去、
-    // 在 PlayerCoverArt 里读 rotation.value（想缩小重组范围）—— 结果封面直接停转：
-    // 参数不再变化，Compose 会把那个组件整块跳过，角度根本读不到（真机实测 90°/s
-    // 转速下 2 秒只转了 6°）。所以保留 Float 透传，重组范围换不来就别换。
-    val effectiveRotation = if (immersivePlayer) 0f else rotation.value
+    // 【V9.20s】旋转角改以 lambda 透传，由 PlayerCoverArt 在 graphicsLayer 块内读取
+    // （绘制期读取 → 只失效图层不重组）。V8.177 的两种「省重组」写法都失败：
+    // 传 Animatable 或在子组件组合期读 .value，参数不变时 Compose 整块跳过 → 停转；
+    // graphicsLayer 块由图层级 snapshot observer 驱动，不会过期——同文件呼吸缩放
+    // （breathe.value）一直用这个写法。这样 60fps 旋转不再让整个 PlayerScreen +
+    // 四个封面每帧重组：实测亮屏播放主线程 ~60%、整 App ~119% CPU，是 DAC 长播
+    // 发热/耗电的最大可省项；画面流畅度不变（仍是 60fps 转，只是不走重组）。
+    val coverRotation: () -> Float = { if (immersivePlayer) 0f else rotation.value }
 
 
     // Per-band beat flash for pulse effect
@@ -947,6 +995,14 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
             // 但 isAnimating 偶尔复位不及时（见 VU 环注释），故用超时兜底：最多冻 1000ms
             // 强制恢复，避免背景永久无模糊 / 墨滴永久消失。
             var blurFrozen by remember { mutableStateOf(false) }
+            // 【V9.20】转场（飞入/飞出）结束后，模糊半径从 0 缓动到 40.dp：
+            // 背景从「清晰」到「模糊」变成缓慢过渡，消除进/出播放页时「啪一下变糊」的闪跳。
+            // 转场飞行期间仍完全不挂 blur 层（保留原 GPU 减负：避免每帧跑全屏 blur shader 掉帧）。
+            val bgBlurRadius by animateDpAsState(
+                targetValue = if (blurFrozen) 0.dp else 40.dp,
+                animationSpec = tween(durationMillis = 450, easing = FastOutSlowInEasing),
+                label = "bgBlurRadius"
+            )
             LaunchedEffect(sharedCoverState?.isAnimating) {
                 if (sharedCoverState?.isAnimating == true) {
                     blurFrozen = true
@@ -967,10 +1023,12 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 // 渲染（每帧分配 offscreen layer + 跑一遍 blur shader），和共享元素 overlay
                 // 抢合成带宽 → 转场掉帧。blurFrozen 时退化成「裸」Modifier（只留 scale），
                 // 飞完再挂回 40.dp，边缘一次性重模糊用户无感。
+                // 转场期间：完全不挂 blur 层（保性能）；转场结束后用缓动的 bgBlurRadius 从 0 渐入到 40.dp，
+                // 背景「清晰→模糊」由瞬切改为缓慢过渡，消除闪一下。
                 val bgBoxModifier = if (blurFrozen) {
                     Modifier.fillMaxSize().scale(1.35f)
                 } else {
-                    Modifier.fillMaxSize().scale(1.35f).blur(40.dp)
+                    Modifier.fillMaxSize().scale(1.35f).blur(bgBlurRadius)
                 }
                 Box(
                     modifier = bgBoxModifier,
@@ -1014,7 +1072,7 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                     )
                 )
             }
-            // 【V8.490】扰动晕开层：低 alpha 墨滴在模糊背景上缓慢流动（仅 cover_color_bg 开启时叠加）。
+            // 【V8.490】扰动晕开层：低 alpha 墨滴在模糊背景上的静态氛围（V9.20u 去掉漂移，仅 cover_color_bg 开启时叠加）。
             // 转场进行中冻结它——墨滴漂移极慢（26~44s 周期），转场那几百 ms 里重绘完全是浪费，
             // 还会和转场抢主线程/合成带宽，直接跳过。
             if (!blurFrozen) {
@@ -1080,7 +1138,7 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 accentColor = accentColor,
                 textAccentColor = textAccentColor,
                 isPlaying = isPlaying,
-                rotation = effectiveRotation,
+                rotation = coverRotation,
                 artSize = artSize,
                 isCompact = isCompact,
                 isRazrOuter = isRazrOuter,
@@ -1133,6 +1191,9 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 onToggleAgc = ::toggleAgc,
                 inlineLyrics = inlineLyrics,
                 onToggleInlineLyrics = ::toggleInlineLyrics,
+                vuEnabled = visualMode.showVu,
+                onToggleVu = ::toggleVu,
+                onToggleImmersive = ::toggleImmersivePlayer,
                 onNavigateToMseb = onNavigateToMseb,
                 songSpec = songSpec,
                 bottomAutoHide = bottomAutoHide,
@@ -1151,7 +1212,7 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 accentColor = accentColor,
                 textAccentColor = textAccentColor,
                 isPlaying = isPlaying,
-                rotation = effectiveRotation,
+                rotation = coverRotation,
                 progressFraction = progressFraction,
                 positionMs = positionMs,
                 durationMs = durationMs,
@@ -1195,6 +1256,9 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 onToggleAgc = ::toggleAgc,
                 inlineLyrics = inlineLyrics,
                 onToggleInlineLyrics = ::toggleInlineLyrics,
+                vuEnabled = visualMode.showVu,
+                onToggleVu = ::toggleVu,
+                onToggleImmersive = ::toggleImmersivePlayer,
                 onNavigateToMseb = onNavigateToMseb,
                 songSpec = songSpec,
                 bottomAutoHide = bottomAutoHide,
@@ -1216,7 +1280,7 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 accentColor = accentColor,
                 textAccentColor = textAccentColor,
                 isPlaying = isPlaying,
-                rotation = effectiveRotation,
+                rotation = coverRotation,
                 artSize = artSize,
                 progressFraction = progressFraction,
                 positionMs = positionMs,
@@ -1264,6 +1328,9 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 onToggleAgc = ::toggleAgc,
                 inlineLyrics = inlineLyrics,
                 onToggleInlineLyrics = ::toggleInlineLyrics,
+                vuEnabled = visualMode.showVu,
+                onToggleVu = ::toggleVu,
+                onToggleImmersive = ::toggleImmersivePlayer,
                 onNavigateToMseb = onNavigateToMseb,
                 songSpec = songSpec,
                 bottomAutoHide = bottomAutoHide,
@@ -1283,7 +1350,7 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 accentColor = accentColor,
                 textAccentColor = textAccentColor,
                 isPlaying = isPlaying,
-                rotation = effectiveRotation,
+                rotation = coverRotation,
                 artSize = artSize,
                 isCompact = isCompact,
                 isRazrOuter = isRazrOuter,
@@ -1336,6 +1403,9 @@ val immersivePlayer = edgeLightPref.getBoolean("immersive_player", false)
                 onToggleAgc = ::toggleAgc,
                 inlineLyrics = inlineLyrics,
                 onToggleInlineLyrics = ::toggleInlineLyrics,
+                vuEnabled = visualMode.showVu,
+                onToggleVu = ::toggleVu,
+                onToggleImmersive = ::toggleImmersivePlayer,
                 onNavigateToMseb = onNavigateToMseb,
                 songSpec = songSpec,
                 bottomAutoHide = bottomAutoHide,
@@ -1462,7 +1532,7 @@ private fun FoldableLayout(coverUri: String?,
     accentColor: Color,
     textAccentColor: Color,
     isPlaying: Boolean,
-    rotation: Float,
+    rotation: () -> Float,
     progressFraction: Float,
     positionMs: Long,
     durationMs: Long,
@@ -1516,6 +1586,11 @@ private fun FoldableLayout(coverUri: String?,
     // 【V8.274】三行歌词（封面下、频谱表上那三行）开关，与设置页共用 settings/player_inline_lyrics
     inlineLyrics: Boolean = true,
     onToggleInlineLyrics: () -> Unit = {},
+    // 【VU 表开关】VU 表开关，与进度条上方 VuMeter 共用 player_visual_mode（VU ↔ NONE）
+    vuEnabled: Boolean = false,
+    onToggleVu: () -> Unit = {},
+    // 【V9.20t】沉浸模式开关回调（当前值走已有的 immersive 参数）
+    onToggleImmersive: () -> Unit = {},
     // 【V8.21】歌曲规格显示（分段着色）
     songSpec: com.sdw.music.player.core.audio.metadata.SongSpecReader.Spec? = null,
     /** 底部四键自动隐藏控制器（null = 四键常驻）。 */
@@ -1562,6 +1637,10 @@ private fun FoldableLayout(coverUri: String?,
                 onToggleAgc = onToggleAgc,
                 inlineLyrics = inlineLyrics,
                 onToggleInlineLyrics = onToggleInlineLyrics,
+                vuEnabled = vuEnabled,
+                onToggleVu = onToggleVu,
+                immersivePlayer = immersive,
+                onToggleImmersive = onToggleImmersive,
                 onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
                 modifier = Modifier.padding(horizontal = 0.dp, vertical = 4.dp)
             )
@@ -1720,6 +1799,7 @@ private fun FoldableLayout(coverUri: String?,
                 onNext = onNext,
                 onCycleRepeat = onCycleRepeat,
                 // [SDWTransport] 五键尺寸/铺法统一契约，沉浸与非沉浸完全同一套
+                canSkip = state.songCount != 1,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = SDWTransport.Gutter),
                 onInteract = { bottomAutoHide?.poke() }
             )
@@ -1828,7 +1908,7 @@ private fun LandscapeLayout(coverUri: String?,
     accentColor: Color,
     textAccentColor: Color,
     isPlaying: Boolean,
-    rotation: Float,
+    rotation: () -> Float,
     artSize: androidx.compose.ui.unit.Dp,
     progressFraction: Float,
     positionMs: Long,
@@ -1891,6 +1971,11 @@ private fun LandscapeLayout(coverUri: String?,
     // 【V8.274】三行歌词（封面下、频谱表上那三行）开关，与设置页共用 settings/player_inline_lyrics
     inlineLyrics: Boolean = true,
     onToggleInlineLyrics: () -> Unit = {},
+    // 【VU 表开关】VU 表开关，与进度条上方 VuMeter 共用 player_visual_mode（VU ↔ NONE）
+    vuEnabled: Boolean = false,
+    onToggleVu: () -> Unit = {},
+    // 【V9.20t】沉浸模式开关回调（当前值走已有的 immersive 参数）
+    onToggleImmersive: () -> Unit = {},
     // 【V8.21】歌曲规格显示（分段着色）
     songSpec: com.sdw.music.player.core.audio.metadata.SongSpecReader.Spec? = null,
     /** 底部四键自动隐藏控制器（null = 四键常驻）。 */
@@ -1944,6 +2029,10 @@ private fun LandscapeLayout(coverUri: String?,
                 onToggleAgc = onToggleAgc,
                 inlineLyrics = inlineLyrics,
                 onToggleInlineLyrics = onToggleInlineLyrics,
+                vuEnabled = vuEnabled,
+                onToggleVu = onToggleVu,
+                immersivePlayer = immersive,
+                onToggleImmersive = onToggleImmersive,
                 onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic
             )
 
@@ -2008,7 +2097,9 @@ private fun LandscapeLayout(coverUri: String?,
                 // Controls
                 Spacer(Modifier.height(8.dp))
             // VU 表/ 整曲波形 — compact in landscape
-            if (visualMode.showVu) {
+            // 【V8.280】DAC 独占模式下不画 VU 表（dacActive 时让位给 DAC 设备胶囊）
+            val dacActive = rememberDacActive()
+            if (visualMode.showVu && !dacActive) {
                 LiveVuMeter(bandLevelsState = bandLevelsState, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, coverColors = vuCoverColors, isAnimating = isAnimating, modifier = Modifier.padding(horizontal = 8.dp).heightIn(max = 50.dp))
                 Spacer(Modifier.height(6.dp))
             }
@@ -2087,6 +2178,7 @@ private fun LandscapeLayout(coverUri: String?,
                 onNext = onNext,
                 onCycleRepeat = onCycleRepeat,
                 // [SDWTransport] 五键尺寸/铺法统一契约，沉浸与非沉浸完全同一套
+                canSkip = state.songCount != 1,
                 modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
                 onInteract = { bottomAutoHide?.poke() }
             )
@@ -2156,7 +2248,7 @@ private fun PortraitLayout(coverUri: String?,
     accentColor: Color,
     textAccentColor: Color,
     isPlaying: Boolean,
-    rotation: Float,
+    rotation: () -> Float,
     artSize: androidx.compose.ui.unit.Dp,
     isCompact: Boolean,
     isRazrOuter: Boolean = false,
@@ -2222,6 +2314,11 @@ private fun PortraitLayout(coverUri: String?,
     // 【V8.274】三行歌词（封面下、频谱表上那三行）开关，与设置页共用 settings/player_inline_lyrics
     inlineLyrics: Boolean = true,
     onToggleInlineLyrics: () -> Unit = {},
+    // 【VU 表开关】VU 表开关，与进度条上方 VuMeter 共用 player_visual_mode（VU ↔ NONE）
+    vuEnabled: Boolean = false,
+    onToggleVu: () -> Unit = {},
+    // 【V9.20t】沉浸模式开关回调（当前值走已有的 immersive 参数）
+    onToggleImmersive: () -> Unit = {},
     // 【V8.21】歌曲规格显示（分段着色）
     songSpec: com.sdw.music.player.core.audio.metadata.SongSpecReader.Spec? = null,
     /** 底部四键自动隐藏控制器（null = 四键常驻）。 */
@@ -2263,6 +2360,10 @@ private fun PortraitLayout(coverUri: String?,
                 onToggleAgc = onToggleAgc,
                 inlineLyrics = inlineLyrics,
                 onToggleInlineLyrics = onToggleInlineLyrics,
+                vuEnabled = vuEnabled,
+                onToggleVu = onToggleVu,
+                immersivePlayer = immersive,
+                onToggleImmersive = onToggleImmersive,
                 onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
                 verticalPadding = 0.dp,
             backIconSize = 32.dp,
@@ -2450,7 +2551,9 @@ private fun PortraitLayout(coverUri: String?,
         // would split the leftover and shrink the cover. It is gone entirely.
 
         // VU 表 / 整曲波形
-        if (!isRazrOuter && visualMode.showVu) {
+        // 【V8.280】DAC 独占模式下不画 VU 表（dacActive 时让位给 DAC 设备胶囊）
+        val dacActive = rememberDacActive()
+        if (!isRazrOuter && visualMode.showVu && !dacActive) {
                 LiveVuMeter(bandLevelsState = bandLevelsState, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, coverColors = vuCoverColors, isAnimating = isAnimating, modifier = Modifier.padding(horizontal = infoPadding))
             Spacer(Modifier.height(6.dp))
         }
@@ -2535,6 +2638,7 @@ private fun PortraitLayout(coverUri: String?,
             onCycleRepeat = onCycleRepeat,
             // [SDWTransport] 五键尺寸/铺法统一契约，沉浸与非沉浸完全同一套
             modifier = Modifier.fillMaxWidth().padding(horizontal = SDWTransport.Gutter),
+            canSkip = state.songCount != 1,
             playButtonSize = if (isRazrOuter) 48.dp else SDWTransport.Play,
             onInteract = { bottomAutoHide?.poke() }
         )
@@ -2623,11 +2727,10 @@ private fun InkBloomOverlay(accentColor: Color, modifier: Modifier = Modifier) {
     // slow to perceive. A 20fps ticker is indistinguishable here and cuts that fill 3x.
     // The canvas is also drawn at 0.34 scale and blown back up; after the 28dp blur the
     // gradients are visually identical either way.
-    // 【V8.428】装饰动画相位改由统一 ticker 提供（原来这里是独立的 20Hz 环）。
-    // 保留一条读取即可参与重组：相位本身在 PlayerUiTicker.frame 里。
-    val uiFrame = PlayerUiTicker.frame.value
-    val flow = uiFrame.flow
-    val breathe = uiFrame.breathe
+    // [V9.20u] 用户要求「保留模糊但去掉流动」：墨滴相位钉死为常量，不再读 PlayerUiTicker。
+    // 这层从此是纯静态氛围（固定位置/半径/透明度），不参与任何周期重组与重绘。
+    val flow = 0f
+    val breathe = 0f
 
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
     Canvas(
@@ -2848,4 +2951,25 @@ private fun XfadeVisualizer(
                 .background(accentColor.copy(alpha = 0.9f))
         )
     }
+}
+
+/**
+ * 【V8.280】轮询 USB 独占（新引擎）是否已占用 DAC。
+ * 占用时 VU 表自动让位给 DAC 设备胶囊（DacInfoBar），判定与 DacInfoBar 完全一致
+ * （UsbDacManager.isClaimed()），故两者天然互斥、不会同时出现。
+ * 以 helper 形式提供，便于在播放页各子 composable 的 VU 渲染处就近取用
+ * （dacActive 无法跨子 composable 作用域共享，故各自就近轮询，开销极低）。
+ */
+@Composable
+private fun rememberDacActive(): Boolean {
+    var dacActive by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            dacActive = try {
+                com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed()
+            } catch (_: Throwable) { false }
+            kotlinx.coroutines.delay(if (dacActive) 1000L else 3000L)
+        }
+    }
+    return dacActive
 }

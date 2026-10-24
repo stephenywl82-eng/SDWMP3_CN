@@ -1,5 +1,17 @@
 # 更新日志 Changelog
 
+## 9.20 (2026-10-20)
+
+> `versionName` 9.20 / `versionCode` 920。This release mainly fixes audio glitches and stability issues when playing through a USB external DAC.
+
+### Fixes
+- **Crackle/popping when using a USB DAC for long sessions**: Fixed the periodic noise that appeared after playing through a USB external sound card for a while. Long listening sessions now stay clean and stable.
+- **More stable DAC connection**: Improved error handling when connecting and switching some external sound cards, reducing unexpected interruptions when plugging/unplugging or changing tracks.
+- **Fixed "showing as playing but no sound"**: Corrected a playback-status misreport so the app no longer occasionally shows that music is playing when nothing is actually coming out.
+- **Smoother transition into the player screen**: The blurred background now eases in gradually when you open the player instead of flashing once.
+
+---
+
 ## 9.19 (2026-10-18 起)
 
 > `versionName` 9.19 / `versionCode` 919。本版把环绕方案从「DTS（M/S 参数化近似）」升级为**实测双耳 HRIR 空间化**，并完成仓库整理与播放核心分包重构。

@@ -164,7 +164,7 @@ fun PlaylistDetailScreen(
                             showSongMenu = true
                         },
                         onRemove = { showDeleteConfirm = song.id },
-                        modifier = Modifier.animateItemPlacement()
+                        modifier = Modifier
                     )
                 }
                 item { Spacer(Modifier.height(12.dp)) }

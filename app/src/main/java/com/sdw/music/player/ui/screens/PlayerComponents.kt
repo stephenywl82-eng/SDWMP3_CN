@@ -2361,7 +2361,7 @@ fun QueueSheet(
             ) {
                 itemsIndexed(queue) { idx, song ->
                     val isCurrent = song.id == currentSongId
-                    val itemMod = Modifier.animateItemPlacement()
+                    val itemMod = Modifier
                     Row(
                         modifier = itemMod
                             .fillMaxWidth()

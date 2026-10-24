@@ -5,10 +5,29 @@ import androidx.annotation.RequiresApi
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shader
 import androidx.compose.ui.graphics.toArgb
+import org.intellij.lang.annotations.Language
 
-fun RuntimeShader(shaderString: String): RuntimeShader {
+@RequiresApi(Build.VERSION_CODES.TIRAMISU)
+fun RuntimeShader(@Language("AGSL") shaderString: String): RuntimeShader {
     val shader = android.graphics.RuntimeShader(shaderString)
     return AndroidRuntimeShader(shader)
+}
+
+interface RuntimeShader {
+
+    fun setFloatUniform(name: String, value: Float)
+    fun setFloatUniform(name: String, value1: Float, value2: Float)
+    fun setFloatUniform(name: String, value1: Float, value2: Float, value3: Float)
+    fun setFloatUniform(name: String, value1: Float, value2: Float, value3: Float, value4: Float)
+    fun setFloatUniform(name: String, values: FloatArray)
+
+    fun setIntUniform(name: String, value: Int)
+    fun setIntUniform(name: String, value1: Int, value2: Int)
+    fun setIntUniform(name: String, value1: Int, value2: Int, value3: Int)
+    fun setIntUniform(name: String, value1: Int, value2: Int, value3: Int, value4: Int)
+    fun setIntUniform(name: String, values: IntArray)
+
+    fun setColorUniform(name: String, color: Color)
 }
 
 fun RuntimeShader.asComposeShader(): Shader {
@@ -65,21 +84,4 @@ internal class AndroidRuntimeShader(val shader: android.graphics.RuntimeShader) 
     override fun setColorUniform(name: String, color: Color) {
         shader.setColorUniform(name, color.toArgb())
     }
-}
-
-interface RuntimeShader {
-
-    fun setFloatUniform(name: String, value: Float)
-    fun setFloatUniform(name: String, value1: Float, value2: Float)
-    fun setFloatUniform(name: String, value1: Float, value2: Float, value3: Float)
-    fun setFloatUniform(name: String, value1: Float, value2: Float, value3: Float, value4: Float)
-    fun setFloatUniform(name: String, values: FloatArray)
-
-    fun setIntUniform(name: String, value: Int)
-    fun setIntUniform(name: String, value1: Int, value2: Int)
-    fun setIntUniform(name: String, value1: Int, value2: Int, value3: Int)
-    fun setIntUniform(name: String, value1: Int, value2: Int, value3: Int, value4: Int)
-    fun setIntUniform(name: String, values: IntArray)
-
-    fun setColorUniform(name: String, color: Color)
 }

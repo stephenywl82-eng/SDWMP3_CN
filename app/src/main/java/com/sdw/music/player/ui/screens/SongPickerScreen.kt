@@ -269,7 +269,7 @@ fun SongPickerScreen(
                             }
                         } else {
                         itemsIndexed(listOf(song), key = { _, s -> s.id }) { _, songNonNull ->
-                        val pickerItemMod = Modifier.animateItemPlacement()
+                        val pickerItemMod = Modifier
                         val isSelected = selectedIds.contains(songNonNull.id)
                         val isAlreadyIn = existingSongIds.contains(songNonNull.id)
 

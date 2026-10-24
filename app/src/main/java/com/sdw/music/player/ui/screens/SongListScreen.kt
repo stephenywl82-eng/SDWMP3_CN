@@ -784,7 +784,7 @@ fun SongListScreen(
                             }
                         }
                         itemsIndexed(songsInGroup, key = { _, song -> song.id }) { _, song ->
-                            val itemMod = Modifier.animateItemPlacement()
+                            val itemMod = Modifier
                             SongItem(
                                 song = song,
                                 index = 0,
@@ -1033,7 +1033,7 @@ private fun TabletSongListContent(
                     }
                 }
                 itemsIndexed(songsInGroup, key = { _, song -> song.id }) { _, song ->
-                    val itemMod = Modifier.animateItemPlacement()
+                    val itemMod = Modifier
                     SongItem(
                         song = song,
                         index = 0,

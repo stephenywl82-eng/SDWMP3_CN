@@ -6,6 +6,8 @@ plugins {
     id("org.jetbrains.kotlin.kapt")
     id("com.google.dagger.hilt.android")
     id("kotlin-parcelize")
+    // [K2 migration 2026-10-24] Compose K2 编译器插件（替代旧 composeOptions 方式）
+    id("org.jetbrains.kotlin.plugin.compose")
 }
 
 // Load keystore properties
@@ -105,9 +107,9 @@ android {
         prefab = false
     }
 
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.15"
-    }
+    /* [K2 migration 2026-10-24] composeOptions 已移除：
+       Compose 编译器改由 org.jetbrains.kotlin.plugin.compose 插件提供（版本与 Kotlin 对齐）。
+       原配置：composeOptions { kotlinCompilerExtensionVersion = "1.5.15" } */
 
     /* CMake disabled in Gradle to avoid OOM on this 8GB box. liboboe_bridge.so
        is compiled STANDALONE via NDK r25b (E:\SDWMP3\cpp_build) from the current
@@ -145,8 +147,8 @@ dependencies {
     // [V8.97] navigation-compose 2.8.0 璧疯繍琛屾湡渚濊禆 kotlinx-serialization-core锛?    // 鏄惧紡閿佺増鏈紝閬垮厤浼犻€掍緷璧栨紓绉诲埌涓?Kotlin 1.9.25 涓嶅尮閰嶇殑鐗堟湰銆?    implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.6.3")
 
     // Hilt
-    implementation("com.google.dagger:hilt-android:2.50")
-    kapt("com.google.dagger:hilt-android-compiler:2.50")
+    implementation("com.google.dagger:hilt-android:2.52")
+    kapt("com.google.dagger:hilt-android-compiler:2.52")
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
     // Media3 (Phase C: media3-exoplayer removed; session+common kept for MediaSession)

@@ -3,11 +3,12 @@ import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.kapt")
     id("com.google.dagger.hilt.android")
     id("kotlin-parcelize")
     // [K2 migration 2026-10-24] Compose K2 编译器插件（替代旧 composeOptions 方式）
     id("org.jetbrains.kotlin.plugin.compose")
+    // [Phase 3 2026-10-24] kapt → KSP（K2 原生）
+    id("com.google.devtools.ksp")
 }
 
 // Load keystore properties
@@ -149,7 +150,7 @@ dependencies {
 
     // Hilt
     implementation("com.google.dagger:hilt-android:2.52")
-    kapt("com.google.dagger:hilt-android-compiler:2.52")
+    ksp("com.google.dagger:hilt-android-compiler:2.52")
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
     // Media3 (Phase C: media3-exoplayer removed; session+common kept for MediaSession)

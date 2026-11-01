@@ -96,6 +96,8 @@ object FlacCoverReader {
         val total = raf.length()
         var offset = 4L
         var vorbisBlock: ByteArray? = null
+        // [2026-10-25] 收集全部 PICTURE block，收尾按类型挑主封面（移植 Lyrico 回退链）
+        val pictures = mutableListOf<EmbeddedPicture>()
         var guard = 0
         while (offset + 4L <= total && guard++ < 4096) {
             raf.seek(offset)
@@ -106,15 +108,15 @@ object FlacCoverReader {
             val len = ((header[1].toLong() and 0xFF) shl 16) or
                 ((header[2].toLong() and 0xFF) shl 8) or
                 (header[3].toLong() and 0xFF)
-            if (len < 0L || len > MAX_META_BYTES.toLong()) return null
+            if (len < 0L || len > MAX_META_BYTES.toLong()) break
             val payloadStart = offset + 4L
-            if (payloadStart + len > total) return null
+            if (payloadStart + len > total) break
 
             if (type == 6) {
                 val lenI = len.toInt()
                 val body = ByteArray(lenI)
                 raf.readFully(body)
-                parsePictureBlock(body)?.let { return it }
+                parsePictureBlock(body)?.let { pictures.add(it) }
             } else if (type == 4 && vorbisBlock == null) {
                 val lenI = len.toInt()
                 val body = ByteArray(lenI)
@@ -124,6 +126,12 @@ object FlacCoverReader {
 
             if (last) break
             offset = payloadStart + len
+        }
+        // [2026-10-25] 有 PICTURE block 就按回退链挑；一张都没解析出来才走 VORBIS_COMMENT 兜底
+        if (pictures.isNotEmpty()) {
+            EmbeddedCoverSelector.select(pictures)?.let { (data, mime) ->
+                return Cover(data, mime)
+            }
         }
         // No PICTURE block: some encoders stash the cover as base64 inside VORBIS_COMMENT.
         vorbisBlock?.let { return parseVorbisPicture(it) }
@@ -138,17 +146,20 @@ object FlacCoverReader {
      *   32-bit BE width, height, color depth, colors used
      *   32-bit BE data length + picture data
      */
-    private fun parsePictureBlock(blob: ByteArray): Cover? {
+    private fun parsePictureBlock(blob: ByteArray): EmbeddedPicture? {
         try {
             var p = 0
             if (blob.size < 8) return null
-            p += 4 // picture type (3 = front cover, but any type is acceptable here)
+            // [2026-10-25] 读出图片类型（原来跳过）：3=封面 4=封底 8=艺人图…
+            val picType = beInt(blob, 0)
+            p += 4
             val mimeLen = beInt(blob, p); p += 4
             if (mimeLen < 0 || p + mimeLen > blob.size) return null
             val mime = String(blob, p, mimeLen, StandardCharsets.US_ASCII).trim()
             p += mimeLen
             val descLen = beInt(blob, p); p += 4
             if (descLen < 0 || p + descLen > blob.size) return null
+            val description = if (descLen > 0) String(blob, p, descLen, StandardCharsets.UTF_8) else ""
             p += descLen
             if (p + 16 > blob.size) return null
             p += 16 // width, height, depth, colors
@@ -157,7 +168,7 @@ object FlacCoverReader {
             if (p + dataLen > blob.size) return null
             val data = blob.copyOfRange(p, p + dataLen)
             if (data.isEmpty()) return null
-            return Cover(data, sniffMime(data, mime))
+            return EmbeddedPicture(data, sniffMime(data, mime), description, picType)
         } catch (e: Exception) {
             return null
         }
@@ -186,7 +197,7 @@ object FlacCoverReader {
                 }
                 if (decoded.isEmpty()) continue
                 if (field.startsWith("METADATA")) {
-                    parsePictureBlock(decoded)?.let { return it }
+                    parsePictureBlock(decoded)?.let { return Cover(it.data, it.mime) }
                 }
                 val mime = sniffMime(decoded, "")
                 if (mime.startsWith("image/")) return Cover(decoded, mime)

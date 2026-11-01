@@ -70,6 +70,23 @@ build*.bat
 # --- Temp debug scripts (2026-08-23) ---
 remove_*.py
 
+# --- Root-level scratch artifacts (2026-11-01) ---
+# 分包产物 / 截图 / 本地构建脚本，均为一次性调试副产物，不入库
+/*.apk.bin
+/*.zip
+/*.png
+/*.xml
+/*.done
+/*.bat
+/*.gradle
+/_*.kt
+**/*.pytest
+/_*.bat
+/_*.sh
+/.last_build_log
+/.m3aar
+/scanfix_dl/
+
 # local backups (never commit)
 backup_*.kt
 backup_*.cpp

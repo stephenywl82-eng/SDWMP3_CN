@@ -432,6 +432,32 @@ class UsbDacPlaybackController(
             // MP3 帧自同步不需要，无 csd 键所以不受影响。
             if (fmt.containsKey("csd-0")) cfgFmt.setByteBuffer("csd-0", fmt.getByteBuffer("csd-0"))
             if (fmt.containsKey("csd-1")) cfgFmt.setByteBuffer("csd-1", fmt.getByteBuffer("csd-1"))
+            // 【P7-OPUS 修复】完整拷贝 codec specific data（对齐 Oboe 路径 copyCsdBuffers）：
+            // csd-2 = CodecDelay/SeekPreRoll（Opus in MP4 等），max-input-size 尤其关键——
+            // Opus/Vorbis 解码器需要按包大小预留输入缓冲，缺 max-input-size → 缓冲过小 →
+            // "work failed to complete: 14"（无法处理包）→ 落点咔哒/无声。正常(Oboe)路径有此拷贝，
+            // 故 OPUS 仅在 DAC(直解 MediaCodec)路径失败。
+            if (fmt.containsKey("csd-2")) cfgFmt.setByteBuffer("csd-2", fmt.getByteBuffer("csd-2"))
+            // 【P8-OPUS 关键修复】OPUS/Vorbis/AAC 等压缩格式必须显式设 KEY_MAX_INPUT_SIZE。
+            // 根因：MediaExtractor 的 track format 通常【不】带 KEY_MAX_INPUT_SIZE（Oboe 路径
+            // copyCsdBuffers 也只条件拷贝、同样依赖源自带），若不兜底显式设置，解码器输入缓冲
+            // 被默认成极小 → 首包解码失败(work failed:14)→ 解码器进入 ERROR 自释放 → 之后
+            // dequeueOutputBuffer 抛 "Pending dequeue output buffer request cancelled" /
+            // "Invalid to call at Released state"。源自带且为正则优先用，否则给安全兜底值。
+            val maxInFromSrc = runCatching { fmt.getInteger(MediaFormat.KEY_MAX_INPUT_SIZE) }.getOrNull()
+            val maxInDefault = when {
+                mime == "audio/opus" || mime == "audio/vorbis" -> 256 * 1024
+                mime == "audio/mp4a-latm" || mime == "audio/aac" -> 64 * 1024
+                mime == "audio/mpeg" -> 64 * 1024
+                else -> 64 * 1024
+            }
+            if (maxInFromSrc != null && maxInFromSrc > 0) {
+                cfgFmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, maxInFromSrc)
+                DebugLog.v(TAG, "open: max-input-size from extractor = $maxInFromSrc ($mime)")
+            } else {
+                cfgFmt.setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, maxInDefault)
+                DebugLog.v(TAG, "open: max-input-size not in extractor format for $mime — using safe default $maxInDefault")
+            }
             codec.configure(cfgFmt, null, null, 0)
             codec.start()
             outputPcmEncoding = if (isRawPassthrough) {
@@ -1504,6 +1530,13 @@ class UsbDacPlaybackController(
                 try { cd.stop(); cd.release() } catch (_: Exception) {}
                 try { ex.release() } catch (_: Exception) {}
                 codec = null; extractor = null; isPlaying = false
+                // 【P7-OPUS 过热修复】解码线程退出后 native USB 流仍是 STARTED 但无 PCM 喂入 →
+                // 底层等时 OUT 传输循环在空流上死转（CPU 空转 → 手机发烫）。先停流循环（保留 claim），
+                // 等下次 playSong 的 cross-rate reclaim 或 keep-claim 复用。
+                if (UsbDacManager.isStreaming()) {
+                    UsbDacManager.pauseStream()
+                    DebugLog.add(TAG, "decodeLoop aborted: paused starved USB stream (anti-overheat)")
+                }
                 requestState(DacState.ERROR, "decodeLoop aborted")
                 DebugLog.v(TAG, "decodeLoop aborted (normalEos=false), no onCompletion")
             }

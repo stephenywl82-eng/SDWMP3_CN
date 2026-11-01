@@ -45,6 +45,9 @@ class OboeDirectPlayer(private val context: Context) {
     // State (volatile for cross-thread visibility)
     @JvmField @Volatile var isPlaying = false
     @JvmField @Volatile var isPrepared = false
+    /** 【V9.6 修复 Bug3】是否对开场做启动淡入：首播/硬切/恢复为 true（前 SEAM_FRAMES 帧 0→1 渐入，
+     *  掩盖开场硬件 pop 与解码首帧瞬态）；crossfade 自动接歌时由 MusicService 置 false（避免咬正在响的 B 轨）。 */
+    @JvmField var startupFadeEnabled = true
     private var currentFilePath: String? = null
     private var parcelFd: android.os.ParcelFileDescriptor? = null  // 【V7.21】持有FD防止GCClose
     private var incomingParcelFd: android.os.ParcelFileDescriptor? = null  // 【Crossfade】incoming 轨 FD，防止 GC Close
@@ -59,7 +62,7 @@ class OboeDirectPlayer(private val context: Context) {
     // ---- Native methods ----
     private external fun nativeOpen(filePath: String): Boolean
     private external fun nativeOpenFd(fd: Int, offset: Long, length: Long): Boolean  // 【V7.20】FD方式打On
-    private external fun nativePlay(): Boolean
+    private external fun nativePlay(enabled: Boolean): Boolean
     private external fun nativePause()
     private external fun nativeResume(): Boolean
     private external fun nativeSeekTo(positionUs: Long)
@@ -349,7 +352,7 @@ class OboeDirectPlayer(private val context: Context) {
         }
 
         try {
-            val result = nativePlay()
+            val result = nativePlay(startupFadeEnabled)
             if (result) {
                 isPlaying = true
                 onPlayStateChanged?.invoke(true)

@@ -1,4 +1,6 @@
 plugins {
+    // [M3 Expressive · Path A 2026-10-27] gradle.properties 已关 android.builtInKotlin/android.newDsl，
+    // 回退外部 Kotlin 插件模型，故恢复 org.jetbrains.kotlin.android。
     id("com.android.test")        // test module, not application
     id("org.jetbrains.kotlin.android")
 }
@@ -12,8 +14,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+        compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 
     defaultConfig {

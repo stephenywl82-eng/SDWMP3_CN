@@ -48,6 +48,8 @@ sealed class PlayerIntent {
     data class PlaySongList(val songs: List<com.sdw.music.player.Song>, val startIndex: Int = 0) : PlayerIntent()
     data object ToggleFavorite : PlayerIntent()
     data object DeleteCurrent : PlayerIntent()
+    /** [2026-10-25] 长按菜单删除任意歌曲（复用 pendingDeleteUri 系统确认框链路） */
+    data class DeleteSong(val song: com.sdw.music.player.Song) : PlayerIntent()
     data object DeleteConfirmed : PlayerIntent()
     data object DeleteCancelled : PlayerIntent()
     data class SaveLyrics(val lyrics: String) : PlayerIntent()
@@ -478,13 +480,43 @@ class PlayerViewModel @Inject constructor(
                     }
                 }
             }
+            is PlayerIntent.DeleteSong -> {
+                // [2026-10-25] 长按菜单删除任意歌曲：与 DeleteCurrent 同链路，
+                // 但目标曲由 intent 指定（不一定是当前播放曲）
+                val song = intent.song
+                val ctx = getApplication<Application>().applicationContext
+                val uri = song.path
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && uri.startsWith("content://")) {
+                    // Android 11+：交给 UI 层调 MediaStore.createDeleteRequest 弹系统确认框
+                    _state.update { it.copy(
+                        pendingDeleteUri = uri,
+                        pendingDeleteSongId = song.id
+                    ) }
+                } else {
+                    // 旧版 Android 或 file:// 路径（FS 遍历兜底条目）：直接删
+                    viewModelScope.launch {
+                        try {
+                            if (uri.startsWith("content://")) {
+                                ctx.contentResolver.delete(android.net.Uri.parse(uri), null, null)
+                            }
+                            val fp = song.filePath.ifEmpty { uri }
+                            if (fp.startsWith("/")) java.io.File(fp).delete()
+                            SongRepository.removeSongById(song.id)
+                            if (_state.value.currentSongId == song.id) skipOrClear()
+                        } catch (e: Exception) {
+                            android.util.Log.e("PlayerViewModel", "DeleteSong failed", e)
+                        }
+                    }
+                }
+            }
             is PlayerIntent.DeleteConfirmed -> {
                 // 系统对话框确认后，从仓库移除并切歌
                 viewModelScope.launch {
                     val songId = _state.value.pendingDeleteSongId
                     _state.update { it.copy(pendingDeleteUri = "", pendingDeleteSongId = -1L) }
                     SongRepository.removeSongById(songId)
-                    skipOrClear()
+                    // [2026-10-25] 删的正是当前播放曲才切歌；删列表里其他歌不打断播放
+                    if (_state.value.currentSongId == songId) skipOrClear()
                 }
             }
             is PlayerIntent.DeleteCancelled -> {
@@ -601,7 +633,7 @@ class PlayerViewModel @Inject constructor(
      * Lyrico（或任意外部标签编辑器）编辑完歌曲返回时调用。
      *
      * [extras] 携带回传的新标签值（Lyrico PR #196+ 支持 result-extras 时）走就地更新；
-     * 为 null 时退化为整库重扫以拾取改动。两种情况都会**直接从被改写的文件重新抽取内嵌封面**
+     * 为 null 时退化为只重读被改写的这一首（O(1)，不再整库重扫）以拾取改动。两种情况都会**直接从被改写的文件重新抽取内嵌封面**
      * 写进自有缓存（key 含 size+mtime → 每次编辑都得到新 URI），从而让播放器即时显示新封面，
      * 而不依赖平台媒体库索引（其 albumart URI 改写后字符串不变，Coil 会一直喂旧图）。
      */
@@ -622,19 +654,46 @@ class PlayerViewModel @Inject constructor(
                         genre = str(LyricoResultExtras.GENRE),
                     )
                 } else {
-                    // 退化：重扫库，拾取标题/歌手/专辑等改动并刷新 songList + 当前播放文本
-                    val scanned = SongRepository.rescanFromMediaStore(ctx)
-                    if (scanned.isNotEmpty()) {
-                        SongRepository.setSongs(scanned)
-                        connection.setSongs(scanned, updateGlobal = false)
-                        val id = songId
+                    // [2026-10-25] 退化路径：只重读刚被改写的那一首（O(1)），不再整库 rescan
+                    // （rescanFromMediaStore 含全表扫描 + BPM/key 探测 + 并集合并 + 落盘，极慢）。
+                    val fresh = SongRepository.readSingleSong(ctx, fp, songId)
+                    if (fresh != null) {
+                        // 用重读到的元数据就地替换曲库里这一首（保留 bpm/key/收藏/播放时间/封面源），并落盘。
+                        SongRepository.replaceSong(fresh)
+                        // 同步给播放服务的队列副本：只换这一首，不重排整张列表。
+                        try {
+                            val q = connection.songList.value
+                            val qi = q.indexOfFirst { it.id == songId }
+                            if (qi >= 0) {
+                                val newQ = q.toMutableList().also { it[qi] = it[qi].copy(
+                                    title = fresh.title,
+                                    artist = fresh.artist,
+                                    album = fresh.album,
+                                    format = fresh.format,
+                                    filePath = fresh.filePath,
+                                    folderPath = fresh.folderPath,
+                                    path = fresh.path,
+                                    duration = if (fresh.duration > 0) fresh.duration else it[qi].duration
+                                ) }
+                                connection.setSongs(newQ, updateGlobal = false)
+                            }
+                        } catch (_: Exception) { }
                         _state.update { st ->
-                            val fresh = scanned.find { it.id == id }
-                            val newList = st.songList.map { s -> if (s.id == id) (fresh ?: s) else s }
+                            val id = st.songList.find { it.filePath == fp }?.id ?: songId
+                            val newList = st.songList.map { s -> if (s.id == id) s.copy(
+                                title = fresh.title,
+                                artist = fresh.artist,
+                                album = fresh.album,
+                                format = fresh.format,
+                                filePath = fresh.filePath,
+                                folderPath = fresh.folderPath,
+                                path = fresh.path,
+                                duration = if (fresh.duration > 0) fresh.duration else s.duration
+                            ) else s }
                             val cur = if (st.currentSongId == id) st.copy(
-                                currentSongTitle = fresh?.title ?: st.currentSongTitle,
-                                currentSongArtist = fresh?.artist ?: st.currentSongArtist,
-                                currentSongAlbum = fresh?.album ?: st.currentSongAlbum,
+                                currentSongTitle = fresh.title,
+                                currentSongArtist = fresh.artist,
+                                currentSongAlbum = fresh.album,
                             ) else st
                             cur.copy(songList = newList)
                         }
@@ -686,11 +745,15 @@ class PlayerViewModel @Inject constructor(
             try {
                 _state.update { it.copy(scanStatus = "scanning", scanProgress = 0f) }
                 val songs = SongRepository.rescanFromMediaStore(getApplication())
-                if (songs.isEmpty() && SongRepository.hasData()) {
-                    val cached = SongRepository.getSongs()
+                // [2026-10-25] 空结果三不：不写盘、不覆盖缓存、不清空已有列表。
+                // 有旧数据就继续用旧的；没有才显示空（状态文案带线索，方便定位是权限还是索引问题）。
+                if (songs.isEmpty()) {
+                    val cached = if (SongRepository.hasData()) SongRepository.getSongs() else emptyList()
                     _state.update { it.copy(
                         songCount = cached.size, songList = cached,
-                        scanStatus = "done:${cached.size} (from cache)", scanProgress = 1f
+                        scanStatus = if (cached.isNotEmpty()) "done:${cached.size} (from cache)"
+                            else "done:0 (empty storage/index)",
+                        scanProgress = 1f
                     ) }
                     return@launch
                 }

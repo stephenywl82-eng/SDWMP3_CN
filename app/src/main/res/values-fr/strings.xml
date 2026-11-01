@@ -467,7 +467,7 @@
     <string name="vu_style_mixer">Console</string>
     <string name="settings_section_display">Affichage et interface</string>
     <string name="settings_section_library">Bibliothèque</string>
-    <string name="settings_section_playback">Lecture et transitions</string>
+    <string name="settings_section_playback">Transitions &amp; DJ</string>
     <string name="settings_section_system">Système et débogage</string>
     <string name="action_play_all">Tout lire</string>
     <string name="diag_dac_capabilities">Capacités DAC</string>

@@ -467,7 +467,7 @@
     <string name="vu_style_mixer">Mixer</string>
     <string name="settings_section_display">Tela e interface</string>
     <string name="settings_section_library">Biblioteca</string>
-    <string name="settings_section_playback">Reprodução e transições</string>
+    <string name="settings_section_playback">Transitions &amp; DJ</string>
     <string name="settings_section_system">Sistema e depuração</string>
     <string name="action_play_all">Tocar tudo</string>
     <string name="diag_dac_capabilities">Capacidades DAC</string>

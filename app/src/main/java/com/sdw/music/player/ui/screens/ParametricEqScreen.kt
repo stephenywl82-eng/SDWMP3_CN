@@ -47,6 +47,7 @@ import com.sdw.music.player.core.audio.dsp.AutoEqPreset
 import com.sdw.music.player.ui.components.ExpressiveSwitch
 import com.sdw.music.player.ui.components.SDWDivider
 import com.sdw.music.player.ui.components.SDWTopBar
+import com.sdw.music.player.ui.components.SDWAlertDialog
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.theme.SDWShapes
 import kotlin.math.*
@@ -133,7 +134,8 @@ fun ParametricEqScreen(onBack: () -> Unit) {
             SDWTopBar(
                 title = { Text(stringResource(R.string.eq_peq_title)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    // [P2 · M3 Expressive] 裸 IconButton → tonal 容器键，与全站顶栏统一
+                    FilledTonalIconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
                     }
                 },
@@ -256,11 +258,11 @@ fun ParametricEqScreen(onBack: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    OutlinedButton(
+                    FilledTonalButton(
                         onClick = { genreBackup = preset; selectedGenre = 0; showGenreDialog = true },
                         modifier = Modifier.fillMaxWidth()
                     ) { Text(stringResource(R.string.eq_peq_genre)) }
-                    OutlinedButton(
+                    FilledTonalButton(
                         onClick = {
                             autoEqQuery = ""
                             selectedAutoEq = ""
@@ -273,11 +275,11 @@ fun ParametricEqScreen(onBack: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = { importLauncher.launch(arrayOf("text/plain", "*/*")) },
                             modifier = Modifier.weight(1f)
                         ) { Text(stringResource(R.string.eq_peq_import)) }
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = { exportLauncher.launch("peq_export.txt") },
                             modifier = Modifier.weight(1f)
                         ) { Text(stringResource(R.string.eq_peq_export)) }
@@ -286,14 +288,14 @@ fun ParametricEqScreen(onBack: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = {
                                 presetName = if (preset.name != "Custom PEQ") preset.name else ""
                                 showSaveDialog = true
                             },
                             modifier = Modifier.weight(1f)
                         ) { Text(stringResource(R.string.eq_peq_save)) }
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = {
                                 customPresets = CustomPeqStore.list(context)
                                 showPresetsDialog = true
@@ -305,7 +307,7 @@ fun ParametricEqScreen(onBack: () -> Unit) {
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = {
                                 val flat = preset.bands.map { it.copy(gain = 0f) }
                                 commit(preset.copy(bands = flat))
@@ -327,16 +329,27 @@ fun ParametricEqScreen(onBack: () -> Unit) {
         }
 
         if (showSaveDialog) {
-            AlertDialog(
+            // [P2 · M3 Expressive] 全站弹窗统一到 SDWAlertDialog（玻璃容器 + Panel 圆角）
+            SDWAlertDialog(
                 onDismissRequest = { showSaveDialog = false },
                 title = { Text(stringResource(R.string.eq_peq_save)) },
                 text = {
-                    OutlinedTextField(
+                    // [P2] 描边式 → 容器式（半透明玻璃），与主界面搜索框统一
+                    TextField(
                         value = presetName,
                         onValueChange = { presetName = it },
                         label = { Text(stringResource(R.string.eq_peq_preset_name)) },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = TextFieldDefaults.colors(
+                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            cursorColor = MaterialTheme.colorScheme.primary,
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
                     )
                 },
                 confirmButton = {
@@ -357,7 +370,7 @@ fun ParametricEqScreen(onBack: () -> Unit) {
         }
 
         if (showPresetsDialog) {
-            AlertDialog(
+            SDWAlertDialog(
                 onDismissRequest = { showPresetsDialog = false },
                 title = { Text(stringResource(R.string.eq_peq_my_presets)) },
                 text = {
@@ -414,12 +427,22 @@ fun ParametricEqScreen(onBack: () -> Unit) {
                         style = MaterialTheme.typography.titleMedium,
                         modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
                     )
-                    OutlinedTextField(
+                    // [P2 · M3 Expressive] 描边式 → 容器式（半透明玻璃），与主界面搜索框统一
+                    TextField(
                         value = autoEqQuery,
                         onValueChange = { autoEqQuery = it },
                         label = { Text(stringResource(R.string.eq_peq_search)) },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                        colors = TextFieldDefaults.colors(
+                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            cursorColor = MaterialTheme.colorScheme.primary,
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
                     )
                     Spacer(Modifier.height(8.dp))
                     LazyColumn(Modifier.fillMaxWidth().heightIn(max = 360.dp)) {
@@ -446,7 +469,15 @@ fun ParametricEqScreen(onBack: () -> Unit) {
                                         p.name, style = MaterialTheme.typography.bodyMedium,
                                         color = if (selectedAutoEq == p.name) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
                                     )
-                                    Text(p.brand, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    // [M3 Expressive · 品牌带色 chip] 预设品牌名做成带色 AssistChip（secondaryContainer 容器 + onSecondaryContainer 文字）
+                                    AssistChip(
+                                        onClick = { },
+                                        label = { Text(p.brand, style = MaterialTheme.typography.labelSmall) },
+                                        colors = AssistChipDefaults.assistChipColors(
+                                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                                            labelColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    )
                                 }
                                 if (selectedAutoEq == p.name) {
                                     Icon(Icons.Filled.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
@@ -461,7 +492,7 @@ fun ParametricEqScreen(onBack: () -> Unit) {
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = { autoEqBackup?.let { commit(it) }; showAutoEqDialog = false },
                             modifier = Modifier.weight(1f)
                         ) { Text(stringResource(R.string.action_cancel)) }
@@ -537,7 +568,7 @@ fun ParametricEqScreen(onBack: () -> Unit) {
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        OutlinedButton(
+                        FilledTonalButton(
                             onClick = { genreBackup?.let { commit(it) }; showGenreDialog = false },
                             modifier = Modifier.weight(1f)
                         ) { Text(stringResource(R.string.action_cancel)) }
@@ -621,7 +652,12 @@ private fun LabeledSlider(
         Text(label, style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.width(76.dp))
         Slider(value = value, onValueChange = onValueChange, valueRange = range,
-            modifier = Modifier.weight(1f).padding(horizontal = 8.dp))
+            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+            colors = SliderDefaults.colors(
+                activeTrackColor = MaterialTheme.colorScheme.primary,
+                thumbColor = MaterialTheme.colorScheme.primary,
+                inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.3f)
+            ))
         Text(valueText, style = MaterialTheme.typography.labelMedium,
             modifier = Modifier.width(72.dp), textAlign = TextAlign.End,
             color = MaterialTheme.colorScheme.primary)

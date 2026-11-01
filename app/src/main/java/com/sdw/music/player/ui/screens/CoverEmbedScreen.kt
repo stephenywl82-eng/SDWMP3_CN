@@ -19,7 +19,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -34,6 +33,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sdw.music.player.ui.theme.SDWShapes
+import com.sdw.music.player.ui.theme.SDWShape
+import com.sdw.music.player.ui.theme.SDWSpace
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -46,6 +47,7 @@ import com.sdw.music.player.Song
 import com.sdw.music.player.SongRepository
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.components.springPress
+import com.sdw.music.player.ui.components.ExpressiveWavyProgress
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -57,7 +59,7 @@ import androidx.compose.animation.animateContentSize
  * 封面下载 & 嵌入工具页（整合自 CoverEmbed 独立应用）。
  * 列出无封面歌曲 → 单曲点嵌 / 一键批量嵌入。
  */
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun CoverEmbedScreen(
     songs: List<Song>,
@@ -183,20 +185,29 @@ fun CoverEmbedScreen(
         topBar = {
             SDWTopBar(
                 title = { Text(stringResource(R.string.cover_embed_title), color = MaterialTheme.colorScheme.onBackground) },
-                navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
-                    }
-                },
+                // [P1 · M3 Expressive] 原来是手写裸 IconButton（飘着的箭头），跟全站顶栏的
+                // tonal 容器键两套语言。SDWTopBar 的默认 navigationIcon 就是统一形态，直接沿用。
+                onNavigateBack = onNavigateBack
             )
         },
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             // 按钮始终显示（有歌即可），点击时若没权限再跳授权
             if (displayed.isNotEmpty() && !embedAllRunning) {
-                Surface(color = MaterialTheme.colorScheme.surface) {
+                // [P1 · M3 Expressive] 底栏原来是「实色 Surface」——列表滚到下面时是一块死板的
+                // 实色板压在内容上。改成浮起一档的玻璃面板：圆角只取上边两角（贴着屏幕底沿，
+                // 下两角圆了会露出背景缝），fillBoost 拉高让它始终读得清。
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .glassSurface(
+                            shape = RoundedCornerShape(topStart = SDWShape.Panel, topEnd = SDWShape.Panel),
+                            elevation = 8.dp,
+                            fillBoost = 0.30f
+                        )
+                ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = SDWSpace.Gutter, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
@@ -239,22 +250,32 @@ fun CoverEmbedScreen(
         ) {
             // 写权限引导横幅（Android 11+ 需 All Files Access）
             if (!hasWriteAccess) {
-                Surface(color = MaterialTheme.colorScheme.errorContainer) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.onErrorContainer)
-                        Spacer(Modifier.width(8.dp))
-                        Text(
-                            text = stringResource(R.string.cover_embed_need_storage),
-                            color = MaterialTheme.colorScheme.onErrorContainer,
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.weight(1f)
+                // [P1 · M3 Expressive] 原来是一整条实色 errorContainer 通栏 —— 全站唯一一块
+                // 「不透明的纯色板」。改成 error 色调的玻璃卡：accent 取 error，顶边高光跟着
+                // 变红，警告语义还在，但和页面其它玻璃面是同一种材质。
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                        .glassSurface(
+                            shape = SDWShapes.Row,
+                            accent = MaterialTheme.colorScheme.error,
+                            accentEdge = true,
+                            fillBoost = 0.12f
                         )
-                        TextButton(onClick = { openStoragePermission() }) {
-                            Text(stringResource(R.string.cover_embed_grant))
-                        }
+                        .padding(horizontal = SDWSpace.Card, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text = stringResource(R.string.cover_embed_need_storage),
+                        color = MaterialTheme.colorScheme.onSurface,
+                        style = MaterialTheme.typography.bodySmall,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { openStoragePermission() }) {
+                        Text(stringResource(R.string.cover_embed_grant))
                     }
                 }
             }
@@ -272,15 +293,36 @@ fun CoverEmbedScreen(
                 ExpressiveSwitch(checked = !showAll, onCheckedChange = { showAll = !it })
             }
 
+            // [P2 · M3 Expressive] 线性进度条 → 波浪进度条（不确定进度形态）。
+            // 线性条是 M3 的老形态；全站播放条已经是波浪，这里还是一根直棍，两种进度语言。
+            // 波浪条给 16dp 高让波有起伏空间，底槽打开（要读得出"在跑"）。
             if (scanning) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                ExpressiveWavyProgress(
+                    fraction = 0f,
+                    color = MaterialTheme.colorScheme.primary,
+                    active = true,
+                    indeterminate = true,
+                    showTrack = true,
+                    amplitude = 4.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(16.dp)
+                        .padding(horizontal = SDWSpace.Gutter, vertical = 6.dp)
                 )
             }
 
             if (embedAllRunning) {
-                LinearProgressIndicator(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
+                ExpressiveWavyProgress(
+                    fraction = 0f,
+                    color = MaterialTheme.colorScheme.primary,
+                    active = true,
+                    indeterminate = true,
+                    showTrack = true,
+                    amplitude = 4.dp,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(16.dp)
+                        .padding(horizontal = SDWSpace.Gutter, vertical = 6.dp)
                 )
                 if (progress.isNotBlank()) {
                     Text(progress, modifier = Modifier.padding(horizontal = 16.dp), style = MaterialTheme.typography.bodySmall)
@@ -333,7 +375,7 @@ private fun hasAlbumArt(context: android.content.Context, albumArtUri: String): 
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun CoverEmbedRow(
     song: Song,
@@ -386,7 +428,7 @@ private fun CoverEmbedRow(
             Text("${song.artist.ifBlank { stringResource(R.string.unknown_artist) }} · ${song.album.ifBlank { stringResource(R.string.unknown_album) }}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
         if (isEmbedding) {
-            CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+            LoadingIndicator(Modifier.size(20.dp))
         } else if (SongRepository.hasRealCover(song.albumArtUri)) {
             Icon(Icons.Default.CheckCircle, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
         }

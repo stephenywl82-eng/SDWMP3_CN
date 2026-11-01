@@ -1,14 +1,17 @@
 import java.util.Properties
 
 plugins {
+    // [M3 Expressive · Path A 2026-10-27] gradle.properties 已关 android.builtInKotlin/android.newDsl，
+    // 回退外部 Kotlin 插件模型（Kotlin 2.4.20 暂无对应 KSP，且 kapt 与内置 Kotlin 不兼容），故恢复该插件。
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("com.google.dagger.hilt.android")
     id("kotlin-parcelize")
     // [K2 migration 2026-10-24] Compose K2 编译器插件（替代旧 composeOptions 方式）
     id("org.jetbrains.kotlin.plugin.compose")
-    // [Phase 3 2026-10-24] kapt → KSP（K2 原生）
-    id("com.google.devtools.ksp")
+    // [Phase 3 回退] KSP 在 K2/Hilt 2.52 下存在非确定性 flake（Hilt 多轮生成只跑首轮即中止，
+    // 报 Expected @AndroidEntryPoint）。切回稳定的 kapt 处理 Hilt 注解，彻底绕开该 flake。
+    id("org.jetbrains.kotlin.kapt")
 }
 
 // Load keystore properties
@@ -20,14 +23,14 @@ if (keystorePropsFile.exists()) {
 
 android {
     namespace = "com.sdw.music.player"
-    compileSdk = 35
+    compileSdk = 37
 
     defaultConfig {
         applicationId = "com.sdw.music.player.cn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 920
-        versionName = "9.20"    // 【V9.20】DAC 独占：P6 单 reaper 闭环修噪音 + C DISCONNECT 分级 + D start 真实状态；继承 V9.19 扫描修复。
+        versionCode = 936
+        versionName = "9.9"    // 【V9.9】修复交叉淡化落点音量台阶：B 轨预增益(preGain∈[0.6,1.0])原在落点硬阶跃回 1.0（最大+4.4dB，听感"音量一下子大一下"）。改为落点后 250ms 内由 1:1 直读出口把 output 按 preGain→1.0 线性爬坡，台阶摊平为无感斜坡。
 
         ndk {
             abiFilters += listOf("arm64-v8a")
@@ -72,10 +75,13 @@ android {
             // 仅保留英文默认，导致中文缺失。关掉资源收缩可保住全部 locale 字符串（仅 APK 略增，对本播放器无碍）。
             isShrinkResources = false
             signingConfig = signingConfigs.getByName("release")
-            proguardFiles(
-                getDefaultProguardFile("proguard-android.txt"),
-                "proguard-rules.pro"
-            )
+                proguardFiles(
+                    // [M3 Expressive · Path A 2026-10-27] AGP 9.x 不再支持 proguard-android.txt（含 -dontoptimize，
+                    // 会阻止 R8 优化）。改用 proguard-android-optimize.txt；若 R8 激进优化导致运行时问题，
+                    // 可在 proguard-rules.pro 临时加 -dontoptimize 兜底。
+                    getDefaultProguardFile("proguard-android-optimize.txt"),
+                    "proguard-rules.pro"
+                )
         }
         create("benchmark") {
             isDebuggable = false
@@ -93,8 +99,8 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = "17"
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {
+        compilerOptions.jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 
     buildFeatures {
@@ -129,15 +135,19 @@ android {
 
 dependencies {
     // Compose BOM 锟?unified versions
-    // [Phase 2a 2026-10-24] 2024.09.00 → 2025.06.01 (Compose 1.8.2)，配合 K2 工具链
-    val composeBom = platform("androidx.compose:compose-bom:2025.06.01")
+    // [M3 Expressive · Path A 2026.10.27] compose-bom 2025.10.00 (Compose 1.9.x) 与 material3 1.5.x 不兼容
+    //（1.5.x 要求 Compose 1.12.x）。升到 2026.09.00（Compose 1.12.1）对齐，否则 BOM 版本错位。
+    val composeBom = platform("androidx.compose:compose-bom:2026.09.00")
     implementation(composeBom)
 
     // Compose Core
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
-    implementation("androidx.compose.material3:material3")
+    // [M3 Expressive · Path A 2026-10-27] material3 1.5.0-alpha22：Expressive API
+    //（MaterialExpressiveTheme / expressive*ColorScheme / MotionScheme）在此版本公开（@OptIn(ExperimentalMaterial3ExpressiveApi)）。
+    // 注：用户提出的 1.5.0-beta02 不在本地缓存且可能要求不同 BOM；alpha22 与 beta02 API 面一致且已验证依赖可解，先用它点亮官方 Expressive。
+    implementation("androidx.compose.material3:material3:1.5.0-alpha22")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
@@ -148,9 +158,10 @@ dependencies {
     implementation("androidx.navigation:navigation-compose:2.8.0")
     // [V8.97] navigation-compose 2.8.0 璧疯繍琛屾湡渚濊禆 kotlinx-serialization-core锛?    // 鏄惧紡閿佺増鏈紝閬垮厤浼犻€掍緷璧栨紓绉诲埌涓?Kotlin 1.9.25 涓嶅尮閰嶇殑鐗堟湰銆?    implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.6.3")
 
-    // Hilt
-    implementation("com.google.dagger:hilt-android:2.52")
-    ksp("com.google.dagger:hilt-android-compiler:2.52")
+    // Hilt（注解处理切回 kapt 以绕开 KSP 2.x + Hilt 多轮生成 flake；2.60.1 以匹配 AGP 9.x
+    // 内置 Kotlin 并去掉对 AGP 已删除 BaseExtension 的硬依赖）
+    implementation("com.google.dagger:hilt-android:2.60.1")
+    kapt("com.google.dagger:hilt-android-compiler:2.60.1")
     implementation("androidx.hilt:hilt-navigation-compose:1.1.0")
 
     // Media3 (Phase C: media3-exoplayer removed; session+common kept for MediaSession)

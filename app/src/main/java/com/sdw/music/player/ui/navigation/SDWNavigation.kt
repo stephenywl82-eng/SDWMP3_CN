@@ -112,7 +112,7 @@ fun SDWNavHost(
 
     // 【Lyrico 联动】长按歌曲 → 用 Lyrico 编辑当前曲目元数据。
     // 若 Lyrico 回传了编辑后的标签 extras（上游 PR #196 新增），就地更新内存中的歌曲，免去整库重扫；
-    // 否则（老版 Lyrico 未回传 extras）回退到整库重扫。
+    // 否则（老版 Lyrico 未回传 extras）只重读被改写的这一首（O(1)，不再整库重扫）。
     val pendingLyricoSong = remember { mutableStateOf<Song?>(null) }
     val lyricoEditLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val song = pendingLyricoSong.value
@@ -197,6 +197,37 @@ fun SDWNavHost(
             navController.addOnDestinationChangedListener(listener)
             onDispose { navController.removeOnDestinationChangedListener(listener) }
         }
+        // [2026-10-25] 系统级删除确认框（Android 11+）——必须放在 NavHost 之外：
+        // ① NavHost 的 graph builder lambda 不是 @Composable（路由内容 lambda 才是），
+        //    直接放里面编译不过；② 从歌曲列表长按删除时用户不在播放页，放在 Player
+        //    路由内部会永远不弹框。Box 包裹使删除监听对全 App 任何页面生效。
+        Box(modifier = Modifier.fillMaxSize()) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val sysDelContext = androidx.compose.ui.platform.LocalContext.current
+            val systemDeleteLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.StartIntentSenderForResult()
+            ) { result ->
+                if (result.resultCode == android.app.Activity.RESULT_OK) {
+                    vm.handleIntent(PlayerIntent.DeleteConfirmed)
+                } else {
+                    vm.handleIntent(PlayerIntent.DeleteCancelled)
+                }
+            }
+            LaunchedEffect(state.pendingDeleteUri) {
+                if (state.pendingDeleteUri.isNotBlank()) {
+                    try {
+                        val uris = listOf(Uri.parse(state.pendingDeleteUri))
+                        val pi = MediaStore.createDeleteRequest(sysDelContext.contentResolver, uris)
+                        systemDeleteLauncher.launch(
+                            IntentSenderRequest.Builder(pi.intentSender).build()
+                        )
+                    } catch (e: Exception) {
+                        android.util.Log.e("SDWNav", "createDeleteRequest failed: ${e.message}", e)
+                        vm.handleIntent(PlayerIntent.DeleteConfirmed)
+                    }
+                }
+            }
+        }
         NavHost(
             navController = navController,
             startDestination = Screen.SongList.route,
@@ -260,9 +291,11 @@ fun SDWNavHost(
                             // [V8.84] The tapped row (not the mini bar) is the flight source.
                             sharedCoverState.rowFlightSongId = song.id
                             vm.handleIntent(PlayerIntent.PlaySongList(state.songList, startIndex = index))
-                            navigateToPlayer()
+                            // [2026-10-25] 点歌曲只播放，不跳播放页；只有点迷你播放器才进播放页
                         }
                     },
+                    // [2026-10-25] 长按菜单「删除」（VM 内 Android 11+ 走系统确认框）
+                    onDeleteSong = { song -> vm.handleIntent(PlayerIntent.DeleteSong(song)) },
                     onNavigateToPlayer = {
                         // [V8.100] 幂等：Player 已是当前目的地时整个动作都不做。
                         // 双击迷你条会触发两次 onClick，这里若不拦，第二次会再跑一次
@@ -372,33 +405,7 @@ fun SDWNavHost(
                 val durationMs by vm.durationMs.collectAsState()
                 val context = androidx.compose.ui.platform.LocalContext.current
 
-                // === 系统级删除（Android 11+） ===
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                    val systemDeleteLauncher = rememberLauncherForActivityResult(
-                        ActivityResultContracts.StartIntentSenderForResult()
-                    ) { result ->
-                        if (result.resultCode == android.app.Activity.RESULT_OK) {
-                            vm.handleIntent(PlayerIntent.DeleteConfirmed)
-                        } else {
-                            vm.handleIntent(PlayerIntent.DeleteCancelled)
-                        }
-                    }
-
-                    LaunchedEffect(state.pendingDeleteUri) {
-                        if (state.pendingDeleteUri.isNotBlank()) {
-                            try {
-                                val uris = listOf(Uri.parse(state.pendingDeleteUri))
-                                val pi = MediaStore.createDeleteRequest(context.contentResolver, uris)
-                                systemDeleteLauncher.launch(
-                                    IntentSenderRequest.Builder(pi.intentSender).build()
-                                )
-                            } catch (e: Exception) {
-                                android.util.Log.e("SDWNav", "createDeleteRequest failed: ${e.message}", e)
-                                vm.handleIntent(PlayerIntent.DeleteConfirmed)
-                            }
-                        }
-                    }
-                }
+                // [2026-10-25] 系统级删除确认框已上移至 NavHost 根级（任意页面删歌都能弹）
 
                 // [V8.97] 手搓的 PredictiveBackHandler 已移除。
                 // 原因：navigation-compose 2.8.0 起 NavHost 内部会自行注册预测返回回调并
@@ -525,7 +532,6 @@ fun SDWNavHost(
                     onNavigateBack = { navController.popBackStack() },
                     onPlaySongs = { songs ->
                         vm.handleIntent(PlayerIntent.PlaySongList(songs))
-                        navigateToPlayer()
                     },
                     onOpenFolder = { path ->
                         navController.navigate(Screen.FolderDetail.createRoute(path))
@@ -545,7 +551,6 @@ fun SDWNavHost(
                     },
                     onPlaySongs = { songs, startIndex ->
                         vm.handleIntent(PlayerIntent.PlaySongList(songs, startIndex = startIndex))
-                        navigateToPlayer()
                     }
                 )
             }}
@@ -557,7 +562,6 @@ fun SDWNavHost(
                     },
                     onPlaySongs = { songs ->
                         vm.handleIntent(PlayerIntent.PlaySongList(songs))
-                        navigateToPlayer()
                     }
                 )
             }}
@@ -585,7 +589,6 @@ fun SDWNavHost(
                         val idx = songs.indexOfFirst { it.id == song.id }
                         if (idx >= 0) {
                             vm.handleIntent(PlayerIntent.PlaySongList(songs, startIndex = idx))
-                            navigateToPlayer()
                         }
                     }
                 )
@@ -617,7 +620,6 @@ fun SDWNavHost(
                     onNavigateBack = { navController.popBackStack() },
                     onPlaySongs = { songs ->
                         if (songs.isNotEmpty()) vm.handleIntent(PlayerIntent.PlaySongList(songs, startIndex = 0))
-                        navigateToPlayer()
                     },
                     onAddSongs = { navController.navigate(Screen.SongPicker.createRoute(playlistId)) }
                 )
@@ -702,11 +704,9 @@ fun SDWNavHost(
                         onSongClick = { song ->
                             val index = filtered.indexOfFirst { it.id == song.id }
                             if (index >= 0) vm.handleIntent(PlayerIntent.PlaySongList(filtered, startIndex = index))
-                            navigateToPlayer()
                         },
                         onPlayAll = {
                             vm.handleIntent(PlayerIntent.PlaySongList(filtered))
-                            navigateToPlayer()
                         },
                         onNavigateBack = { navController.popBackStack() }
                     )
@@ -740,16 +740,15 @@ fun SDWNavHost(
                     onSongClick = { song ->
                         val index = filtered.indexOfFirst { it.id == song.id }
                         if (index >= 0) vm.handleIntent(PlayerIntent.PlaySongList(filtered, startIndex = index))
-                        navigateToPlayer()
                     },
                     onPlayAll = {
                         vm.handleIntent(PlayerIntent.PlaySongList(filtered))
-                        navigateToPlayer()
                     },
                     onNavigateBack = { navController.popBackStack() }
                 )
             }}
         }
+        }  // [2026-10-25] 关闭系统删除监听的 Box 包裹层（删除块 + NavHost 同级）
 
         // [V8.52] The hand-rolled SharedCoverOverlay is retired: the real
         // shared element (SharedTransitionLayout + sharedElement) flies the cover

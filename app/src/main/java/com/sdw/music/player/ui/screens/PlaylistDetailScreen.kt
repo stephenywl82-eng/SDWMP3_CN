@@ -44,6 +44,7 @@ import com.sdw.music.player.core.SongSorter
 import com.sdw.music.player.core.EnergyColor
 import com.sdw.music.player.ui.components.BpmBadge
 import com.sdw.music.player.ui.components.springPress
+import com.sdw.music.player.ui.components.SDWAlertDialog
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material.icons.filled.AutoAwesome
@@ -97,29 +98,37 @@ fun PlaylistDetailScreen(
                 // V8.118 同专辑页/歌手页：标题统一在 hero，topBar 只留返回与操作键。
                 title = { },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
                 actions = {
                     // 【v8.13】BPM 平滑排序开关（扫描入口在 设置 → 扫描 BPM）
-                    IconButton(onClick = { bpmSort = !bpmSort; if (bpmSort) flowSort = false }) {
-                        Icon(
-                            Icons.Default.Sort,
-                            stringResource(R.string.playlist_sort_bpm),
-                            tint = if (bpmSort) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                    FilledTonalIconButton(
+                        onClick = { bpmSort = !bpmSort; if (bpmSort) flowSort = false },
+                        shapes = IconButtonDefaults.shapes(),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            contentColor = if (bpmSort) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
                         )
+                    ) {
+                        Icon(Icons.Default.Sort, stringResource(R.string.playlist_sort_bpm))
                     }
                     // 【V8.244】能量/调性自动流程排序
-                    IconButton(onClick = { flowSort = !flowSort; if (flowSort) bpmSort = false }) {
-                        Icon(
-                            Icons.Default.AutoAwesome,
-                            stringResource(R.string.playlist_sort_flow),
-                            tint = if (flowSort) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
+                    FilledTonalIconButton(
+                        onClick = { flowSort = !flowSort; if (flowSort) bpmSort = false },
+                        shapes = IconButtonDefaults.shapes(),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            contentColor = if (flowSort) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant
                         )
+                    ) {
+                        Icon(Icons.Default.AutoAwesome, stringResource(R.string.playlist_sort_flow))
                     }
-                    IconButton(onClick = onAddSongs) {
-                        Icon(Icons.Default.Add, stringResource(R.string.title_add_songs), tint = MaterialTheme.colorScheme.primary)
+                    FilledTonalIconButton(
+                        onClick = onAddSongs,
+                        shapes = IconButtonDefaults.shapes(),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(contentColor = MaterialTheme.colorScheme.primary)
+                    ) {
+                        Icon(Icons.Default.Add, stringResource(R.string.title_add_songs))
                     }
                 },
             )
@@ -175,7 +184,8 @@ fun PlaylistDetailScreen(
 // Delete confirmation
 showDeleteConfirm?.let { songId ->
         val song = songs.find { it.id == songId }
-        AlertDialog(
+        // [P2 · M3 Expressive] 全站弹窗统一到 SDWAlertDialog（玻璃容器 + Panel 圆角）
+        SDWAlertDialog(
             onDismissRequest = { showDeleteConfirm = null },
             title = { Text(stringResource(R.string.playlist_remove_from), color = MaterialTheme.colorScheme.onBackground) },
             text = {
@@ -200,15 +210,14 @@ showDeleteConfirm?.let { songId ->
                 TextButton(onClick = { showDeleteConfirm = null }) {
                     Text(stringResource(R.string.action_cancel), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            },
-                        containerColor = MaterialTheme.colorScheme.surface
+            }
         )
     }
 
     // 【V8.7】长按：菜单（添加到其他歌单 / 从本歌单移除）
     longPressSong?.let { song ->
         if (showSongMenu) {
-            AlertDialog(
+            SDWAlertDialog(
                 onDismissRequest = {
                     showSongMenu = false
                     longPressSong = null
@@ -250,8 +259,7 @@ showDeleteConfirm?.let { songId ->
                     }) {
                         Text(stringResource(R.string.action_cancel), color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
-                },
-                containerColor = MaterialTheme.colorScheme.surface
+                }
             )
         }
 

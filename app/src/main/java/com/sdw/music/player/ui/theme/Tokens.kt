@@ -115,8 +115,12 @@ object SDWHeader {
  * 对称，中间夹着 play，所以 SpaceEvenly 出来的左右两侧留白正好相等，整排仍然严格居中。
  */
 object SDWTransport {
-    /** 播放/暂停键直径。 */
-    val Play = 64.dp
+    /**
+     * 播放/暂停键直径。
+     * 【M3 Expressive】主操作键要明显大于同级键（官方规范里主次差一档以上），
+     * 64 只比 Step(56) 大 8dp，焦点不够，提到 72 才是"主卡 vs 子卡"的层级。
+     */
+    val Play = 72.dp
     /** 上一首/下一首直径。 */
     val Step = 56.dp
     /** 随机/循环这两侧键直径。 */

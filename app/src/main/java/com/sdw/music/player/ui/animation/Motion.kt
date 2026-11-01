@@ -31,6 +31,16 @@ object Motion {
         stiffness = Spring.StiffnessMediumLow
     )
 
+    /**
+     * [M3 Expressive 四步法 · Step 4] 弹性物理动效便捷入口：用于点击 / 状态切换时的有机运动
+     * （配合 Modifier.animateContentSize / scale / offset）。中等回弹 + 低刚度，对应官方示例的
+     * DampingRatioMediumBouncy + StiffnessLow。容器随状态伸缩时套用即可获得 Expressive 弹性。
+     */
+    val expressiveSpring: FiniteAnimationSpec<Float> = spring(
+        dampingRatio = Spring.DampingRatioMediumBouncy,
+        stiffness = Spring.StiffnessLow
+    )
+
     /** Snappy: pressed states, small controls. */
     fun <T> snappy(): FiniteAnimationSpec<T> = spring(
         dampingRatio = Spring.DampingRatioNoBouncy,

@@ -467,7 +467,7 @@
     <string name="vu_style_mixer">ミキサー</string>
     <string name="settings_section_display">表示とインターフェース</string>
     <string name="settings_section_library">ライブラリ</string>
-    <string name="settings_section_playback">再生とトランジション</string>
+    <string name="settings_section_playback">Transitions &amp; DJ</string>
     <string name="settings_section_system">システムとデバッグ</string>
     <string name="action_play_all">すべて再生</string>
     <string name="diag_dac_capabilities">DAC 機能</string>

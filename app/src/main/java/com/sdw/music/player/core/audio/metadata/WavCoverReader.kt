@@ -503,14 +503,17 @@ object WavCoverReader {
     }
 
     private fun parseFrames(body: ByteArray, start: Int, end: Int, major: Int): Cover? {
+        // [2026-10-25] 收集全部 APIC/PIC，收尾按类型挑主封面（移植 Lyrico 回退链），
+        // 不再「见第一张就用」——封底/艺人图排前面时会选错。
+        val pics = mutableListOf<EmbeddedPicture>()
         forEachFrame(body, start, end, major) { id, buf, ds, de ->
             val isApic = (major >= 3 && id == "APIC") || (major == 2 && id == "PIC")
             if (isApic) {
-                extractApic(buf, ds, de, major)?.let { return it }
+                extractApic(buf, ds, de, major)?.let { pics.add(it) }
             }
             false
         }
-        return null
+        return EmbeddedCoverSelector.select(pics)?.let { (data, mime) -> Cover(data, mime) }
     }
 
     // ---------------------------------------------------------------- ID3v2 text tags
@@ -688,7 +691,7 @@ object WavCoverReader {
      * APIC layout: encoding(1) | MIME\0 | picture type(1) | description(terminated) | data
      * v2.2 PIC swaps the MIME string for a fixed 3-char image format code.
      */
-    private fun extractApic(b: ByteArray, start: Int, end: Int, major: Int): Cover? {
+    private fun extractApic(b: ByteArray, start: Int, end: Int, major: Int): EmbeddedPicture? {
         if (start + 4 >= end) return null
         val encoding = b[start].toInt() and 0xFF
         var p = start + 1
@@ -706,18 +709,25 @@ object WavCoverReader {
             p = mimeEnd + 1
         }
         if (p >= end) return null
-        p += 1 // picture type byte
+        // [2026-10-25] 读出 picture type 字节（原来跳过）：3=封面 4=封底 8=艺人图…
+        val picType = b[p].toInt() and 0xFF
+        p += 1
 
         // The description is null-terminated; UTF-16 encodings terminate on a double zero.
         val descEnd = if (encoding == 1 || encoding == 2) indexOfDoubleZero(b, p, end)
         else indexOfZero(b, p, end)
         if (descEnd < 0) return null
+        val description = if (descEnd > p) {
+            val cs = if (encoding == 1 || encoding == 2) StandardCharsets.UTF_16
+                     else StandardCharsets.ISO_8859_1
+            String(b, p, descEnd - p, cs).trim()
+        } else ""
         p = descEnd + if (encoding == 1 || encoding == 2) 2 else 1
         if (p >= end) return null
 
         val image = b.copyOfRange(p, end)
         if (image.size < 32) return null
-        return Cover(image, sniffMime(image, declaredMime))
+        return EmbeddedPicture(image, sniffMime(image, declaredMime), description, picType)
     }
 
     /** Trust the magic bytes over the declared MIME when they disagree. */

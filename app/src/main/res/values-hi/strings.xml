@@ -467,7 +467,7 @@
     <string name="vu_style_mixer">मिक्सर</string>
     <string name="settings_section_display">डिस्प्ले और इंटरफ़ेस</string>
     <string name="settings_section_library">लाइब्रेरी</string>
-    <string name="settings_section_playback">प्लेबैक और ट्रांज़िशन</string>
+    <string name="settings_section_playback">Transitions &amp; DJ</string>
     <string name="settings_section_system">सिस्टम और डिबग</string>
     <string name="action_play_all">सभी play</string>
     <string name="diag_dac_capabilities">DAC क्षमताएँ</string>

@@ -154,7 +154,7 @@ private fun findSong(songs: List<Song>, report: AudioQualityReport): Song? {
         ?: songs.firstOrNull { (it.filePath ?: "").contains(report.fileName, ignoreCase = true) }
 }
 
-@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun AudioQualityScreen(
     onNavigateBack: () -> Unit,
@@ -261,15 +261,14 @@ fun AudioQualityScreen(
             SDWTopBar(
                 title = { Text(stringResource(R.string.title_audio_quality), color = MaterialTheme.colorScheme.onBackground) },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
                 actions = {
                     if (uiState.phase == "scanning") {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp).padding(end = 12.dp),
-                            strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary
+                        LoadingIndicator(
+                            modifier = Modifier.size(20.dp).padding(end = 12.dp)
                         )
                     }
                 },
@@ -411,7 +410,7 @@ private fun ReportCard(
 ) {
     val context = LocalContext.current
     val scoreColor = when {
-        report.qualityScore >= 82f -> Color(0xFF4CAF50)
+        report.qualityScore >= 82f -> MaterialTheme.colorScheme.primary
         report.qualityScore >= 65f -> MaterialTheme.colorScheme.primary
         report.qualityScore >= 40f -> MaterialTheme.colorScheme.secondary
         else -> AccentRed
@@ -456,11 +455,17 @@ private fun ReportCard(
 
                 val matched = remember(report, songs) { findSong(songs, report) }
                 if (matched != null) {
-                    IconButton(
+                    // [P2 · M3 Expressive] 裸 IconButton → tonal 容器键：这一排只有一个键，
+                    // 裸图标在玻璃卡里没有实体感，和顶栏/行内其它键也不是一套。
+                    FilledTonalIconButton(
                         onClick = { onPlaySong(matched) },
-                        modifier = Modifier.size(36.dp)
+                        shapes = IconButtonDefaults.shapes(),
+                        modifier = Modifier.size(40.dp),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            contentColor = MaterialTheme.colorScheme.primary
+                        )
                     ) {
-                        Icon(Icons.Default.PlayArrow, stringResource(R.string.action_play), tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp))
+                        Icon(Icons.Default.PlayArrow, stringResource(R.string.action_play), modifier = Modifier.size(20.dp))
                     }
                 }
             }
@@ -482,7 +487,7 @@ private fun ReportCard(
                         val c = when {
                             tag.contains("fake", ignoreCase = true) || tag.contains("lossy", ignoreCase = true) -> AccentRed
                             tag.contains("Lossless", ignoreCase = true) || tag.contains("Hi-Res", ignoreCase = true) -> MaterialTheme.colorScheme.primary
-                            tag.contains("Full", ignoreCase = true) || tag.contains("High Cutoff", ignoreCase = true) -> Color(0xFF4CAF50)
+                            tag.contains("Full", ignoreCase = true) || tag.contains("High Cutoff", ignoreCase = true) -> MaterialTheme.colorScheme.primary
                             tag.contains("Compressed", ignoreCase = true) || tag.contains("Clip", ignoreCase = true) || tag.contains("MP3", ignoreCase = true) -> MaterialTheme.colorScheme.secondary
                             tag.contains("Spectrally Flat", ignoreCase = true) -> MaterialTheme.colorScheme.secondary
                             else -> MaterialTheme.colorScheme.primary
@@ -497,7 +502,8 @@ private fun ReportCard(
             Spacer(Modifier.height(6.dp))
 
             Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
-                IconButton(
+                // [P2 · M3 Expressive] 同上一个：分享键也收进 tonal 容器（图标保持 16dp 不抢戏）
+                FilledTonalIconButton(
                     onClick = {
                         val text = buildString {
                             appendLine(report.fileName)
@@ -518,9 +524,10 @@ private fun ReportCard(
                         }
                         context.startActivity(Intent.createChooser(intent, context.getString(R.string.action_share)))
                     },
+                    shapes = IconButtonDefaults.shapes(),
                     modifier = Modifier.size(32.dp)
                 ) {
-                    Icon(Icons.Default.Share, stringResource(R.string.action_share), tint = MaterialTheme.colorScheme.outlineVariant, modifier = Modifier.size(16.dp))
+                    Icon(Icons.Default.Share, stringResource(R.string.action_share), modifier = Modifier.size(16.dp))
                 }
             }
         }

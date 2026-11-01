@@ -135,6 +135,7 @@ object SettingsBackup {
 
     /** 生成备份 JSON 文本。scopes 为空 / null 视为全选（黑名单仍然生效）。 */
     fun buildJson(context: Context, scopes: List<Scope>? = null): String {
+        val scopeList = scopes?.takeIf { it.isNotEmpty() } ?: Scope.entries
         val wanted: Set<String>? = scopes?.takeIf { it.isNotEmpty() }
             ?.flatMap { it.prefs }
             ?.toSet()
@@ -145,6 +146,9 @@ object SettingsBackup {
             put("format", FORMAT_TAG)
             put("version", FORMAT_VERSION)
             put("appVersion", safeVersionName(context))
+            // 【V9.4】记录本次导出范围，供 REPLACE 模式在导入时把"同范围内但备份未含"的文件也清空，
+            // 真正还原到导出那一刻；老备份无此字段则回退原行为。
+            put("scopes", JSONArray(scopeList.map { it.name }))
             // 【V8.216】去掉 "device" 段：设备型号（Build.MANUFACTURER + MODEL）属于
             // 本机标识而非配置，写进备份没有任何还原价值，还会误导"这份备份来自哪台机器"
             // 的判断（用户明确要求不备份设备型号）。
@@ -249,6 +253,26 @@ object SettingsBackup {
         // 【V8.211】老备份（8.210 及更早导出）没有这段，typesRoot 为 null，
         // 落到「按本机类型 / 按 JSON 字面类型」的旧行为上 —— 向后兼容，只是不再自愈。
         val typesRoot = root.optJSONObject("types")
+
+        // 【V9.4】REPLACE 模式：先按备份记录的 scope 把"同范围内但备份未含"的文件也清空，
+        // 才能严格还原到导出那一刻。老备份无 scopes 段则回退原行为（只清空备份里出现的文件）。
+        val replaceTargets: Set<String>? = if (mode == Mode.REPLACE) {
+            val arr = root.optJSONArray("scopes")
+            if (arr != null) {
+                val targets = (0 until arr.length())
+                    .mapNotNull { i -> (arr.opt(i) as? String)?.let { runCatching { Scope.valueOf(it) }.getOrNull() } }
+                    .flatMap { it.prefs }
+                    .toSet()
+                for (t in targets) {
+                    if (t in EXCLUDED) continue
+                    runCatching {
+                        context.getSharedPreferences(t, Context.MODE_PRIVATE).edit().clear().commit()
+                    }
+                }
+                targets
+            } else null
+        } else null
+
         var keys = 0
         var fileCount = 0
         val skipped = mutableListOf<String>()
@@ -269,7 +293,11 @@ object SettingsBackup {
                 return@forEach
             }
             fileCount++
-            if (mode == Mode.REPLACE) prefs.edit().clear().apply()
+            // 【V9.4】每个 prefs 文件攒一个 Editor，最后一次性同步 commit()：
+            // ① 避免「每键一次 apply()」的 N 次异步写盘浪费；
+            // ② commit() 同步落盘，导入后即便立刻清后台也不会丢写（apply 异步可能丢）。
+            //    REPLACE 目标文件已在上面统一 clear 过，这里不再 clear。
+            val ed = prefs.edit()
             val tmap = typesRoot?.optJSONObject(name)
             obj.keys().forEach { key ->
                 val existing = prefs.all[key]
@@ -278,59 +306,48 @@ object SettingsBackup {
                 val declared = tmap?.optString(key).orEmpty()
                 // 【V8.212】类型推断优先级：
                 //  ① 备份声明的 types 段（最权威，新备份走这里）；
-                //  ② 整段缺 types 的老备份 → inferType：已知 float 键白名单 > 本机既有类型 > JSON 字面类型，
-                //     从写入侧杜绝「退化 int 落盘」（详见 inferType 注释）；
+                //  ② 整段缺 types 的老备份 → inferType：已知 float 键白名单 > 本机既有类型 > JSON 字面类型；
                 //  ③ 新备份但个别 name 缺 types 条目 → 沿用本机既有类型（保持原行为）。
                 val type = if (declared.isNotEmpty()) declared
                     else if (typesRoot == null) inferType(name, obj, key, existing)
                     else typeTagOf(existing).orEmpty()
                 val ok = when (type) {
-                    "b" -> commit(prefs) { putBoolean(key, obj.optBoolean(key)) }
-                    "i" -> commit(prefs) { putInt(key, obj.optInt(key)) }
-                    "l" -> commit(prefs) { putLong(key, obj.optLong(key)) }
+                    "b" -> { ed.putBoolean(key, obj.optBoolean(key)); true }
+                    "i" -> { ed.putInt(key, obj.optInt(key)); true }
+                    "l" -> { ed.putLong(key, obj.optLong(key)); true }
                     // 注意用 optDouble 而不是 optFloat：JSON 里 float 已被削成整数样子，
                     // 值的精度靠文本，类型靠 tmap，两边合起来才是完整信息。
-                    "f" -> commit(prefs) { putFloat(key, obj.optDouble(key).toFloat()) }
-                    "s" -> commit(prefs) { putString(key, obj.optString(key)) }
+                    "f" -> { ed.putFloat(key, obj.optDouble(key).toFloat()); true }
+                    "s" -> { ed.putString(key, obj.optString(key)); true }
                     "S" -> {
-                        val arr = obj.optJSONArray(key)
-                        val set = if (arr == null) emptySet()
-                        else (0 until arr.length()).mapNotNull { arr.optString(it) }.toSet()
-                        commit(prefs) { putStringSet(key, set) }
+                        val arr2 = obj.optJSONArray(key)
+                        val set = if (arr2 == null) emptySet()
+                        else (0 until arr2.length()).mapNotNull { arr2.optString(it) }.toSet()
+                        ed.putStringSet(key, set); true
                     }
                     // 本机没这个 key、备份里也没带类型（老备份）：按 JSON 字面类型落盘
-                    else -> commit(prefs) { putUntyped(this, key, obj, skipped) }
+                    else -> putUntyped(ed, key, obj, skipped)
                 }
                 if (ok) keys++
             }
+            ed.commit()   // 同步落盘，确保导入结果持久
         }
 
         Log.i(TAG, "restore: $fileCount file(s), $keys key(s), skipped=${skipped.size}")
         return Report(files = fileCount, keys = keys, skipped = skipped)
     }
 
-    /** 真正的落盘动作：apply() 是异步的，这里只关心"写请求有没有发出去"。 */
-    private fun commit(
-        prefs: SharedPreferences, block: SharedPreferences.Editor.() -> Unit
-    ): Boolean = try {
-        prefs.edit().apply(block).apply()
-        true
-    } catch (e: Exception) {
-        Log.w(TAG, "commit failed", e)
-        false
-    }
-
-    /** 目标里没有同名 key（跨版本新增项）时，按 JSON 字面类型落盘。 */
+    /** 目标里没有同名 key（跨版本新增项）时，按 JSON 字面类型落盘。返回是否成功写入。 */
     private fun putUntyped(
         e: SharedPreferences.Editor, key: String, obj: JSONObject, skipped: MutableList<String>
-    ) {
+    ): Boolean {
         val raw = try {
             obj.get(key)
         } catch (err: Exception) {
             skipped += "$key（读取失败）"
-            return
+            return false
         }
-        try {
+        return try {
             when (raw) {
                 is Boolean -> e.putBoolean(key, raw)
                 is Int -> e.putInt(key, raw)
@@ -342,16 +359,25 @@ object SettingsBackup {
                 is JSONArray -> e.putStringSet(
                     key, buildSet { for (i in 0 until raw.length()) add(raw.optString(i)) }
                 )
-                else -> skipped += "$key（不支持的类型 ${raw.javaClass.simpleName}）"
+                else -> { skipped += "$key（不支持的类型 ${raw.javaClass.simpleName}）"; return false }
             }
+            true
         } catch (err: Exception) {
             skipped += "$key（写入失败：${err.message}）"
+            false
         }
     }
 
     /**
      * 导入后的引擎同步 —— 不做这一步会出现"文件里是新值、但 native 还在按旧值发声"。
      * 只调用服务侧现成的 public setter，不碰内部字段，避免把刚修好的状态机又搞乱。
+     *
+     * 【V9.4 · 维护清单】此方法是"硬编码白名单"，与 FLOAT_KEYS 同源的脆弱点：
+     * 新增「可下发到播放引擎的音频/效果设置」时，必须在此同步补上对应的下发调用，
+     * 否则该设置导入后会出现"界面是新的、声音还是旧的"。
+     * 当前已覆盖：交叉淡化 / DJ 效果 / Master Sync / 压缩器 / 响度 / 交叉馈送 / MSEB / DSP EQ。
+     * 更彻底的修复是让 MusicService 暴露一个 reloadSettingsFromPrefs()，由它统一从 prefs 重读
+     * 全部引擎参数，本方法直接调用即可，新增设置只需在 reload 里登记一次（TODO）。
      */
     fun applyToEngine(context: Context): List<String> {
         val applied = mutableListOf<String>()

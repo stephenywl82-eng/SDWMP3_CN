@@ -42,9 +42,12 @@ import android.content.Context
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Tune
 import com.sdw.music.player.R
 import com.sdw.music.player.ui.components.ExpressiveSwitch
 import com.sdw.music.player.ui.components.SDWDivider
+import com.sdw.music.player.ui.components.SDWTopBar
+import com.sdw.music.player.ui.components.SDWAlertDialog
 import com.sdw.music.player.ui.components.glassSurface
 import kotlinx.coroutines.delay
 import java.util.Timer
@@ -605,12 +608,21 @@ fun MsebScreen(
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            // [2026-10-29 · M3 Expressive] 换成全站唯一的 SDWTopBar。
+            // 以前 MSEB 是全工程唯一自己手写原生 TopAppBar 的页面：返回键是裸 IconButton
+            // （没有容器，和其它页的 tonal 键不是一套）、tint 手写 onSurface、标题没走
+            // pageTitleStyle()，所以进这个页标题字号和返回键长得跟别处都不一样。
+            // navigationIcon 仍显式传下拉箭头 —— 这个页是从底部 sheet 展开上来的，
+            // 下拉语义比返回箭头更准（SDWTopBar 的默认返回键是 AutoMirrored 箭头）。
+            SDWTopBar(
                 title = { Text(stringResource(R.string.title_mseb)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.Default.KeyboardArrowDown, stringResource(R.string.action_back),
-                            tint = MaterialTheme.colorScheme.onSurface)
+                    FilledTonalIconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(
+                            Icons.Default.KeyboardArrowDown,
+                            stringResource(R.string.action_back),
+                            tint = MaterialTheme.colorScheme.onSurface
+                        )
                     }
                 },
                 actions = {
@@ -701,27 +713,48 @@ fun MsebScreen(
             }
 
             // ── A/B Bypass Toggle ──
-            // [V8.115] 统一玻璃语言：模块卡从纯色 Card 换成 glassSurface，
-            // 启用态借 selected 的 accent 洗底来表达（同主界面「正在播放行」）。
-            Column(
+            // 【M3 Expressive · Phase 5】MSEB 总闸做成 Hero 主卡：开 → primaryContainer 实心高亮，
+            // 关 → 中性 surfaceContainerHigh。它下面所有模块卡都是"子"，靠明度和圆角分出层级。
+            Surface(
+                shape = RoundedCornerShape(32.dp),
+                color = if (enabled) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceContainerHigh,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .glassSurface(shape = SDWShapes.Row, selected = enabled, fillBoost = 0f)
+                    .padding(horizontal = 12.dp, vertical = 6.dp)
             ) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                        .padding(horizontal = 18.dp, vertical = 16.dp),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
+                    // 图标坐在同色系更深一点的徽标里，总闸一眼可辨
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = (if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
+                                 else MaterialTheme.colorScheme.onSurface).copy(alpha = 0.14f),
+                        modifier = Modifier.size(44.dp)
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                Icons.Default.Tune,
+                                null,
+                                tint = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
+                                       else MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(14.dp))
                     Column(modifier = Modifier.weight(1f)) {
                         Text(
                             if (enabled) stringResource(R.string.mseb_enabled_b) else stringResource(R.string.mseb_bitperfect),
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            color = if (enabled) MaterialTheme.colorScheme.primary
-                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
+                                    else MaterialTheme.colorScheme.onSurface
                         )
                         // 【V8.184】已命名就只显示这个名字（播放页胶囊同步用它），未命名才退回特征描述。
                         // 特征串太啰嗦（"Loose bass · Thick · Warm · …"），一行根本放不下；
@@ -729,7 +762,8 @@ fun MsebScreen(
                         Text(
                             if (savedName.isNotEmpty()) savedName else MsebCalculator.describe(params),
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = (if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
+                                     else MaterialTheme.colorScheme.onSurface).copy(alpha = 0.78f),
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -737,13 +771,15 @@ fun MsebScreen(
                             Text(
                                 stringResource(R.string.mseb_name_tap_hint),
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                                color = (if (enabled) MaterialTheme.colorScheme.onPrimaryContainer
+                                         else MaterialTheme.colorScheme.primary).copy(alpha = 0.85f),
                                 modifier = Modifier
                                     .padding(top = 2.dp)
                                     .clickable { showNameDialog = true }
                             )
                         }
                     }
+                    Spacer(Modifier.width(12.dp))
                     ExpressiveSwitch(checked = enabled, onCheckedChange = { toggleEnabled(it) })
                 }
             }
@@ -754,7 +790,7 @@ fun MsebScreen(
                 subtitle = dtsSubtitle(),
                 checked = enabled && dtsOn,
                 onCheckedChange = { toggleDts(it) },
-                accent = MaterialTheme.colorScheme.primary,
+                accent = MaterialTheme.colorScheme.primary, tone = MsebTone.Primary,
                 dimmed = !enabled,   // 主开关关闭时整体接管、置灰并旁路
                 dimmedNote = stringResource(R.string.mseb_master_bypassed)
             ) {
@@ -800,7 +836,7 @@ fun MsebScreen(
                 subtitle = hrtfProbeSubtitle(),
                 checked = enabled && hrtfProbeOn,
                 onCheckedChange = { toggleHrtfProbe(it) },
-                accent = MaterialTheme.colorScheme.tertiary,
+                accent = MaterialTheme.colorScheme.tertiary, tone = MsebTone.Tertiary,
                 dimmed = !enabled,
                 dimmedNote = stringResource(R.string.mseb_master_bypassed)
             ) {
@@ -847,7 +883,7 @@ fun MsebScreen(
                 subtitle = stringResource(R.string.mseb_hrtf_spatial_desc),
                 checked = enabled && hrtfSpatialOn,
                 onCheckedChange = { toggleHrtfSpatial(it) },
-                accent = MaterialTheme.colorScheme.tertiary,
+                accent = MaterialTheme.colorScheme.tertiary, tone = MsebTone.Tertiary,
                 dimmed = !enabled,
                 dimmedNote = stringResource(R.string.mseb_master_bypassed)
             ) {
@@ -911,7 +947,12 @@ fun MsebScreen(
                     }
                     // ── 【距离 / 近场线索】声场距离滑块：近场增强 + 距离衰减 ──
                     SDWDivider(modifier = Modifier.padding(vertical = 2.dp))
-                    Column(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .glassSurface(shape = RoundedCornerShape(20.dp), fillBoost = 0f)
+                            .padding(horizontal = 14.dp, vertical = 10.dp)
+                    ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             verticalAlignment = Alignment.CenterVertically,
@@ -1052,7 +1093,7 @@ fun MsebScreen(
                 MsebSlider(stringResource(R.string.mseb_slider_basstexture), stringResource(R.string.mseb_end_loose), stringResource(R.string.mseb_end_tight), stringResource(R.string.mseb_slider_basstexture_desc), params.bassTexture) { update(params.copy(bassTexture = it)) }
                 MsebSlider(stringResource(R.string.mseb_slider_sibilance), stringResource(R.string.mseb_end_smooth), stringResource(R.string.mseb_end_bright), stringResource(R.string.mseb_slider_sibilance_desc), params.sibilance) { update(params.copy(sibilance = it)) }
 
-                Divider(modifier = Modifier.padding(vertical = 4.dp))
+                Spacer(Modifier.height(8.dp))
 
                 MsebSlider(stringResource(R.string.mseb_slider_sibilance_lf), stringResource(R.string.mseb_end_soft), stringResource(R.string.mseb_end_crisp), stringResource(R.string.mseb_slider_sibilance_lf_desc), params.sibilanceLf) { update(params.copy(sibilanceLf = it)) }
                 MsebSlider(stringResource(R.string.mseb_slider_sibilance_hf), stringResource(R.string.mseb_end_soft), stringResource(R.string.mseb_end_crisp), stringResource(R.string.mseb_slider_sibilance_hf_desc), params.sibilanceHf) { update(params.copy(sibilanceHf = it)) }
@@ -1061,7 +1102,7 @@ fun MsebScreen(
 
                 MsebSlider(stringResource(R.string.mseb_slider_transient), stringResource(R.string.mseb_end_soft), stringResource(R.string.mseb_end_fast), stringResource(R.string.mseb_slider_transient_desc), params.impulseResponse) { update(params.copy(impulseResponse = it)) }
 
-                Divider(modifier = Modifier.padding(vertical = 4.dp))
+                Spacer(Modifier.height(8.dp))
 
                 MsebSlider(stringResource(R.string.mseb_slider_soundstage), stringResource(R.string.mseb_end_narrow), stringResource(R.string.mseb_end_wide), stringResource(R.string.mseb_slider_soundstage_desc), params.soundstage) { update(params.copy(soundstage = it)) }
                 MsebSlider(stringResource(R.string.mseb_slider_imaging), stringResource(R.string.mseb_end_diffuse), stringResource(R.string.mseb_end_focused), stringResource(R.string.mseb_slider_imaging_desc), params.imaging) { update(params.copy(imaging = it)) }
@@ -1073,7 +1114,7 @@ fun MsebScreen(
                 subtitle = stringResource(R.string.mseb_compressor_desc),
                 checked = compEnabled,
                 onCheckedChange = { toggleCompressor(it) },
-                accent = MaterialTheme.colorScheme.tertiary
+                accent = MaterialTheme.colorScheme.tertiary, tone = MsebTone.Tertiary
             ) {
                 val compAlpha = if (compEnabled) 1f else 0.45f
                 Column(modifier = Modifier.alpha(compAlpha)) {
@@ -1111,7 +1152,7 @@ fun MsebScreen(
                 subtitle = stringResource(R.string.mseb_space_reverb_desc),
                 checked = srEnabled,
                 onCheckedChange = { srEnabled = it; MusicService.instance?.setSpaceReverbEnabled(it); dumpDspState(context, dtsOn, srEnabled, deEnabled, mblEnabled, compEnabled, loudEnabled, xfEnabled, srWet, deDepth, autoEqMix, xfAmount) },
-                accent = MaterialTheme.colorScheme.secondary,
+                accent = MaterialTheme.colorScheme.secondary, tone = MsebTone.Secondary,
                 dimmed = dacPath,
                 dimmedNote = stringResource(R.string.mseb_unavailable)
             ) {
@@ -1140,7 +1181,7 @@ fun MsebScreen(
                 subtitle = stringResource(R.string.mseb_dynamic_eq_desc),
                 checked = deEnabled,
                 onCheckedChange = { deEnabled = it; MusicService.instance?.setDynamicEqEnabled(it); dumpDspState(context, dtsOn, srEnabled, deEnabled, mblEnabled, compEnabled, loudEnabled, xfEnabled, srWet, deDepth, autoEqMix, xfAmount) },
-                accent = MaterialTheme.colorScheme.secondary,
+                accent = MaterialTheme.colorScheme.secondary, tone = MsebTone.Secondary,
                 dimmed = dacPath,
                 dimmedNote = stringResource(R.string.mseb_unavailable)
             ) {
@@ -1163,7 +1204,7 @@ fun MsebScreen(
                 subtitle = stringResource(R.string.mseb_autoeq_mix_desc),
                 checked = autoEqMix > 0.99f,
                 onCheckedChange = { autoEqMix = if (it) 1f else 0.5f; MusicService.instance?.setAutoEqMix(autoEqMix) },
-                accent = MaterialTheme.colorScheme.tertiary,
+                accent = MaterialTheme.colorScheme.tertiary, tone = MsebTone.Tertiary,
                 dimmed = false,   // 【V9.01】USB DAC 引擎已支持 AutoEQ（setAutoEq10Band + g_autoEqEnabled），解除 DAC 模式锁定
                 dimmedNote = stringResource(R.string.mseb_unavailable)
             ) {
@@ -1183,7 +1224,7 @@ fun MsebScreen(
                 subtitle = stringResource(R.string.mseb_mb_limiter_desc),
                 checked = mblEnabled,
                 onCheckedChange = { mblEnabled = it; MusicService.instance?.setMultiBandLimiterEnabled(it); dumpDspState(context, dtsOn, srEnabled, deEnabled, mblEnabled, compEnabled, loudEnabled, xfEnabled, srWet, deDepth, autoEqMix, xfAmount) },
-                accent = MaterialTheme.colorScheme.error,
+                accent = MaterialTheme.colorScheme.error, tone = MsebTone.Error,
                 dimmed = dacPath,
                 dimmedNote = stringResource(R.string.mseb_unavailable)
             ) {}
@@ -1198,7 +1239,7 @@ fun MsebScreen(
                     MusicService.instance?.applyLoudness(on, loudIntensity)
                     writeDebouncer.post { loudPrefs.edit().putBoolean("enabled", on).apply() }
                 },
-                accent = MaterialTheme.colorScheme.tertiary
+                accent = MaterialTheme.colorScheme.tertiary, tone = MsebTone.Tertiary
             ) {
                 Column(modifier = Modifier.alpha(if (loudEnabled) 1f else 0.45f)) {
                     MsebSlider(
@@ -1223,7 +1264,7 @@ fun MsebScreen(
                     MusicService.instance?.applyCrossfeed(if (on) xfAmount else 0f)
                     writeDebouncer.post { xfPrefs.edit().putBoolean("enabled", on).apply() }
                 },
-                accent = MaterialTheme.colorScheme.secondary,
+                accent = MaterialTheme.colorScheme.secondary, tone = MsebTone.Secondary,
                 dimmed = dacPath,
                 dimmedNote = stringResource(R.string.mseb_unavailable)
             ) {
@@ -1243,7 +1284,7 @@ fun MsebScreen(
             // ── Reset ──
             if (!params.isFlat) {
                 Spacer(modifier = Modifier.height(4.dp))
-                OutlinedButton(
+                FilledTonalButton(
                     onClick = { savedName = ""; update(MsebParams()) },
                     modifier = Modifier.align(Alignment.CenterHorizontally)
                 ) {
@@ -1266,17 +1307,28 @@ fun MsebScreen(
     if (showNameDialog) {
         // 草稿直接以现有名字起底：改名时看得到旧名字，未命名时是空串
         var draft by remember { mutableStateOf(savedName) }
-        AlertDialog(
+        // [P2 · M3 Expressive] 全站弹窗统一到 SDWAlertDialog（玻璃容器 + Panel 圆角）
+        SDWAlertDialog(
             onDismissRequest = { showNameDialog = false },
             title = { Text(stringResource(R.string.mseb_name_title)) },
             text = {
                 Column {
-                    OutlinedTextField(
+                    // [P2] 描边式 → 容器式（半透明玻璃），与主界面搜索框统一
+                    TextField(
                         value = draft,
                         onValueChange = { draft = it },
                         label = { Text(stringResource(R.string.mseb_preset_name)) },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = TextFieldDefaults.colors(
+                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            cursorColor = MaterialTheme.colorScheme.primary,
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
                     )
                     Spacer(Modifier.height(8.dp))
                     Text(
@@ -1307,17 +1359,26 @@ fun MsebScreen(
         var nameText by remember { mutableStateOf(savedName) }
         var saveError by remember { mutableStateOf<String?>(null) }
         val limitMsg = stringResource(R.string.mseb_preset_limit)
-        AlertDialog(
+        SDWAlertDialog(
             onDismissRequest = { showSaveDialog = false },
             title = { Text(stringResource(R.string.mseb_save_preset)) },
             text = {
                 Column {
-                    OutlinedTextField(
+                    TextField(
                         value = nameText,
                         onValueChange = { nameText = it; saveError = null },
                         label = { Text(stringResource(R.string.mseb_preset_name)) },
                         singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = TextFieldDefaults.colors(
+                            focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                            cursorColor = MaterialTheme.colorScheme.primary,
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
+                        )
                     )
                     if (saveError != null) {
                         Spacer(Modifier.height(8.dp))
@@ -1443,6 +1504,34 @@ private fun DtsLinkRow(bluetooth: Boolean, codec: String, modifier: Modifier = M
 }
 
 // ── 通用 DSP 模块卡（开关 + 可选参数区）──
+//
+// 【M3 Expressive · Phase 5】与设置页同一套「父子 + 有颜色」：
+//   父 = 模块卡本体（开 → 该模块的容器色实心块，关 → 中性 surfaceContainerHigh）
+//   子 = 内嵌的参数小卡（滑块各占一块，色调取自父模块，层级靠圆角与明度区分）
+
+private enum class MsebTone { Primary, Secondary, Tertiary, Error }
+
+/** 子层（滑块小卡）通过它拿到所属模块的色调，无需每个调用点显式传参。 */
+private val LocalMsebTone = staticCompositionLocalOf { MsebTone.Primary }
+
+@Composable
+private fun msebContainerColor(tone: MsebTone): Color = when (tone) {
+    MsebTone.Primary -> MaterialTheme.colorScheme.primaryContainer
+    MsebTone.Secondary -> MaterialTheme.colorScheme.secondaryContainer
+    MsebTone.Tertiary -> MaterialTheme.colorScheme.tertiaryContainer
+    MsebTone.Error -> MaterialTheme.colorScheme.errorContainer
+}
+
+@Composable
+private fun msebOnColor(tone: MsebTone): Color = when (tone) {
+    MsebTone.Primary -> MaterialTheme.colorScheme.onPrimaryContainer
+    MsebTone.Secondary -> MaterialTheme.colorScheme.onSecondaryContainer
+    MsebTone.Tertiary -> MaterialTheme.colorScheme.onTertiaryContainer
+    MsebTone.Error -> MaterialTheme.colorScheme.onErrorContainer
+}
+
+// [P1 · M3 Expressive] 滑块子卡改走 glassSurface 后，原先为它算实色底的
+// msebSubCardColor()/blendMseb() 已无调用点，一并删掉，不留只写不读的死代码。
 
 @Composable
 private fun DspModuleCard(
@@ -1453,17 +1542,23 @@ private fun DspModuleCard(
     accent: Color,
     dimmed: Boolean = false,
     dimmedNote: String? = null,
+    /** 【Phase 5】模块配色：决定父卡实心色与子卡色调。 */
+    tone: MsebTone = MsebTone.Primary,
     content: @Composable ColumnScope.() -> Unit = {}
 ) {
-    Column(
+    val active = checked && !dimmed
+    val container = if (active) msebContainerColor(tone) else MaterialTheme.colorScheme.surfaceContainerHigh
+    val onContainer = if (active) msebOnColor(tone) else MaterialTheme.colorScheme.onSurface
+    val subAlpha = if (active) 1f else 0.5f
+    Surface(
+        shape = RoundedCornerShape(28.dp),
+        color = container,
         modifier = Modifier
             .fillMaxWidth()
-            .glassSurface(shape = SDWShapes.Row, selected = checked && !dimmed, fillBoost = 0f)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
     ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+            modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             Row(
@@ -1478,16 +1573,17 @@ private fun DspModuleCard(
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
                         title,
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                        color = if (checked && !dimmed) accent else MaterialTheme.colorScheme.onSurfaceVariant
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = if (active) onContainer else onContainer.copy(alpha = 0.85f)
                     )
                     Text(
                         subtitle,
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = onContainer.copy(alpha = 0.75f)
                     )
                 }
+                Spacer(Modifier.width(12.dp))
                 ExpressiveSwitch(
                     checked = checked,
                     enabled = !dimmed,
@@ -1501,7 +1597,17 @@ private fun DspModuleCard(
                     color = MaterialTheme.colorScheme.error
                 )
             }
-            content()
+            // 子层：参数区整体是"嵌在父卡里"的一块，关闭的模块降透明度但仍可见可操作
+            CompositionLocalProvider(LocalMsebTone provides tone) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .alpha(subAlpha)
+                        .padding(top = 4.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    content = content
+                )
+            }
         }
     }
 }
@@ -1724,17 +1830,41 @@ private fun MsebSlider(
     enabled: Boolean = true,
     onValueChange: (Float) -> Unit
 ) {
-    Column {
+    // 【Phase 5】每个滑块自成一个子卡（父模块色调的弱化版），不再是一堆浮在卡上的裸滑块。
+    // [P1 · M3 Expressive] 子卡原来是「实色 background + 手写 18dp 圆角」，跟同页其它卡片
+    // （DspModuleCard / 预设行走的 glassSurface）是两套语言：别的卡是玻璃，滑块是死板色块。
+    // 改成全站唯一的 glassSurface：
+    //   · 圆角 18dp 这一「第五种圆角」收敛到 SDWShapes.Row(20)；
+    //   · accentEdge=true 让顶边高光取模块色调，子卡一眼看得出属于哪个模块；
+    //   · 轨道未激活段也带上模块色调，整条滑块跟子卡同色系。
+    val toneColor = msebOnColor(LocalMsebTone.current)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .glassSurface(shape = SDWShapes.Row, accent = toneColor, accentEdge = true)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(label, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
             Text(
                 String.format("%+.${decimals}f", value),
                 style = MaterialTheme.typography.labelLarge,
-                color = if (value == 0f) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.primary
+                color = if (value == 0f) MaterialTheme.colorScheme.onSurfaceVariant else toneColor
             )
         }
         Text(description, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        Slider(value = value, onValueChange = onValueChange, valueRange = valueRange, enabled = enabled, modifier = Modifier.fillMaxWidth())
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            enabled = enabled,
+            modifier = Modifier.fillMaxWidth(),
+            colors = SliderDefaults.colors(
+                activeTrackColor = toneColor,
+                inactiveTrackColor = toneColor.copy(alpha = 0.22f),
+                thumbColor = toneColor
+            )
+        )
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
             Text(leftLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(rightLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

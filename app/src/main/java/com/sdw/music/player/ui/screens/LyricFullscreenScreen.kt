@@ -1,4 +1,6 @@
 package com.sdw.music.player.ui.screens
+
+import androidx.compose.material3.MaterialTheme
 import com.sdw.music.player.core.audio.metadata.LyricsEmbedder
 
 import android.content.Intent
@@ -19,6 +21,9 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+// [2026-10-29] 顶栏歌名跑马灯（不再第一屏就被截断成"风..."）
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -33,6 +38,8 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -61,6 +68,7 @@ import com.sdw.music.player.ui.components.SheetImmersiveStatusBar
 import com.sdw.music.player.ui.components.ImmersiveSystemBars
 import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.ui.components.glassSurface
+import com.sdw.music.player.ui.components.SDWAlertDialog
 import com.sdw.music.player.Song
 import com.sdw.music.player.SongRepository
 import com.sdw.music.player.lyric.LyricRepository
@@ -70,7 +78,11 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(
+    ExperimentalMaterial3Api::class,
+    ExperimentalMaterial3ExpressiveApi::class,
+    ExperimentalFoundationApi::class
+)
 @Composable
 fun LyricFullscreenScreen(
     songId: Long,
@@ -111,6 +123,10 @@ fun LyricFullscreenScreen(
     var selectedSource by remember { mutableStateOf("auto") }
     var showSourceSheet by remember { mutableStateOf(false) }
     val availableSources = remember { LyricRepository.getInstance(context).getAvailableProviderOptions() }
+
+    // [2026-10-29] 顶栏瘦身：Auto/Manual 切换、逐词开关、编辑入口全部收进这块设置面板，
+    // 顶栏只留「返回 + 歌名/歌手 + 设置键」，不再挤成一行互相压。
+    var showLyricSettings by remember { mutableStateOf(false) }
 
     // 编辑状态
     var showEditDialog by remember { mutableStateOf(false) }
@@ -177,8 +193,10 @@ fun LyricFullscreenScreen(
     // 完全不跟手（普通 BackHandler 不参与 seek）。交给 NavHost 内建预测返回，
     // 返回行为仍由 NavHost 的 popBackStack 完成；顶部返回按钮走 onNavigateBack 不受影响。
 
-    // 全屏歌词固定深色配色：歌词文字/开关都是白色设计，浅色模式下必须锁深色
-    MaterialTheme(colorScheme = SDWDarkColorScheme) {
+    // 全屏歌词固定深色：歌词文字/开关都是白色设计，浅色模式下必须锁深色
+    // [M3 Expressive · 自动主题色] 同 PlayerScreen：锁深不锁色，配色跟随全局动态取色
+    val lyricScheme = sdwForcedDarkScheme()
+    MaterialTheme(colorScheme = lyricScheme) {
     // === 【V8.428】3 秒无操作后隐藏顶部操作栏 + 底部切歌按钮，只留歌词 ===
     // 设置开关（sdw_music_prefs，与设置页"歌词显示"分组同一份）：
     // 关掉后控件常驻，行为回到 V8.427 及之前。
@@ -272,8 +290,7 @@ fun LyricFullscreenScreen(
                 )
         )
         when {
-            isLoading -> CircularProgressIndicator(
-                color = accent,
+            isLoading -> LoadingIndicator(
                 modifier = Modifier.align(Alignment.Center)
             )
             lyricLines.isEmpty() -> Column(
@@ -342,16 +359,27 @@ fun LyricFullscreenScreen(
                 .padding(horizontal = 4.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(onClick = onNavigateBack) {
-                Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+            // [M3 Expressive · 沉浸栏统一] 玻璃操作栏上返回键也走带容器色块键（白字），与同栏编辑按钮一致；
+            // 原 onBackground 在模糊封面浅色主题下会看不清。
+            FilledTonalIconButton(
+                onClick = onNavigateBack,
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = Color.White.copy(alpha = 0.22f),
+                    contentColor = Color.White
+                ),
+                modifier = Modifier.size(30.dp)
+            ) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), modifier = Modifier.size(16.dp))
             }
 
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(8.dp))
 
             // 歌曲信息卡（封面 + 歌名 + 歌手），内嵌在操作栏中避免与返回键重叠
+            // [2026-10-29] 右侧的开关全部挪进设置面板后，这一块吃掉整行的剩余宽度，
+            // 歌名/歌手用跑马灯平滑滚动，不再被挤成"风..."这种省略号。
             Row(
                 modifier = Modifier
-                    .weight(1f)  // [V8.121] 歌曲信息块吸收剩余宽度并优先收缩，避免歌名长时挤扁右侧开关
+                    .weight(1f)
                     .padding(horizontal = 10.dp, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -389,7 +417,12 @@ fun LyricFullscreenScreen(
                         ),
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        // [2026-10-29] 跑马灯：过长的歌名平滑滚动，不再用省略号截断。
+                        softWrap = false,
+                        modifier = Modifier.basicMarquee(
+                            iterations = Int.MAX_VALUE,
+                            velocity = 28.dp
+                        )
                     )
                     if (songArtist.isNotBlank()) {
                         Text(
@@ -403,70 +436,29 @@ fun LyricFullscreenScreen(
                                 )
                             ),
                             maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+                            softWrap = false,
+                            modifier = Modifier.basicMarquee(
+                                iterations = Int.MAX_VALUE,
+                                velocity = 24.dp
+                            )
                         )
                     }
                 }
             }
 
-            Spacer(Modifier.width(4.dp))
+            Spacer(Modifier.width(8.dp))
 
-            // 手动/自动切换
-            Text(
-                text = stringResource(R.string.lyrics_auto),
-                color = if (!isManualSource) accent else Color.White.copy(alpha = 0.55f),
-                fontSize = 10.sp,
-                fontWeight = if (!isManualSource) FontWeight.SemiBold else FontWeight.Normal
-            )
-            ExpressiveSwitch(
-                checked = isManualSource,
-                onCheckedChange = { isManualSource = it },
-                trackOnColor = accent,
-                iconOnColor = accent,
-                modifier = Modifier.padding(horizontal = 2.dp)
-            )
-            Text(
-                text = stringResource(R.string.lyrics_manual),
-                color = if (isManualSource) accent else Color.White.copy(alpha = 0.55f),
-                fontSize = 10.sp,
-                fontWeight = if (isManualSource) FontWeight.SemiBold else FontWeight.Normal
-            )
-
-            Spacer(Modifier.width(4.dp))
-
-            // [V8.121] 逐字显示开关
-            Text(
-                text = stringResource(R.string.lyrics_word_by_word),
-                color = if (wordByWord) accent else Color.White.copy(alpha = 0.55f),
-                fontSize = 10.sp,
-                fontWeight = if (wordByWord) FontWeight.SemiBold else FontWeight.Normal
-            )
-            ExpressiveSwitch(
-                checked = wordByWord,
-                onCheckedChange = {
-                    wordByWord = it
-                    lyricPrefs.edit().putBoolean("lyric_word_by_word", it).apply()
-                },
-                trackOnColor = accent,
-                iconOnColor = accent,
-                modifier = Modifier.padding(horizontal = 2.dp)
-            )
-
-            Spacer(Modifier.width(4.dp))
-
-            // 编辑按钮
+            // [2026-10-29] 设置键：Auto/Manual、逐词、编辑全部收纳进这块玻璃分段面板。
+            // 顶栏因此只剩三件套（返回 / 歌名 / 设置），不再有开关和图标互相压。
             FilledTonalIconButton(
-                onClick = {
-                    editingLrcText = rawLrcContent
-                    showEditDialog = true
-                },
+                onClick = { showLyricSettings = true },
                 colors = IconButtonDefaults.filledTonalIconButtonColors(
                     containerColor = Color.White.copy(alpha = 0.22f),
                     contentColor = Color.White
                 ),
                 modifier = Modifier.size(30.dp)
             ) {
-                Icon(Icons.Default.Edit, stringResource(R.string.title_edit_lyrics), modifier = Modifier.size(16.dp))
+                Icon(Icons.Default.MoreVert, stringResource(R.string.title_edit_lyrics), modifier = Modifier.size(16.dp))
             }
         }
 
@@ -510,18 +502,18 @@ fun LyricFullscreenScreen(
         FilledTonalIconButton(
             onClick = onPrevious,
             colors = IconButtonDefaults.filledTonalIconButtonColors(
-                containerColor = Color.White.copy(alpha = 0.14f),
+                containerColor = Color.White.copy(alpha = 0.18f),
                 contentColor = Color.White
             ),
             modifier = Modifier
                 .navigationBarsPadding()
                 .padding(start = 24.dp, bottom = 20.dp)
-                .size(38.dp)
+                .size(44.dp)
         ) {
             Icon(
                 Icons.Default.SkipPrevious, stringResource(R.string.player_previous),
-                modifier = Modifier.size(20.dp),
-                tint = Color.White.copy(alpha = 0.85f)
+                modifier = Modifier.size(22.dp),
+                tint = Color.White
             )
         }
         }   // 【V8.428】AnimatedVisibility（左）结束
@@ -535,28 +527,139 @@ fun LyricFullscreenScreen(
         FilledTonalIconButton(
             onClick = onNext,
             colors = IconButtonDefaults.filledTonalIconButtonColors(
-                containerColor = Color.White.copy(alpha = 0.14f),
+                containerColor = Color.White.copy(alpha = 0.18f),
                 contentColor = Color.White
             ),
             modifier = Modifier
                 .navigationBarsPadding()
                 .padding(end = 24.dp, bottom = 20.dp)
-                .size(38.dp)
+                .size(44.dp)
         ) {
             Icon(
                 Icons.Default.SkipNext, stringResource(R.string.player_next),
-                modifier = Modifier.size(20.dp),
-                tint = Color.White.copy(alpha = 0.85f)
+                modifier = Modifier.size(22.dp),
+                tint = Color.White
             )
         }
         }   // 【V8.428】AnimatedVisibility（右）结束
+    }
+
+    // === [2026-10-29] 歌词偏好设置面板 ===
+    // 顶栏清出来的开关全部放这儿：Auto/Manual 走玻璃分段控件（Segmented Button），
+    // 逐词走整行开关，编辑歌词是独立一行入口。底部滑出，不挡歌词主体。
+    if (showLyricSettings) {
+        ModalBottomSheet(
+            onDismissRequest = { showLyricSettings = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+            contentColor = MaterialTheme.colorScheme.onSurface,
+            scrimColor = Color.Black.copy(alpha = 0.55f),
+            shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
+            dragHandle = null
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(horizontal = 20.dp)
+                    .padding(top = 10.dp, bottom = 24.dp)
+            ) {
+                Text(
+                    text = stringResource(R.string.title_fullscreen_lyrics),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(Modifier.height(14.dp))
+                // ① Auto / Manual 玻璃分段控件
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .glassSurface(shape = RoundedCornerShape(50), accent = accent)
+                        .padding(4.dp)
+                ) {
+                    LyricSegmentChip(
+                        text = stringResource(R.string.lyrics_auto),
+                        selected = !isManualSource,
+                        accent = accent,
+                        modifier = Modifier.weight(1f)
+                    ) { isManualSource = false }
+                    LyricSegmentChip(
+                        text = stringResource(R.string.lyrics_manual),
+                        selected = isManualSource,
+                        accent = accent,
+                        modifier = Modifier.weight(1f)
+                    ) { isManualSource = true }
+                }
+                Spacer(Modifier.height(12.dp))
+                // ② 逐词显示
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 18.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = stringResource(R.string.lyrics_word_by_word),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            modifier = Modifier.weight(1f)
+                        )
+                        ExpressiveSwitch(
+                            checked = wordByWord,
+                            onCheckedChange = {
+                                wordByWord = it
+                                lyricPrefs.edit().putBoolean("lyric_word_by_word", it).apply()
+                            },
+                            trackOnColor = accent,
+                            iconOnColor = accent
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                // ③ 编辑歌词
+                Surface(
+                    shape = RoundedCornerShape(24.dp),
+                    color = MaterialTheme.colorScheme.surfaceContainerLow,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                editingLrcText = rawLrcContent
+                                showLyricSettings = false
+                                showEditDialog = true
+                            }
+                            .padding(horizontal = 18.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.Edit,
+                            null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(Modifier.width(14.dp))
+                        Text(
+                            text = stringResource(R.string.title_edit_lyrics),
+                            style = MaterialTheme.typography.bodyLarge,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                    }
+                }
+            }
+        }
     }
 
     // === Lyrics来源选择 BottomSheet ===
     if (showSourceSheet) {
         ModalBottomSheet(
             onDismissRequest = { showSourceSheet = false },
-            containerColor = Color(0xFF141414),
+            containerColor = MaterialTheme.colorScheme.surfaceVariant,
             tonalElevation = 0.dp,
             // [V8.117] 去掉顶部拖拽小短条；下滑关闭不受影响。
             dragHandle = null
@@ -603,11 +706,11 @@ fun LyricFullscreenScreen(
 
     // === 编辑Lyrics对话框 ===
     if (showEditDialog) {
-        AlertDialog(
+        // [P2 · M3 Expressive] 全站弹窗统一到 SDWAlertDialog（玻璃容器 + Panel 圆角）
+        SDWAlertDialog(
             onDismissRequest = {
                 if (!isSaving) showEditDialog = false
             },
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(stringResource(R.string.title_edit_lyrics), color = MaterialTheme.colorScheme.onBackground)
@@ -627,24 +730,25 @@ fun LyricFullscreenScreen(
                         fontSize = 12.sp,
                         modifier = Modifier.padding(bottom = 12.dp)
                     )
-                    OutlinedTextField(
+                    // [P2] 描边式 → 容器式（半透明玻璃），与主界面搜索框统一
+                    TextField(
                         value = editingLrcText,
                         onValueChange = { editingLrcText = it },
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(min = 280.dp, max = 420.dp),
                         textStyle = TextStyle(
-                            color = MaterialTheme.colorScheme.onBackground,
+                            color = MaterialTheme.colorScheme.onSurface,
                             fontSize = 14.sp,
                             fontFamily = FontFamily.Monospace,
                             lineHeight = 22.sp
                         ),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor = accent,
-                            unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                        colors = TextFieldDefaults.colors(
                             cursorColor = accent,
-                            focusedContainerColor = MaterialTheme.colorScheme.background,
-                            unfocusedContainerColor = MaterialTheme.colorScheme.background
+                            focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                            focusedIndicatorColor = Color.Transparent,
+                            unfocusedIndicatorColor = Color.Transparent
                         ),
                         maxLines = 20
                     )
@@ -721,10 +825,8 @@ fun LyricFullscreenScreen(
                     colors = ButtonDefaults.buttonColors(containerColor = accent)
                 ) {
                     if (isSaving) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(16.dp),
-                            color = Color.White,
-                            strokeWidth = 2.dp
+                        LoadingIndicator(
+                            modifier = Modifier.size(16.dp)
                         )
                         Spacer(Modifier.width(8.dp))
                     }
@@ -744,7 +846,7 @@ fun LyricFullscreenScreen(
                     TextButton(
                         onClick = { showEditDialog = false },
                         enabled = !isSaving,
-                        colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))
+                        colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
                     ) {
                         Text(stringResource(R.string.action_cancel))
                     }
@@ -755,9 +857,8 @@ fun LyricFullscreenScreen(
 
     // === [V8.117] 清除歌词二次确认 ===
     if (showClearConfirm) {
-        AlertDialog(
+        SDWAlertDialog(
             onDismissRequest = { if (!isSaving) showClearConfirm = false },
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
             title = {
                 Text(
                     stringResource(R.string.lyrics_clear_confirm_title),
@@ -804,7 +905,7 @@ fun LyricFullscreenScreen(
             dismissButton = {
                 TextButton(
                     onClick = { showClearConfirm = false },
-                    colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
                 ) {
                     Text(stringResource(R.string.action_cancel))
                 }
@@ -814,9 +915,8 @@ fun LyricFullscreenScreen(
 
     // === [V8.129] 内嵌写入需要「所有文件访问」授权 ===
     if (showStorageGuide) {
-        AlertDialog(
+        SDWAlertDialog(
             onDismissRequest = { showStorageGuide = false },
-            containerColor = MaterialTheme.colorScheme.surfaceVariant,
             title = { Text(stringResource(R.string.lyric_write_tag_need_permission), color = MaterialTheme.colorScheme.onBackground) },
             text = {
                 Text(
@@ -845,13 +945,53 @@ fun LyricFullscreenScreen(
             dismissButton = {
                 TextButton(
                     onClick = { showStorageGuide = false },
-                    colors = ButtonDefaults.textButtonColors(contentColor = Color.White.copy(alpha = 0.85f))
+                    colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.onSurface)
                 ) {
                     Text(stringResource(R.string.action_cancel))
                 }
             }
         )
     }
+    }
+}
+
+/**
+ * [2026-10-29] 歌词设置面板里的玻璃分段按钮（Segmented Button）单格。
+ * 选中态用封面主色 accent 做实心胶囊，未选中完全透明 —— 与整页的玻璃质感一致，
+ * 也不会像常驻顶栏时那样和歌名抢宽度。
+ */
+@Composable
+private fun LyricSegmentChip(
+    text: String,
+    selected: Boolean,
+    accent: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val bg by androidx.compose.animation.animateColorAsState(
+        targetValue = if (selected) accent else Color.Transparent,
+        animationSpec = tween(180),
+        label = "lyricSegBg"
+    )
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(50))
+            .background(bg)
+            .clickable { onClick() }
+            .padding(vertical = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            color = if (selected) {
+                if (accent.luminance() > 0.5f) Color(0xFF101114) else Color.White
+            } else {
+                Color.White.copy(alpha = 0.78f)
+            },
+            maxLines = 1
+        )
     }
 }
 

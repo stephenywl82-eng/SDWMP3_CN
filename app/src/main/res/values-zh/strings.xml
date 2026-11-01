@@ -179,6 +179,10 @@
 <string name="songlist_song_count">%1$d 首歌曲</string>
 <string name="songlist_close_details">关闭详情</string>
 <string name="songlist_close_search">关闭搜索</string>
+<string name="search_history_title">搜索历史</string>
+<string name="search_history_clear_all">清除全部</string>
+<string name="search_history_empty">暂无搜索历史</string>
+<string name="search_history_remove">删除此条</string>
 <string name="songlist_tile_all">全部</string>
 <string name="songlist_tile_hires">高解析</string>
 <string name="songlist_tile_recent">最近</string>
@@ -262,7 +266,7 @@
 <string name="eq_activated">已激活</string>
 <string name="eq_autoeq_desc">基于AutoEq项目 · 10段参数均衡 · 哈曼目标曲线</string>
 <string name="eq_android_unavailable">安卓均衡器不可用。\n切换音频输出到AAudio/OpenSL ES/AudioTrack。</string>
-<string name="brand_name">Moto Music Premium</string>
+<string name="brand_name">Moto Music</string>
 <string name="brand_audio">Moto音频</string>
 <string name="search_songs">搜索歌曲...</string>
 <string name="diag_usb_direct_write">USB 直写不经过 AudioFlinger</string>
@@ -510,6 +514,9 @@
     <string name="songlist_sort_added">最近添加</string>
     <string name="songlist_sort_filename">文件名</string>
     <string name="songlist_sort_duration">时长</string>
+    <string name="songlist_sort_format">格式</string>
+    <string name="song_delete_confirm_title">删除歌曲</string>
+    <string name="song_delete_confirm_message">「%1$s」将从设备中移除，此操作不可恢复。</string>
     <string name="settings_dac_soft_start">防爆音淡入（软启动）</string>
     <string name="settings_dac_soft_start_on">ON - 150ms 淡入遮住 DAC 时钟重新锁定的爆音</string>
     <string name="settings_dac_soft_start_off">OFF - 保持 bit-perfect 原样输出</string>
@@ -830,13 +837,13 @@
     <string name="vu_style_mixer">调音台</string>
     <string name="settings_section_display">显示与界面</string>
     <string name="settings_section_library">媒体库</string>
-    <string name="settings_section_playback">播放与过渡</string>
+    <string name="settings_section_playback">转场与 DJ</string>
     <string name="settings_grp_select">选曲与频段</string>
     <string name="settings_collapse_all">全部收起</string>
     <string name="settings_expand_all">全部展开</string>
     <string name="settings_grp_template">过渡模板与效果强度</string>
     <string name="settings_grp_stem">分轨与高级 DJ 参数</string>
-    <string name="settings_grp_basic">基础播放</string>
+    <string name="settings_grp_basic">基础</string>
     <string name="settings_collapse">收起</string>
     <string name="settings_expand">展开</string>
     <string name="settings_section_system">系统与调试</string>

@@ -90,7 +90,7 @@
         <service
             android:name="com.sdw.music.player.core.audio.playback.MusicService"
             android:exported="true"
-            android:foregroundServiceType="mediaPlayback|connectedDevice">
+            android:foregroundServiceType="mediaPlayback">
             <intent-filter>
                 <action android:name="androidx.media3.session.MediaLibraryService" />
                 <action android:name="androidx.media3.session.MediaSessionService" />

@@ -52,13 +52,13 @@ fun ArtistSongScreen(
                 // V8.118 同专辑页：标题统一在 hero。
                 title = { },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
                 actions = {
-                    IconButton(onClick = onPlayAll) {
-                        Icon(Icons.AutoMirrored.Filled.PlaylistPlay, stringResource(R.string.action_play_all), tint = MaterialTheme.colorScheme.primary)
+                    FilledTonalIconButton(onClick = onPlayAll, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.PlaylistPlay, stringResource(R.string.action_play_all))
                     }
                 },
             )

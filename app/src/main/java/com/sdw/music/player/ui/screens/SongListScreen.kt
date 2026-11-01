@@ -1538,12 +1538,18 @@ private fun RowScope.SmartTile(
     //   未选中 = surfaceContainerHigh 中性块（比页面底色高一级，看得见但不出戏）
     val tileShape = if (pill) SDWShapes.Pill else SDWShapes.Row
     val tileFill = when {
-        isSelected -> accent.copy(alpha = if (onWallpaper) 0.85f else 0.5f)
+        // [M3 Expressive] 选中态用 **primaryContainer 角色**做填充（不是把 primary 降透明度
+        // 压在底色上）—— 后者在浅色模式只剩约 3.9:1，11sp 的计数小字不达标。
+        // primaryContainer / onPrimaryContainer 是 M3 认定的容器对，
+        // 由 sdwAccentTuned 按 tone 基准生成，稳定 6:1 以上，且随系统调色板不漂移。
+        isSelected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = if (onWallpaper) 0.92f else 0.85f)
         onWallpaper -> (if (wpLight) Color.White else Color.Black).copy(alpha = 0.24f)
         else -> MaterialTheme.colorScheme.surfaceContainerHigh.copy(alpha = 0.94f)
     }
-    val tileBorder = if (isSelected) accent.copy(alpha = 0.95f)
+    val tileBorder = if (isSelected) MaterialTheme.colorScheme.primary.copy(alpha = 0.95f)
                      else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)
+    // 选中态文字统一用 onPrimaryContainer（与 primaryContainer 成对）。
+    val selectedTextColor = MaterialTheme.colorScheme.onPrimaryContainer
 
     Box(
         modifier = Modifier
@@ -1593,7 +1599,7 @@ private fun RowScope.SmartTile(
                     style = MaterialTheme.typography.labelLarge,
                     fontWeight = if (isSelected) androidx.compose.ui.text.font.FontWeight.ExtraBold
                                  else androidx.compose.ui.text.font.FontWeight.SemiBold,
-                    color = if (isSelected) (if (onWallpaper) accent else MaterialTheme.colorScheme.onSurface) else contentColor,
+                    color = if (isSelected) selectedTextColor else contentColor,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
@@ -1602,7 +1608,7 @@ private fun RowScope.SmartTile(
                     text = count,
                     style = MaterialTheme.typography.labelSmall,
                     fontWeight = androidx.compose.ui.text.font.FontWeight.ExtraBold,
-                    color = if (isSelected) (if (onWallpaper) accent else MaterialTheme.colorScheme.onSurface) else contentColor.copy(alpha = 0.72f),
+                    color = if (isSelected) selectedTextColor else contentColor.copy(alpha = 0.72f),
                     maxLines = 1
                 )
             }

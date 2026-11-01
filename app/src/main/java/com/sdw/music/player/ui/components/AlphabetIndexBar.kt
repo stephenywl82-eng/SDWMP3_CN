@@ -71,7 +71,14 @@ fun AlphabetIndexBar(
                 modifier = Modifier
                     .size(20.dp)
                     .clip(SDWShapes.Badge)
-                    .background(if (isActive) MaterialTheme.colorScheme.primary.copy(alpha = 0.3f) else Color.Transparent)
+                    // [M3 Expressive] 选中态用 primaryContainer / onPrimaryContainer 这对
+                    // 容器角色，而不是"primary 文字压在 primary 底色上"——后者在浅色模式
+                    // 只有约 3.9:1（10sp 小字不达标），且随系统调色板色相漂移。
+                    // 容器角色对由 sdwAccentTuned 按 tone 基准生成，稳定 8:1 以上。
+                    .background(
+                        if (isActive) MaterialTheme.colorScheme.primaryContainer
+                        else Color.Transparent
+                    )
                     .pointerInput(letter) {
                         detectTapGestures { onLetterTapped(letter) }
                     },
@@ -81,7 +88,8 @@ fun AlphabetIndexBar(
                     text = letter,
                     fontSize = 10.sp,
                     fontWeight = if (isActive) FontWeight.Bold else FontWeight.Normal,
-                    color = if (isActive) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                    color = if (isActive) MaterialTheme.colorScheme.onPrimaryContainer
+                    else MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }

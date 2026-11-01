@@ -556,8 +556,12 @@ fun PlayerCoverArt(
     // percent = 5 gives ~11-12dp at the 216-240dp cover sizes we actually render, i.e.
     // the Apple Music / Tidal class of rounding, and it scales with the art size instead
     // of being a fixed dp that looks wrong on both the small and the large layouts.
+    // 【2026-11-01】6% -> 10%：**只影响沉浸模式**（squareCover 只在沉浸模式为 true，
+    // 普通模式走 CircleShape，一行没动）。按设计稿"优雅大圆角约 24~28dp"：
+    // 240dp 封面 10% = 24dp、260dp = 26dp，正落在目标区间。
+    // 仍用 percent 而不是固定 dp —— 共享元素飞行的形状插值才不会在落位时跳变。
     val coverShape: androidx.compose.ui.graphics.Shape =
-        if (squareCover) RoundedCornerShape(percent = 6) else CircleShape
+        if (squareCover) RoundedCornerShape(percent = 10) else CircleShape
     // [V8.52] Marks this art as the target end of the official shared-element flight
     // from the mini player. No-op when not hosted by SharedTransitionLayout.
     val sharedCover = Modifier.sharedCoverArt()

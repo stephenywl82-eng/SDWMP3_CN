@@ -2518,7 +2518,9 @@ private fun PortraitLayout(coverUri: String?,
                     // 普通模式这个框的尺寸 = 封面本体尺寸（maxArt + 36dp），内容居中，
                     // 与改动前**完全一致**（原来 BoxWithConstraints 里直接放的就是它）。
                     Box(
-                        modifier = Modifier.size(maxArt + 36.dp),
+                        // 过渡范围：沉浸模式 64dp（卡片本体边缘淡出 + 模糊层接管，两层各占一半）；
+                        // 普通模式保持原来的 36dp，**一行不变**。
+                        modifier = Modifier.size(maxArt + if (immersive) 64.dp else 36.dp),
                         contentAlignment = Alignment.Center
                     ) {
                         // ① 底层：同一张封面的模糊版铺满本框 → 卡片四周一圈柔和光晕
@@ -2569,14 +2571,22 @@ private fun PortraitLayout(coverUri: String?,
                                             //   （早先用 android.graphics.Paint + PorterDuffXfermode 走
                                             //     nativeCanvas，在 Compose 的硬件画布上不生效 ——
                                             //     遮罩整层没起作用，边缘还是硬切。）
+                                            // ★ 四边**径向**渐变（不再是只管上下的竖向渐变）：
+                                            //   中心实、四周逐渐透明 —— 四条边和四个角一起化开，
+                                            //   画面就不会"一看还是一个正方形"。
+                                            //   过渡范围也拉宽了：半径取 0.78×对角线，
+                                            //   边缘中点已经掉到 50% 透明度，角上直接归零。
                                             drawRect(
-                                                brush = Brush.verticalGradient(
-                                                    0f to Color.Transparent,
-                                                    0.11f to Color.White,
-                                                    0.89f to Color.White,
+                                                brush = Brush.radialGradient(
+                                                    0f to Color.White,
+                                                    0.42f to Color.White.copy(alpha = 0.97f),
+                                                    0.62f to Color.White.copy(alpha = 0.72f),
+                                                    0.80f to Color.White.copy(alpha = 0.34f),
                                                     1f to Color.Transparent,
-                                                    startY = 0f,
-                                                    endY = size.height
+                                                    center = Offset(size.width / 2f, size.height / 2f),
+                                                    radius = kotlin.math.hypot(
+                                                        size.width / 2f, size.height / 2f
+                                                    ) * 1.10f
                                                 ),
                                                 blendMode = BlendMode.DstIn
                                             )
@@ -2596,14 +2606,19 @@ private fun PortraitLayout(coverUri: String?,
                                     .drawWithContent {
                                         drawContent()
                                         // 同上：Compose 原生遮罩，中间透明、上下缘不透明。
+                                        // ★ 与卡片遮罩互补：中心透明（清晰卡片透出来），
+                                        //   四周逐渐不透明（模糊层接管边缘）。
                                         drawRect(
-                                            brush = Brush.verticalGradient(
-                                                0f to Color.White,
-                                                0.13f to Color.Transparent,
-                                                0.87f to Color.Transparent,
+                                            brush = Brush.radialGradient(
+                                                0f to Color.Transparent,
+                                                0.42f to Color.Transparent,
+                                                0.62f to Color.White.copy(alpha = 0.28f),
+                                                0.80f to Color.White.copy(alpha = 0.66f),
                                                 1f to Color.White,
-                                                startY = 0f,
-                                                endY = size.height
+                                                center = Offset(size.width / 2f, size.height / 2f),
+                                                radius = kotlin.math.hypot(
+                                                    size.width / 2f, size.height / 2f
+                                                ) * 1.10f
                                             ),
                                             blendMode = BlendMode.DstIn
                                         )
@@ -2922,7 +2937,9 @@ private fun EdgePulseBand(
         if (w <= 50f || h <= 50f) return@Canvas
         val minDim = minOf(w, h)
         val tk = minDim * 0.010f          // 线宽基准（比原 0.014 更细）
-        val inset = minDim * 0.010f
+        // ★【2026-11-01】贴边：原来 inset = 1% 屏宽（约 12px），光带和屏幕边缘之间
+        //   有一道明显空隙。现在 inset = 线宽的一半，描边正好压在屏幕边缘上（0 起）。
+        val inset = tk / 2f
         // 【V8.113+】只保留两条长边、删除两条短边：
         // 竖屏（高≥宽）长边为左右两条竖边；横屏长边为上下两条横边。
         // 软头（Cap.ROUND）让长边两端柔和收尾，不再画圆角整框。

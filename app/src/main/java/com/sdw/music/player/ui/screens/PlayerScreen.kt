@@ -64,6 +64,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.drawWithContent
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import androidx.compose.ui.geometry.Offset
@@ -71,8 +72,10 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asAndroidPath
@@ -2496,27 +2499,29 @@ private fun PortraitLayout(coverUri: String?,
                     // [V8.125] 沉浸模式：封面放大到接近满宽（左右各留约 3%），且不再受
                     // artSize(0.55w) 上限约束；普通模式保持原尺寸与居中留白。
                     val maxArt = if (immersive) {
-                        // ★【2026-11-01】沉浸模式封面再大一点点：0.94 → 0.96，
-                        // 纵向同时多留一点空间给下面的"周围模糊光晕"。
-                        // 普通模式的 0.72 / artSize 逻辑一行没动。
-                        minOf(maxWidth * 0.96f, maxHeight - 32.dp).coerceAtLeast(120.dp)
+                        // ★【2026-11-01】沉浸模式封面**再大 1.2 倍**：
+                        //   先按原规则算基准（宽 0.96w / 高 maxHeight-32dp），再整体乘 1.2。
+                        //   卡片会略微溢出到下面的歌词区 —— 歌名/歌词于是"浮"在封面的
+                        //   模糊过渡带上，和设计稿一致。
+                        //   普通模式的 0.72 / artSize 逻辑一行没动。
+                        (minOf(maxWidth * 0.96f, maxHeight - 32.dp) * 1.2f).coerceAtLeast(120.dp)
                     } else {
                         minOf(maxWidth * 0.72f, maxHeight - 36.dp, artSize).coerceAtLeast(96.dp)
                     }
                     val glowPad = if (immersive) 0.dp else 36.dp
+                    // 沉浸模式用的大图档（260dp）：和卡片本体是**同一张位图**（同一缓存键），
+                    // 模糊层与清晰层因此完全对齐，不会出现"两层图错位"的接缝。
+                    val coverPainter = rememberSharedCoverPainter(coverUri, big = true)
                     // 普通模式这个框的尺寸 = 封面本体尺寸（maxArt + 36dp），内容居中，
                     // 与改动前**完全一致**（原来 BoxWithConstraints 里直接放的就是它）。
                     Box(
                         modifier = Modifier.size(maxArt + 36.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        // ★【2026-11-01 沉浸模式·周围模糊】
-                        // 卡片四周糊一圈同一张封面（模糊版铺满本框），清晰卡片就"浮"在
-                        // 自己的模糊光晕上，边缘不是硬切 —— 对应设计稿"中心清晰、四周模糊"。
-                        // 只在沉浸模式加这一层；背景那层模糊封面**完全不动**（用户明确要求）。
+                        // ① 底层：同一张封面的模糊版铺满本框 → 卡片四周一圈柔和光晕
                         if (immersive) {
                             Image(
-                                painter = rememberSharedCoverPainter(coverUri, big = false),
+                                painter = coverPainter,
                                 contentDescription = null,
                                 modifier = Modifier
                                     .fillMaxSize()
@@ -2545,8 +2550,64 @@ private fun PortraitLayout(coverUri: String?,
                             fadeOverlayStartMs = fadeOverlayStartMs,
                             squareCover = immersive,
                             noRotation = immersive,
-                            modifier = Modifier.size(maxArt + glowPad)
+                            // ★ 卡片**上下缘淡出**：边缘 alpha 归零后由下面的模糊层接管，
+                            //   两层之间才是连续的过渡，而不是一条硬直线。
+                            //   （普通模式不挂这个遮罩，封面依旧完整方方正正。）
+                            modifier = Modifier
+                                .size(maxArt + glowPad)
+                                .then(
+                                    if (immersive) Modifier
+                                        .graphicsLayer {
+                                            compositingStrategy = CompositingStrategy.Offscreen
+                                        }
+                                        .drawWithContent {
+                                            drawContent()
+                                            // ★ 用 **Compose 原生** 的 drawRect + BlendMode.DstIn 做遮罩。
+                                            //   （早先用 android.graphics.Paint + PorterDuffXfermode 走
+                                            //     nativeCanvas，在 Compose 的硬件画布上不生效 ——
+                                            //     遮罩整层没起作用，边缘还是硬切。）
+                                            drawRect(
+                                                brush = Brush.verticalGradient(
+                                                    0f to Color.Transparent,
+                                                    0.11f to Color.White,
+                                                    0.89f to Color.White,
+                                                    1f to Color.Transparent,
+                                                    startY = 0f,
+                                                    endY = size.height
+                                                ),
+                                                blendMode = BlendMode.DstIn
+                                            )
+                                        }
+                                    else Modifier
+                                )
                         )
+                        // ③ 上下模糊过渡：卡片**上缘和下缘**用模糊版盖住，
+                        //   再按竖向渐变把模糊量淡出 —— 上下不是硬切，而是溶进背景。
+                        if (immersive) {
+                            Image(
+                                painter = coverPainter,
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .blur(16.dp)
+                                    .drawWithContent {
+                                        drawContent()
+                                        // 同上：Compose 原生遮罩，中间透明、上下缘不透明。
+                                        drawRect(
+                                            brush = Brush.verticalGradient(
+                                                0f to Color.White,
+                                                0.13f to Color.Transparent,
+                                                0.87f to Color.Transparent,
+                                                1f to Color.White,
+                                                startY = 0f,
+                                                endY = size.height
+                                            ),
+                                            blendMode = BlendMode.DstIn
+                                        )
+                                    },
+                                contentScale = ContentScale.Crop
+                            )
+                        }
                     }
                 }
         }

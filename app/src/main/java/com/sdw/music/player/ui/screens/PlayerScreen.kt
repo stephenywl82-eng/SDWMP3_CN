@@ -1088,16 +1088,6 @@ fun PlayerScreen(
                 InkBloomOverlay(accentColor = accentColor)
             }
         }
-        // Edge light — 只保留方案 B（脉冲光带），随机呼吸效果
-        // 【V8.492 转场减负】转场（飞入/飞出）期间跳过：脉冲光带用 infiniteRepeatable 每帧重组，
-        // 飞行那几百 ms 里和共享元素抢主线程/合成带宽 → 掉帧。封面在飞，省掉这圈光带无感。
-        if (!isFoldable && edgeLightEnabled && sharedCoverState?.isAnimating != true) {
-            EdgePulseBand(
-                coverColors = vuCoverColors,
-                accentColor = accentColor
-            )
-        }
-
         // 【V8.182 过渡可视化】DJ 交叉淡化进行中：进度 + A/B 两轨电平，过渡结束自动收起
         if (crossfadeInfo.state == com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.ACTIVE &&
             crossfadeInfo.xfProgress > 0f
@@ -1419,6 +1409,19 @@ fun PlayerScreen(
                 songSpec = songSpec,
                 bottomAutoHide = bottomAutoHide,
                 onLyricoExternalEditReturned = onLyricoExternalEditReturned
+            )
+        }
+
+        // Edge light — 只保留方案 B（脉冲光带），随机呼吸效果
+        // 【V8.492 转场减负】转场（飞入/飞出）期间跳过：脉冲光带用 infiniteRepeatable 每帧重组，
+        // 飞行那几百 ms 里和共享元素抢主线程/合成带宽 → 掉帧。封面在飞，省掉这圈光带无感。
+        // ★【2026-11-01】从背景层挪到**内容层之上**（同一个 Box 里后画 = 画在上面）：
+        //   沉浸模式封面放大 1.2 倍后会横向溢出到屏幕两侧，原来画在背景层的光带
+        //   就被封面整个盖住，左右两条边缘灯全没了。现在它压在内容之上，永远可见。
+        if (!isFoldable && edgeLightEnabled && sharedCoverState?.isAnimating != true) {
+            EdgePulseBand(
+                coverColors = vuCoverColors,
+                accentColor = accentColor
             )
         }
 

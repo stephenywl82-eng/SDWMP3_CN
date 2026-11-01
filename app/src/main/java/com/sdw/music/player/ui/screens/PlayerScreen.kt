@@ -120,6 +120,7 @@ import com.sdw.music.player.ui.components.VuMeter
 import com.sdw.music.player.ui.components.VuMeterStyle
 import com.sdw.music.player.ui.components.PlayerUiTicker   // 【V8.428】玩家页统一 ticker
 import com.sdw.music.player.ui.components.AddToPlaylistSheet
+import com.sdw.music.player.ui.components.rememberSharedCoverPainter
 import com.sdw.music.player.ui.components.SheetImmersiveStatusBar
 import com.sdw.music.player.ui.components.ImmersiveSystemBars
 import com.sdw.music.player.Song
@@ -2495,34 +2496,58 @@ private fun PortraitLayout(coverUri: String?,
                     // [V8.125] 沉浸模式：封面放大到接近满宽（左右各留约 3%），且不再受
                     // artSize(0.55w) 上限约束；普通模式保持原尺寸与居中留白。
                     val maxArt = if (immersive) {
-                        minOf(maxWidth * 0.94f, maxHeight - 24.dp).coerceAtLeast(120.dp)
+                        // ★【2026-11-01】沉浸模式封面再大一点点：0.94 → 0.96，
+                        // 纵向同时多留一点空间给下面的"周围模糊光晕"。
+                        // 普通模式的 0.72 / artSize 逻辑一行没动。
+                        minOf(maxWidth * 0.96f, maxHeight - 32.dp).coerceAtLeast(120.dp)
                     } else {
                         minOf(maxWidth * 0.72f, maxHeight - 36.dp, artSize).coerceAtLeast(96.dp)
                     }
                     val glowPad = if (immersive) 0.dp else 36.dp
-                    PlayerCoverArt(
-                        artUri = coverUri,
-                        songTitle = state.currentSongTitle,
-                        songArtist = state.currentSongArtist,
-                        accentColor = accentColor,
-                        isPlaying = isPlaying,
-                        rotation = rotation,
-                        sizeDp = maxArt,
-                        glowSizeDp = maxArt + glowPad,
-                        onClick = { onNavigateToAlbum(state.currentSongAlbum) },
-                        onDoubleTap = { if (isPlaying) onPause() else onPlay() },
-                        onSwipePrevious = onPrevious,
-                        onSwipeNext = onNext,
-                        fadeOverlayUri = fadeOverlayUri,
-                        instantCoverSwitch = instantCoverSwitch,
-                        fadeOverlayDurationMs = fadeOverlayDurationMs,
-                        fadeOverlayProgress = fadeOverlayProgress,
-                        fadeOverlayActive = fadeOverlayActive,
-                        fadeOverlayStartMs = fadeOverlayStartMs,
-                        squareCover = immersive,
-                        noRotation = immersive,
-                        modifier = Modifier.size(maxArt + glowPad)
-                    )
+                    // 普通模式这个框的尺寸 = 封面本体尺寸（maxArt + 36dp），内容居中，
+                    // 与改动前**完全一致**（原来 BoxWithConstraints 里直接放的就是它）。
+                    Box(
+                        modifier = Modifier.size(maxArt + 36.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        // ★【2026-11-01 沉浸模式·周围模糊】
+                        // 卡片四周糊一圈同一张封面（模糊版铺满本框），清晰卡片就"浮"在
+                        // 自己的模糊光晕上，边缘不是硬切 —— 对应设计稿"中心清晰、四周模糊"。
+                        // 只在沉浸模式加这一层；背景那层模糊封面**完全不动**（用户明确要求）。
+                        if (immersive) {
+                            Image(
+                                painter = rememberSharedCoverPainter(coverUri, big = false),
+                                contentDescription = null,
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .blur(22.dp),
+                                contentScale = ContentScale.Crop
+                            )
+                        }
+                        PlayerCoverArt(
+                            artUri = coverUri,
+                            songTitle = state.currentSongTitle,
+                            songArtist = state.currentSongArtist,
+                            accentColor = accentColor,
+                            isPlaying = isPlaying,
+                            rotation = rotation,
+                            sizeDp = maxArt,
+                            glowSizeDp = maxArt + glowPad,
+                            onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+                            onDoubleTap = { if (isPlaying) onPause() else onPlay() },
+                            onSwipePrevious = onPrevious,
+                            onSwipeNext = onNext,
+                            fadeOverlayUri = fadeOverlayUri,
+                            instantCoverSwitch = instantCoverSwitch,
+                            fadeOverlayDurationMs = fadeOverlayDurationMs,
+                            fadeOverlayProgress = fadeOverlayProgress,
+                            fadeOverlayActive = fadeOverlayActive,
+                            fadeOverlayStartMs = fadeOverlayStartMs,
+                            squareCover = immersive,
+                            noRotation = immersive,
+                            modifier = Modifier.size(maxArt + glowPad)
+                        )
+                    }
                 }
         }
 

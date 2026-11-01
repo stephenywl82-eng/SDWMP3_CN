@@ -422,8 +422,8 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                                 val healthColor = when (health) {
                                     stringResource(R.string.diag_health_stable) -> AccentGreen
                                     stringResource(R.string.diag_health_fluctuating) -> MaterialTheme.colorScheme.tertiary
-                                    stringResource(R.string.diag_health_critical) -> AccentRed
-                                    stringResource(R.string.diag_health_wedge) -> AccentRed
+                                    stringResource(R.string.diag_health_critical) -> MaterialTheme.colorScheme.error
+                                    stringResource(R.string.diag_health_wedge) -> MaterialTheme.colorScheme.error
                                     else -> MaterialTheme.colorScheme.onSurfaceVariant
                                 }
                                 CapRow(stringResource(R.string.diag_transport_status), health)
@@ -589,7 +589,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                             focusLog.take(8).forEach { event ->
                                 val (icon, color) = when (event.event) {
                                     "GAIN" -> Icons.Default.CheckCircle to AccentGreen
-                                    "LOSS" -> Icons.Default.Cancel to AccentRed
+                                    "LOSS" -> Icons.Default.Cancel to MaterialTheme.colorScheme.error
                                     "LOSS_TRANSIENT" -> Icons.Default.Warning to MaterialTheme.colorScheme.tertiary
                                     "LOSS_TRANSIENT_CAN_DUCK" -> Icons.Default.Remove to MaterialTheme.colorScheme.primary
                                     else -> Icons.Default.Info to MaterialTheme.colorScheme.onSurfaceVariant
@@ -619,7 +619,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     label = stringResource(R.string.diag_native_lib),
                     value = if (libLoaded) "Loaded ✓" else "Not Loaded",
                     sublabel = "OboeDirectPlayer JNI · liboboeaudio",
-                    accent = if (libLoaded) AccentGreen else AccentRed
+                    accent = if (libLoaded) AccentGreen else MaterialTheme.colorScheme.error
                 )
             }
 
@@ -801,8 +801,8 @@ private fun fmtDb(v: Float): String =
 private fun dbFrac(v: Float): Float =
     if (v <= 1e-6f) 0f else ((dbfsOf(v) + 60f) / 60f).coerceIn(0f, 1f)
 
-private fun levelColor(v: Float, mid: Color): Color = when {
-    v >= 0.999f -> AccentRed      // 已经到顶，随时会削波
+private fun levelColor(v: Float, mid: Color, err: Color): Color = when {
+    v >= 0.999f -> err           // 已经到顶，随时会削波
     v >= 0.70f -> mid
     else -> AccentGreen
 }
@@ -881,7 +881,7 @@ private fun SignalPathCard(oboe: OboeDirectPlayer?, levelBuf: FloatArray, levelT
                 Icon(
                     if (clipCount > 0) Icons.Default.Warning else Icons.Default.CheckCircle,
                     null,
-                    tint = if (clipCount > 0) AccentRed else AccentGreen,
+                    tint = if (clipCount > 0) MaterialTheme.colorScheme.error else AccentGreen,
                     modifier = Modifier.size(18.dp)
                 )
                 Spacer(Modifier.width(8.dp))
@@ -889,7 +889,7 @@ private fun SignalPathCard(oboe: OboeDirectPlayer?, levelBuf: FloatArray, levelT
                 Spacer(Modifier.weight(1f))
                 Text(
                     "$clipCount",
-                    color = if (clipCount > 0) AccentRed else MaterialTheme.colorScheme.onSurfaceVariant,
+                    color = if (clipCount > 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 14.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace
                 )
                 if (clipCount > 0) {
@@ -1121,7 +1121,7 @@ private fun LevelBarLine(label: String, channel: Int, levelBuf: FloatArray, leve
             val w = size.width * dbFrac(rms)
             if (w > 1f) {
                 drawRoundRect(
-                    color = levelColor(rms, midColor), topLeft = Offset.Zero,
+                    color = levelColor(rms, midColor, errorColor), topLeft = Offset.Zero,
                     size = Size(w, size.height), cornerRadius = CornerRadius(3f, 3f)
                 )
             }
@@ -1158,7 +1158,7 @@ private fun LevelReadout(levelBuf: FloatArray) {
             R.string.diag_level_readout,
             fmtDb(rmsL), fmtDb(peakL), fmtDb(rmsR), fmtDb(peakR)
         ),
-        color = if (over) AccentRed else MaterialTheme.colorScheme.onSurfaceVariant,
+        color = if (over) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
         fontSize = 11.sp, fontFamily = FontFamily.Monospace, lineHeight = 15.sp
     )
 }
@@ -1178,6 +1178,7 @@ private fun LevelHistory(levelBuf: FloatArray, levelTick: MutableLongState) {
     }
     @Suppress("UNUSED_VARIABLE") val frame = levelTick.longValue
     val midColor = MaterialTheme.colorScheme.tertiary
+    val errorColor = MaterialTheme.colorScheme.error
     Canvas(modifier = Modifier.fillMaxWidth().height(44.dp)) {
         val bw = size.width / hist.size
         val refY = size.height * (1f - dbFrac(0.5f))       // -6 dBFS 参考线
@@ -1191,7 +1192,7 @@ private fun LevelHistory(levelBuf: FloatArray, levelTick: MutableLongState) {
             if (v <= 1e-6f) continue
             val hgt = (size.height * dbFrac(v)).coerceAtLeast(1f)
             drawRoundRect(
-                color = levelColor(v, midColor),
+                color = levelColor(v, midColor, errorColor),
                 topLeft = Offset(i * bw, size.height - hgt),
                 size = Size((bw * 0.7f).coerceAtLeast(1f), hgt),
                 cornerRadius = CornerRadius(1f, 1f)

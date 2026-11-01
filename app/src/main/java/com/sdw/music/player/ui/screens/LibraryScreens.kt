@@ -29,14 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.sdw.music.player.ui.theme.SDWShapes
 import coil.compose.AsyncImage
-import com.sdw.music.player.ui.theme.DarkBg
-import com.sdw.music.player.ui.theme.DarkSurface
-import com.sdw.music.player.ui.theme.DarkCard
-import com.sdw.music.player.ui.theme.TextPrimary
-import com.sdw.music.player.ui.theme.TextSecondary
 import androidx.compose.foundation.combinedClickable
-import com.sdw.music.player.ui.theme.AccentRed
-import com.sdw.music.player.ui.theme.TextTertiary
 import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.ui.components.rememberSharedCoverPainter
 import com.sdw.music.player.SongRepository
@@ -430,7 +423,7 @@ fun PlaylistListScreen(
                         showDeleteConfirm = null
                     }
                 ) {
-                    Text(stringResource(R.string.action_delete), color = AccentRed)
+                    Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {

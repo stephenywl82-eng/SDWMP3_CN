@@ -19,9 +19,6 @@ import androidx.compose.ui.unit.dp
 import com.sdw.music.player.ui.theme.SDWShapes
 import androidx.compose.ui.unit.sp
 
-import com.sdw.music.player.ui.theme.TextSecondary
-import com.sdw.music.player.ui.theme.TextPrimary
-
 /**
  * A-Z vertical index bar pinned to the right edge.
  * Supports both tap (per-letter) and vertical drag (scrub to jump).

@@ -341,7 +341,7 @@ fun AudioQualityScreen(
                         onClick = { uiState = uiState.copy(filterLabel = if (uiState.filterLabel == "Poor") null else "Poor") },
                         label = { Text(stringResource(R.string.quality_poor, poor), fontSize = 12.sp) },
                         modifier = Modifier.height(28.dp),
-                        colors = FilterChipDefaults.filterChipColors(selectedContainerColor = AccentRed.copy(alpha = 0.2f))
+                        colors = FilterChipDefaults.filterChipColors(selectedContainerColor = MaterialTheme.colorScheme.error.copy(alpha = 0.2f))
                     )
                 }
                 Spacer(Modifier.height(4.dp))
@@ -413,7 +413,7 @@ private fun ReportCard(
         report.qualityScore >= 82f -> MaterialTheme.colorScheme.primary
         report.qualityScore >= 65f -> MaterialTheme.colorScheme.primary
         report.qualityScore >= 40f -> MaterialTheme.colorScheme.secondary
-        else -> AccentRed
+        else -> MaterialTheme.colorScheme.error
     }
 
     // [V8.115] 统一玻璃语言：报告卡从纯色 Card 换成 glassSurface（与主界面面板同形）。
@@ -485,7 +485,7 @@ private fun ReportCard(
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     for (tag in report.suspectedSourceVariant) {
                         val c = when {
-                            tag.contains("fake", ignoreCase = true) || tag.contains("lossy", ignoreCase = true) -> AccentRed
+                            tag.contains("fake", ignoreCase = true) || tag.contains("lossy", ignoreCase = true) -> MaterialTheme.colorScheme.error
                             tag.contains("Lossless", ignoreCase = true) || tag.contains("Hi-Res", ignoreCase = true) -> MaterialTheme.colorScheme.primary
                             tag.contains("Full", ignoreCase = true) || tag.contains("High Cutoff", ignoreCase = true) -> MaterialTheme.colorScheme.primary
                             tag.contains("Compressed", ignoreCase = true) || tag.contains("Clip", ignoreCase = true) || tag.contains("MP3", ignoreCase = true) -> MaterialTheme.colorScheme.secondary

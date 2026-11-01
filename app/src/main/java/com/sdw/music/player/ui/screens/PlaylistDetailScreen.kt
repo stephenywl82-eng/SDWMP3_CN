@@ -203,7 +203,7 @@ showDeleteConfirm?.let { songId ->
                         showDeleteConfirm = null
                     }
                 ) {
-                    Text(stringResource(R.string.action_remove), color = AccentRed)
+                    Text(stringResource(R.string.action_remove), color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
@@ -245,9 +245,9 @@ showDeleteConfirm?.let { songId ->
                             },
                             modifier = Modifier.fillMaxWidth()
                         ) {
-                            Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = AccentRed, modifier = Modifier.size(20.dp))
+                            Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
                             Spacer(Modifier.width(8.dp))
-                            Text(stringResource(R.string.action_remove), color = AccentRed)
+                            Text(stringResource(R.string.action_remove), color = MaterialTheme.colorScheme.error)
                         }
                     }
                 },

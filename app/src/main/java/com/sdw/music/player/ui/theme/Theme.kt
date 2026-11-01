@@ -20,7 +20,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -33,49 +32,6 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import com.sdw.music.player.ThemeManager
 import com.sdw.music.player.WallpaperManager
-
-val SDWDarkColorScheme = darkColorScheme(
-    primary = AccentBlue,
-    onPrimary = DarkBg,
-    primaryContainer = Color(0xFF1A3A5C),
-    onPrimaryContainer = Color(0xFFB3D4FC),
-    secondary = Gold80,
-    onSecondary = DarkBg,
-    secondaryContainer = Gold60,
-    tertiary = Color(0xFF5C8ABF),
-    background = DarkBg,
-    onBackground = TextPrimary,
-    surface = DarkCard,
-    onSurface = TextPrimary,
-    surfaceVariant = DarkSurface,
-    onSurfaceVariant = TextSecondary,
-    outline = DarkSurface,
-    outlineVariant = TextTertiary,
-    error = AccentRed,
-    onError = TextPrimary,
-)
-
-private val SDWLightColorScheme = lightColorScheme(
-    primary = Color(0xFF1E6FBA),          // 深蓝主色（浅色背景下保证对比度）
-    onPrimary = Color(0xFFFFFFFF),
-    primaryContainer = Color(0xFFD1E4FF),
-    onPrimaryContainer = Color(0xFF0A3D6B),
-    secondary = Color(0xFF8C6D1F),        // 深金
-    onSecondary = Color(0xFFFFFFFF),
-    secondaryContainer = Color(0xFFF3E2B8),
-    onSecondaryContainer = Color(0xFF3E2E00),
-    tertiary = Color(0xFF3A6EA5),
-    background = Color(0xFFF5F5F7),       // 浅灰白背景
-    onBackground = Color(0xFF1A1A1C),
-    surface = Color(0xFFFFFFFF),          // 白色卡片
-    onSurface = Color(0xFF1A1A1C),
-    surfaceVariant = Color(0xFFE8E8EA),   // 浅灰表面
-    onSurfaceVariant = Color(0xFF5A5A5E),
-    outline = Color(0xFFD0D0D4),
-    outlineVariant = Color(0xFFB8B8BC),
-    error = Color(0xFFD32F2F),
-    onError = Color(0xFFFFFFFF),
-)
 
 /**
  * [M3 Expressive · 自动主题色] 主题色**不再写死**，全部从系统取「用户当前真正选中的主题色」。
@@ -90,6 +46,9 @@ private val SDWLightColorScheme = lightColorScheme(
  * 调色板作为 RRO 覆盖给 `com.android.systemui`（`cmd overlay list` 里 android 框架目标下没有任何
  * accent/palette 覆盖），framework 的 `android.R.color.system_accent1_*` 仍是基线默认值，
  * 于是 Compose 的动态取色在这里恒等于官方基线紫（实测渲染出的强调色 #CDBDFF ≈ Purple80）。
+ *
+ * ★ 早先这里还有两套写死的蓝/金品牌配色（`SDWDarkColorScheme` / `SDWLightColorScheme`），
+ *   已被本函数的动态取色整体取代，故删除——留着会让人误以为配色是固定值。
  */
 private fun sdwSystemAccentSeed(context: android.content.Context): Int? {
     // 1) 用户在系统里选的调色板
@@ -150,33 +109,71 @@ private fun sdwAccentTuned(base: ColorScheme, light: Boolean): ColorScheme {
             )
         )
 
-    return if (light) base.copy(
-        primary = tone(baseHue, baseSat, 0.42f),
-        onPrimary = Color.White,
-        primaryContainer = tone(baseHue, baseSat * 0.75f, 0.90f),
-        onPrimaryContainer = tone(baseHue, baseSat, 0.22f),
-        secondary = tone(baseHue + 26f, baseSat * 0.55f, 0.44f),
-        onSecondary = Color.White,
-        secondaryContainer = tone(baseHue + 26f, baseSat * 0.45f, 0.90f),
-        onSecondaryContainer = tone(baseHue + 26f, baseSat * 0.80f, 0.20f),
-        tertiary = tone(baseHue + 58f, baseSat * 0.62f, 0.40f),
-        onTertiary = Color.White,
-        tertiaryContainer = tone(baseHue + 58f, baseSat * 0.50f, 0.90f),
-        onTertiaryContainer = tone(baseHue + 58f, baseSat * 0.80f, 0.20f)
-    ) else base.copy(
-        primary = tone(baseHue, baseSat, 0.80f),
-        onPrimary = tone(baseHue, baseSat, 0.18f),
-        primaryContainer = tone(baseHue, baseSat * 0.85f, 0.28f),
-        onPrimaryContainer = tone(baseHue, baseSat * 0.55f, 0.88f),
-        secondary = tone(baseHue + 26f, baseSat * 0.55f, 0.80f),
-        onSecondary = tone(baseHue + 26f, baseSat * 0.70f, 0.18f),
-        secondaryContainer = tone(baseHue + 26f, baseSat * 0.50f, 0.28f),
-        onSecondaryContainer = tone(baseHue + 26f, baseSat * 0.40f, 0.88f),
-        tertiary = tone(baseHue + 58f, baseSat * 0.62f, 0.82f),
-        onTertiary = tone(baseHue + 58f, baseSat * 0.80f, 0.20f),
-        tertiaryContainer = tone(baseHue + 58f, baseSat * 0.55f, 0.30f),
-        onTertiaryContainer = tone(baseHue + 58f, baseSat * 0.50f, 0.90f)
-    )
+    /**
+     * 强调色上的前景色：**不写死白**。
+     *
+     * 写死 `onPrimary = White` 时，seed 的色相决定成败——偏黄/偏绿的 seed 在浅色分支
+     * 落在 0.42 亮度上，相对亮度约 0.38，白字对比度只有 **2.4:1**（正文完全不可读）；
+     * 偏蓝的 seed 却有 10.3:1。同一个 App 会因系统调色板不同而忽好忽坏。
+     *
+     * 做法：三个候选里择优——同色相的深色版本（比纯黑更"同族"，M3 tone 语义也更贴）
+     * 达标就用它；否则在黑 / 白里挑对比更高的那个。
+     * 实测（HSL L=0.42 / sat=0.6 的主色）：
+     *   黄  白 2.43 / 黑 8.63 -> 黑      蓝  白 10.31 / 黑 2.04 -> 白
+     *   绿  白 3.00 / 黑 6.99 -> 黑      品红 白 5.72 / 黑 3.67 -> 白
+     * 全部 >= 4.5:1；深色分支（主色 L=0.80）恒取同色相深色版本，实测 7.5~8.2:1。
+     */
+    fun onFor(bg: Color, dark: Color): Color {
+        val lBg = ColorUtils.calculateLuminance(bg.toArgb())
+        val lDark = ColorUtils.calculateLuminance(dark.toArgb())
+        val cDark = (lBg + 0.05f) / (lDark + 0.05f)
+        val cBlack = (lBg + 0.05f) / 0.05f
+        val cWhite = 1.05f / (lBg + 0.05f)
+        return when {
+            cDark >= 4.5f -> dark
+            cDark >= maxOf(cBlack, cWhite) -> dark
+            cBlack >= cWhite -> Color.Black
+            else -> Color.White
+        }
+    }
+
+    return if (light) {
+        val p = tone(baseHue, baseSat, 0.42f)
+        val s = tone(baseHue + 26f, baseSat * 0.55f, 0.44f)
+        val t = tone(baseHue + 58f, baseSat * 0.62f, 0.40f)
+        base.copy(
+            primary = p,
+            onPrimary = onFor(p, tone(baseHue, baseSat, 0.22f)),
+            primaryContainer = tone(baseHue, baseSat * 0.75f, 0.90f),
+            onPrimaryContainer = tone(baseHue, baseSat, 0.22f),
+            secondary = s,
+            onSecondary = onFor(s, tone(baseHue + 26f, baseSat * 0.80f, 0.20f)),
+            secondaryContainer = tone(baseHue + 26f, baseSat * 0.45f, 0.90f),
+            onSecondaryContainer = tone(baseHue + 26f, baseSat * 0.80f, 0.20f),
+            tertiary = t,
+            onTertiary = onFor(t, tone(baseHue + 58f, baseSat * 0.80f, 0.20f)),
+            tertiaryContainer = tone(baseHue + 58f, baseSat * 0.50f, 0.90f),
+            onTertiaryContainer = tone(baseHue + 58f, baseSat * 0.80f, 0.20f)
+        )
+    } else {
+        val p = tone(baseHue, baseSat, 0.80f)
+        val s = tone(baseHue + 26f, baseSat * 0.55f, 0.80f)
+        val t = tone(baseHue + 58f, baseSat * 0.62f, 0.82f)
+        base.copy(
+            primary = p,
+            onPrimary = onFor(p, tone(baseHue, baseSat, 0.18f)),
+            primaryContainer = tone(baseHue, baseSat * 0.85f, 0.28f),
+            onPrimaryContainer = tone(baseHue, baseSat * 0.55f, 0.88f),
+            secondary = s,
+            onSecondary = onFor(s, tone(baseHue + 26f, baseSat * 0.70f, 0.18f)),
+            secondaryContainer = tone(baseHue + 26f, baseSat * 0.50f, 0.28f),
+            onSecondaryContainer = tone(baseHue + 26f, baseSat * 0.40f, 0.88f),
+            tertiary = t,
+            onTertiary = onFor(t, tone(baseHue + 58f, baseSat * 0.80f, 0.20f)),
+            tertiaryContainer = tone(baseHue + 58f, baseSat * 0.55f, 0.30f),
+            onTertiaryContainer = tone(baseHue + 58f, baseSat * 0.50f, 0.90f)
+        )
+    }
 }
 
 /**
@@ -208,6 +205,8 @@ fun sdwAutoScheme(light: Boolean): ColorScheme {
  * 播放器页 / 歌词全屏页要锁深色，但**不能锁死配色**——原来它们直接
  * `MaterialTheme(colorScheme = SDWDarkColorScheme)` 把 primary 写死成 AccentBlue，
  * 等于绕过全局主题色。改为「同一套自动配色，只是强制取深色分支」。
+ *
+ * （`SDWDarkColorScheme` 本身已随蓝/金品牌配色一并删除，这里保留注释作为改动留痕。）
  */
 @Composable
 fun sdwForcedDarkScheme(): ColorScheme = sdwAutoScheme(light = false)

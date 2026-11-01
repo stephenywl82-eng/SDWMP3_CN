@@ -88,9 +88,17 @@ private fun sdwSystemAccentSeed(context: android.content.Context): Int? {
  * 用系统主题色 seed 重算整套强调色（primary / secondary / tertiary 三组色阶），
  * 铺到底盘配色上。底盘负责 surface* 与 background 层次，seed 只接管"色相"。
  *
- * 官方的 seed → tonal palette（HCT）是 internal API，第三方拿不到，故这里用 HSL 做等价映射：
- * 按 Material 的 tone 语义给深色/浅色各配一组亮度阶梯（dark: 80/18/28/88，light: 42/白/90/22），
- * secondary / tertiary 由 seed 色相 +26° / +58° 派生，饱和度递减，保证同族而不撞色。
+ * 官方的 seed → tonal palette（HCT）是 internal API，第三方拿不到，这里自己做等价映射。
+ *
+ * ★ 关键：**tone 基准用 WCAG 相对亮度，不是 HSL 的 L**。
+ *   两者不是一回事——HSL 的 L 是"最大通道值"，而 M3 的 tone 是感知亮度。
+ *   同一个 L=0.42：蓝色系相对亮度约 0.14（和 M3 tone 40 差不多），
+ *   黄色系却高达 0.376（≈ M3 tone 75）。于是"primary 当文字色用"时，
+ *   黄色系在浅色底上只有 2.5:1、蓝色系有 5.5:1 —— 同一个 App 随系统调色板忽好忽坏。
+ *   改为按相对亮度定标后，所有色相落在同一条感知阶梯上：
+ *   浅色 primary ≈ tone 40、container ≈ tone 90、onContainer ≈ tone 30；
+ *   深色 primary ≈ tone 80、container ≈ tone 30、onContainer ≈ tone 90。
+ *   这样 primary / secondary / tertiary 作为文字色压在 surface 上稳定 ≥4.5:1。
  */
 @Composable
 private fun sdwAccentTuned(base: ColorScheme, light: Boolean): ColorScheme {
@@ -102,26 +110,42 @@ private fun sdwAccentTuned(base: ColorScheme, light: Boolean): ColorScheme {
     val baseHue = hsl[0]
     // 系统给的调色板有时饱和度很低（近灰），抬到 0.30 保证"有色"而不是灰
     val baseSat = hsl[1].coerceAtLeast(0.30f)
-    fun tone(hue: Float, sat: Float, lum: Float): Color =
-        Color(
+
+    fun hueOf(hue: Float) = ((hue % 360f) + 360f) % 360f
+
+    /**
+     * 按 **WCAG 相对亮度**取色：对 HSL 亮度做二分，命中目标相对亮度。
+     * 这才是 M3 tone 的语义，色相无关 —— 黄色和蓝色落在同一条感知阶梯上。
+     */
+    fun toneLum(hue: Float, sat: Float, target: Double): Color {
+        var lo = 0.0
+        var hi = 1.0
+        repeat(20) {
+            val mid = (lo + hi) / 2
+            val c = Color(
+                ColorUtils.HSLToColor(
+                    floatArrayOf(hueOf(hue), sat.coerceIn(0f, 1f), mid.toFloat())
+                )
+            )
+            if (ColorUtils.calculateLuminance(c.toArgb()) > target) hi = mid else lo = mid
+        }
+        return Color(
             ColorUtils.HSLToColor(
-                floatArrayOf(((hue % 360f) + 360f) % 360f, sat.coerceIn(0f, 1f), lum)
+                floatArrayOf(hueOf(hue), sat.coerceIn(0f, 1f), lo.toFloat())
             )
         )
+    }
 
     /**
      * 强调色上的前景色：**不写死白**。
      *
-     * 写死 `onPrimary = White` 时，seed 的色相决定成败——偏黄/偏绿的 seed 在浅色分支
-     * 落在 0.42 亮度上，相对亮度约 0.38，白字对比度只有 **2.4:1**（正文完全不可读）；
-     * 偏蓝的 seed 却有 10.3:1。同一个 App 会因系统调色板不同而忽好忽坏。
+     * 强调色本身的相对亮度已经按 tone 基准定标（浅色 0.14 / 深色 0.45），
+     * 所以「同色相深色版本」和「纯黑」之间的选择要看色相：暖色系（黄/绿）的深色版本
+     * 更暗，黑/白都够；冷色系（蓝/品红）的深色版本偏灰，反而是纯黑更清楚。
+     * 这里按 WCAG 对比度在三个候选里择优，任何情况都不低于 4.5:1。
      *
-     * 做法：三个候选里择优——同色相的深色版本（比纯黑更"同族"，M3 tone 语义也更贴）
-     * 达标就用它；否则在黑 / 白里挑对比更高的那个。
-     * 实测（HSL L=0.42 / sat=0.6 的主色）：
-     *   黄  白 2.43 / 黑 8.63 -> 黑      蓝  白 10.31 / 黑 2.04 -> 白
-     *   绿  白 3.00 / 黑 6.99 -> 黑      品红 白 5.72 / 黑 3.67 -> 白
-     * 全部 >= 4.5:1；深色分支（主色 L=0.80）恒取同色相深色版本，实测 7.5~8.2:1。
+     * 实测（浅色 primary 相对亮度 0.14）：onPrimary 一律取白，5.5:1；
+     * 深色 primary（0.45）：一律取同色相深色版本，5.9:1。
      */
     fun onFor(bg: Color, dark: Color): Color {
         val lBg = ColorUtils.calculateLuminance(bg.toArgb())
@@ -138,40 +162,44 @@ private fun sdwAccentTuned(base: ColorScheme, light: Boolean): ColorScheme {
     }
 
     return if (light) {
-        val p = tone(baseHue, baseSat, 0.42f)
-        val s = tone(baseHue + 26f, baseSat * 0.55f, 0.44f)
-        val t = tone(baseHue + 58f, baseSat * 0.62f, 0.40f)
+        // 浅色：primary/secondary/tertiary ≈ tone 40（相对亮度 0.14）
+        //       container ≈ tone 90（0.78）、onContainer ≈ tone 30（0.045）
+        val p = toneLum(baseHue, baseSat, 0.14)
+        val s = toneLum(baseHue + 26f, baseSat * 0.62f, 0.14)
+        val t = toneLum(baseHue + 58f, baseSat * 0.70f, 0.14)
         base.copy(
             primary = p,
-            onPrimary = onFor(p, tone(baseHue, baseSat, 0.22f)),
-            primaryContainer = tone(baseHue, baseSat * 0.75f, 0.90f),
-            onPrimaryContainer = tone(baseHue, baseSat, 0.22f),
+            onPrimary = onFor(p, toneLum(baseHue, baseSat, 0.035)),
+            primaryContainer = toneLum(baseHue, baseSat * 0.75f, 0.78),
+            onPrimaryContainer = toneLum(baseHue, baseSat, 0.045),
             secondary = s,
-            onSecondary = onFor(s, tone(baseHue + 26f, baseSat * 0.80f, 0.20f)),
-            secondaryContainer = tone(baseHue + 26f, baseSat * 0.45f, 0.90f),
-            onSecondaryContainer = tone(baseHue + 26f, baseSat * 0.80f, 0.20f),
+            onSecondary = onFor(s, toneLum(baseHue + 26f, baseSat * 0.85f, 0.035)),
+            secondaryContainer = toneLum(baseHue + 26f, baseSat * 0.45f, 0.78),
+            onSecondaryContainer = toneLum(baseHue + 26f, baseSat * 0.85f, 0.045),
             tertiary = t,
-            onTertiary = onFor(t, tone(baseHue + 58f, baseSat * 0.80f, 0.20f)),
-            tertiaryContainer = tone(baseHue + 58f, baseSat * 0.50f, 0.90f),
-            onTertiaryContainer = tone(baseHue + 58f, baseSat * 0.80f, 0.20f)
+            onTertiary = onFor(t, toneLum(baseHue + 58f, baseSat * 0.85f, 0.035)),
+            tertiaryContainer = toneLum(baseHue + 58f, baseSat * 0.50f, 0.78),
+            onTertiaryContainer = toneLum(baseHue + 58f, baseSat * 0.85f, 0.045)
         )
     } else {
-        val p = tone(baseHue, baseSat, 0.80f)
-        val s = tone(baseHue + 26f, baseSat * 0.55f, 0.80f)
-        val t = tone(baseHue + 58f, baseSat * 0.62f, 0.82f)
+        // 深色：primary/secondary/tertiary ≈ tone 80（相对亮度 0.45）
+        //       container ≈ tone 30（0.075）、onContainer ≈ tone 90（0.72）
+        val p = toneLum(baseHue, baseSat, 0.45)
+        val s = toneLum(baseHue + 26f, baseSat * 0.62f, 0.45)
+        val t = toneLum(baseHue + 58f, baseSat * 0.70f, 0.45)
         base.copy(
             primary = p,
-            onPrimary = onFor(p, tone(baseHue, baseSat, 0.18f)),
-            primaryContainer = tone(baseHue, baseSat * 0.85f, 0.28f),
-            onPrimaryContainer = tone(baseHue, baseSat * 0.55f, 0.88f),
+            onPrimary = onFor(p, toneLum(baseHue, baseSat, 0.035)),
+            primaryContainer = toneLum(baseHue, baseSat * 0.85f, 0.075),
+            onPrimaryContainer = toneLum(baseHue, baseSat * 0.60f, 0.72),
             secondary = s,
-            onSecondary = onFor(s, tone(baseHue + 26f, baseSat * 0.70f, 0.18f)),
-            secondaryContainer = tone(baseHue + 26f, baseSat * 0.50f, 0.28f),
-            onSecondaryContainer = tone(baseHue + 26f, baseSat * 0.40f, 0.88f),
+            onSecondary = onFor(s, toneLum(baseHue + 26f, baseSat * 0.70f, 0.035)),
+            secondaryContainer = toneLum(baseHue + 26f, baseSat * 0.50f, 0.075),
+            onSecondaryContainer = toneLum(baseHue + 26f, baseSat * 0.45f, 0.72),
             tertiary = t,
-            onTertiary = onFor(t, tone(baseHue + 58f, baseSat * 0.80f, 0.20f)),
-            tertiaryContainer = tone(baseHue + 58f, baseSat * 0.55f, 0.30f),
-            onTertiaryContainer = tone(baseHue + 58f, baseSat * 0.50f, 0.90f)
+            onTertiary = onFor(t, toneLum(baseHue + 58f, baseSat * 0.80f, 0.035)),
+            tertiaryContainer = toneLum(baseHue + 58f, baseSat * 0.55f, 0.075),
+            onTertiaryContainer = toneLum(baseHue + 58f, baseSat * 0.55f, 0.72)
         )
     }
 }

@@ -11,6 +11,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material3.*
@@ -48,6 +49,8 @@ fun AddToPlaylistSheet(
     onDismiss: () -> Unit,
     // 【Lyrico 联动】长按歌曲弹出的菜单里，提供「用 Lyrico 编辑」入口（为 null 时不显示）
     onEditWithLyrico: ((Song) -> Unit)? = null,
+    // [2026-10-25] 用户要求：长按菜单增加「删除」。仅歌曲列表长按传入，批量场景不传（不显示）
+    onDelete: (() -> Unit)? = null,
     songs: List<Song>? = null,
     title: String? = null,
 ) {
@@ -70,7 +73,7 @@ fun AddToPlaylistSheet(
         containerColor = MaterialTheme.colorScheme.surface,
         contentColor = MaterialTheme.colorScheme.onBackground,
         scrimColor = Color.Black.copy(alpha = 0.5f),
-        shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         // [V8.117] 去掉顶部拖拽小短条；下滑关闭不受影响。
         dragHandle = null
     ) {
@@ -135,6 +138,26 @@ fun AddToPlaylistSheet(
                     }
                     Spacer(Modifier.width(12.dp))
                     Text(stringResource(R.string.action_edit_with_lyrico), color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyLarge)
+                }
+                SDWDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
+            }
+
+            // ── 删除歌曲（仅单曲长按菜单显示；点后由调用方弹确认框）──
+            onDelete?.let { del ->
+                Row(
+                    modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row, fillBoost = 0f).clickable {
+                        del(); onDismiss()
+                    }.padding(horizontal = 20.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier.size(36.dp).clip(CircleShape).background(MaterialTheme.colorScheme.error.copy(alpha = 0.12f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(Icons.Default.Delete, stringResource(R.string.action_delete), tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(20.dp))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyLarge)
                 }
                 SDWDivider(color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.06f))
             }
@@ -222,23 +245,25 @@ fun AddToPlaylistSheet(
 
     // ── 新建歌单对话框 ──
     if (showCreate) {
-        AlertDialog(
+        // [P2 · M3 Expressive] 全站弹窗统一到 SDWAlertDialog（玻璃容器 + Panel 圆角）
+        SDWAlertDialog(
             onDismissRequest = { showCreate = false },
             title = { Text(stringResource(R.string.playlist_create_new), color = MaterialTheme.colorScheme.onBackground) },
             text = {
-                OutlinedTextField(
+                // [P2] 描边式 → 容器式（半透明玻璃），与主界面搜索框统一
+                TextField(
                     value = newName,
                     onValueChange = { newName = it },
-                    placeholder = { Text(stringResource(R.string.playlist_name_hint), color = MaterialTheme.colorScheme.outlineVariant) },
+                    placeholder = { Text(stringResource(R.string.playlist_name_hint), color = MaterialTheme.colorScheme.onSurfaceVariant) },
                     singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                    colors = TextFieldDefaults.colors(
+                        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
                         cursorColor = MaterialTheme.colorScheme.primary,
-                        focusedContainerColor = MaterialTheme.colorScheme.surface,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent
                     ),
                     shape = SDWShapes.Media
                 )
@@ -267,8 +292,7 @@ fun AddToPlaylistSheet(
                 TextButton(onClick = { showCreate = false }) {
                     Text(stringResource(R.string.action_cancel), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            },
-            containerColor = MaterialTheme.colorScheme.surface
+            }
         )
     }
 }

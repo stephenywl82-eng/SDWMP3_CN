@@ -55,6 +55,8 @@ import android.widget.Toast
 import com.sdw.music.player.core.audio.DebugLog
 import com.sdw.music.player.LyricLine
 import com.sdw.music.player.ui.components.buildWordSegments
+import com.sdw.music.player.ui.components.ExpressiveSwitch
+import com.sdw.music.player.ui.components.ExpressiveWavyProgress
 import com.sdw.music.player.ui.components.wordByWordAlpha
 import kotlin.math.abs
 import androidx.compose.ui.Alignment
@@ -73,6 +75,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onGloballyPositioned
@@ -85,6 +88,10 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+// [2026-10-29] 底部抽屉（三点菜单改造）新增
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
@@ -127,6 +134,7 @@ import com.sdw.music.player.ui.components.rememberSharedCoverPainter
 // ============================================================================
 
 /** Top bar: back button + title + overflow menu (delete). */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun PlayerTopBar(
     showMenu: Boolean,
@@ -173,9 +181,14 @@ fun PlayerTopBar(
     },
     verticalPadding: Dp = 4.dp,
     backIconSize: Dp = 36.dp,
+    // [2026-10-29] 顶栏三颗键（返回 / 队列 / 三点）跟随封面主色，与播放键、走带键、
+    // 底部功能键同一套取色；未传时回落主题 primary，行为与改动前一致。
+    accentColor: Color = MaterialTheme.colorScheme.primary,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    // 【2026-10-29】顶栏三颗键（返回 / 歌单 / 三点）全部 ghost 透明：无圆形背景，
+    // 仅以封面主色 accentColor 着色图标，顶栏不再比内容抢眼，与播放/走带键同一套取色。
     // 【Lyrico 联动】打开 Lyrico 单曲编辑页；返回后把 result extras 抛给 onLyricoEditReturned，
     // 由调用方（PlayerScreen）就地刷新封面/标签（含从被改写文件重新抽封面，绕过平台 albumart 缓存）
     val lyricoLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -197,20 +210,181 @@ fun PlayerTopBar(
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        IconButton(onClick = onNavigateBack, modifier = Modifier.size(backIconSize)) {
-            Icon(Icons.Default.KeyboardArrowDown, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(24.dp))
+        FilledTonalIconButton(
+            onClick = onNavigateBack,
+            shapes = IconButtonDefaults.shapes(),
+            modifier = Modifier.size(backIconSize),
+            // 【2026-10-29】返回键：背景透明（去圆形底）、图标用封面主色(封面取色)，
+            // 与歌单/三点键同走 ghost 透明风，仅显示图标本身。
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = Color.Transparent,
+                contentColor = accentColor
+            )
+        ) {
+            Icon(Icons.Default.KeyboardArrowDown, stringResource(R.string.action_back), modifier = Modifier.size(24.dp))
         }
         center()
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onNavigateToQueue, modifier = Modifier.size(36.dp)) {
-                Icon(Icons.Default.QueueMusic, stringResource(R.string.player_queue), tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+            FilledTonalIconButton(
+                onClick = onNavigateToQueue,
+                shapes = IconButtonDefaults.shapes(),
+                modifier = Modifier.size(36.dp),
+                // 【2026-10-29】歌单(队列)键：背景透明、图标用封面主色(封面取色)，
+                // 与返回/三点键的 filled 风格拉开层级，仅这一颗走 ghost 透明风。
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = Color.Transparent,
+                    contentColor = accentColor
+                )
+            ) {
+                Icon(Icons.Default.QueueMusic, stringResource(R.string.player_queue), modifier = Modifier.size(20.dp))
             }
             Box {
-                IconButton(onClick = onToggleMenu, modifier = Modifier.size(36.dp)) {
-                    Icon(Icons.Default.MoreVert, stringResource(R.string.player_menu), tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(20.dp))
+                FilledTonalIconButton(
+                    onClick = onToggleMenu,
+                    shapes = IconButtonDefaults.shapes(),
+                    modifier = Modifier.size(36.dp),
+                    // 【2026-10-29】三点菜单键：背景透明（去圆形底）、图标用封面主色(封面取色)，
+                    // 与返回/歌单键同走 ghost 透明风，仅显示图标本身。
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = Color.Transparent,
+                        contentColor = accentColor
+                    )
+                ) {
+                    Icon(Icons.Default.MoreVert, stringResource(R.string.player_menu), modifier = Modifier.size(20.dp))
                 }
+                // [2026-10-29 · M3 Expressive] 三点菜单：长条 DropdownMenu → 底部抽屉。
+                // 旧实现是一根从右上角一直拖到半山腰的硬边窄条，把封面 / 歌名 / 歌词整片盖住；
+                // 抽屉从底部滑出，上半屏内容完全不挡，也更贴合单手操作。内部按功能拆成
+                // 「快捷操作 / 音频引擎 / 显示与诊断 / 工具 / 危险操作」几张子容器卡片，
+                // 不再 14 项密密麻麻排成一长条。
+                if (showMenu) {
+                    val overflowSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+                    ModalBottomSheet(
+                        onDismissRequest = onDismissMenu,
+                        sheetState = overflowSheetState,
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+                        contentColor = MaterialTheme.colorScheme.onSurface,
+                        scrimColor = Color.Black.copy(alpha = 0.55f),
+                        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .navigationBarsPadding()
+                                .padding(horizontal = 16.dp)
+                                .padding(top = 4.dp, bottom = 24.dp)
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            // ① 快捷操作：一排 4 个大图标胶囊（最常用的四个动作）
+                            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                SheetQuickAction(
+                                    icon = if (isCurrentSongFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                    label = stringResource(if (isCurrentSongFavorite) R.string.action_unfavorite else R.string.action_favorite),
+                                    tint = if (isCurrentSongFavorite) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+                                    onClick = { onDismissMenu(); onToggleFavorite() }
+                                )
+                                SheetQuickAction(
+                                    icon = Icons.Default.PlaylistAdd,
+                                    label = stringResource(R.string.playlist_add_to),
+                                    onClick = { onDismissMenu(); onAddToPlaylist() }
+                                )
+                                SheetQuickAction(
+                                    icon = Icons.Default.Timer,
+                                    label = stringResource(R.string.title_sleep_timer),
+                                    onClick = { onDismissMenu(); onSleepTimer() }
+                                )
+                                SheetQuickAction(
+                                    icon = Icons.Default.Share,
+                                    label = stringResource(R.string.action_share),
+                                    onClick = { onDismissMenu(); onShare() }
+                                )
+                            }
+                            Spacer(Modifier.height(14.dp))
+                            // ② 音频引擎（DSP 均衡器 / DTS / 原声直通 / AGC）
+                            SheetGroupCard(title = "音频引擎") {
+                                SheetActionRow(
+                                    icon = Icons.Default.Equalizer,
+                                    text = stringResource(R.string.title_dsp_equalizer),
+                                    onClick = { onDismissMenu(); onToggleEqualizer() }
+                                )
+                                SheetActionRow(
+                                    icon = Icons.Default.Audiotrack,
+                                    text = stringResource(if (dtsEnabled) R.string.menu_dts_on else R.string.menu_dts_off),
+                                    checked = dtsEnabled,
+                                    // 【V9.4】原声直通开启时 DTS 被旁路，菜单项一并锁定，避免误导
+                                    enabled = !directPassthrough,
+                                    onClick = { onDismissMenu(); onToggleDts() }
+                                )
+                                SheetActionRow(
+                                    icon = Icons.Default.SurroundSound,
+                                    text = stringResource(if (directPassthrough) R.string.menu_direct_passthrough_on else R.string.menu_direct_passthrough_off),
+                                    checked = directPassthrough,
+                                    onClick = { onDismissMenu(); onToggleDirectPassthrough() }
+                                )
+                                SheetActionRow(
+                                    icon = Icons.Default.GraphicEq,
+                                    text = stringResource(if (agcEnabled) R.string.menu_agc_on else R.string.menu_agc_off),
+                                    checked = agcEnabled,
+                                    onClick = { onDismissMenu(); onToggleAgc() }
+                                )
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            // ③ 显示与诊断
+                            SheetGroupCard(title = "显示与诊断") {
+                                SheetActionRow(
+                                    icon = Icons.Default.Lyrics,
+                                    text = stringResource(if (inlineLyrics) R.string.menu_inline_lyrics_on else R.string.menu_inline_lyrics_off),
+                                    checked = inlineLyrics,
+                                    onClick = { onDismissMenu(); onToggleInlineLyrics() }
+                                )
+                                SheetActionRow(
+                                    icon = Icons.Default.BarChart,
+                                    text = stringResource(if (vuEnabled) R.string.menu_vu_on else R.string.menu_vu_off),
+                                    checked = vuEnabled,
+                                    onClick = { onDismissMenu(); onToggleVu() }
+                                )
+                                SheetActionRow(
+                                    icon = Icons.Default.Fullscreen,
+                                    text = stringResource(if (immersivePlayer) R.string.menu_immersive_on else R.string.menu_immersive_off),
+                                    checked = immersivePlayer,
+                                    onClick = { onDismissMenu(); onToggleImmersive() }
+                                )
+                                SheetActionRow(
+                                    icon = Icons.Default.QueryStats,
+                                    text = stringResource(R.string.settings_audio_diag),
+                                    onClick = { onDismissMenu(); onNavigateToAudioDiagnostic() }
+                                )
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            // ④ 工具
+                            SheetGroupCard(title = "工具") {
+                                SheetActionRow(
+                                    icon = Icons.Default.Edit,
+                                    text = stringResource(R.string.action_edit_with_lyrico),
+                                    onClick = { onDismissMenu(); launchLyricoEdit() }
+                                )
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            // ⑤ 破坏性操作：单独一张卡片，整行走 error 色，和上面彻底隔开
+                            Surface(
+                                shape = RoundedCornerShape(24.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainerLow,
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                SheetActionRow(
+                                    icon = Icons.Default.Delete,
+                                    text = stringResource(R.string.player_delete_song),
+                                    danger = true,
+                                    onClick = { onDismissMenu(); onDelete() }
+                                )
+                            }
+                        }
+                    }
+                }
+                // [2026-10-29] 旧的长条 DropdownMenu 已停用（expanded 恒 false，不会组合）。
+                // 新入口是上面的底部抽屉；这段保留仅为回滚参考，后续可整段删除。
                 DropdownMenu(
-                    expanded = showMenu,
+                    expanded = false,
                     onDismissRequest = onDismissMenu
                 ) {
                     DropdownMenuItem(
@@ -245,13 +419,15 @@ fun PlayerTopBar(
                     )
                     // 【DTS-in-menu】紧跟 DSP 均衡器（都是音频处理），删除这种破坏性操作留在最后
                     DropdownMenuItem(
+                        // 【V9.4】原声直通开启时 DTS 被旁路，菜单项一并锁定，避免误导
+                        enabled = !directPassthrough,
                         text = { Text(stringResource(if (dtsEnabled) R.string.menu_dts_on else R.string.menu_dts_off)) },
                         onClick = { onDismissMenu(); onToggleDts() },
                         leadingIcon = {
                             Icon(
                                 Icons.Default.Audiotrack,
                                 stringResource(if (dtsEnabled) R.string.menu_dts_on else R.string.menu_dts_off),
-                                tint = if (dtsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
+                                tint = if (!directPassthrough && dtsEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     )
@@ -655,18 +831,47 @@ fun PlayerSongInfo(
         horizontalArrangement = Arrangement.Center,
         modifier = Modifier.padding(top = 4.dp).fillMaxWidth()
     ) {
-        // 【2026-09-02】固定单行：多歌手只显示前 3 个 + "…"，整体单个 Text 单行省略
-        // 之前多歌手走 FlowRow 换行 → 歌手多时撑成多行 → 下半部 (歌词/封面/VuMeter) 被移位
-        val displayArtists = if (artists.size <= 3) artists else artists.take(3) + listOf("…")
-        val artistText = displayArtists.joinToString(" · ")
-        Text(
-            artistText.ifEmpty { " " },
-            style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
-            color = textAccentColor,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.clickable { onArtistClick(artists.firstOrNull().orEmpty()) }
-        )
+        // 【2026-09-02】固定单行：多歌手只显示前 3 个 + "…"，整体单行。
+        // 之前多歌手走 FlowRow 换行 → 歌手多时撑成多行 → 下半部被移位。
+        // 【V8.xxx】每个歌手单独可点：点哪个跳哪个歌手列表，不再只跳第一个。
+        // 分隔符 " · " 与占位符 "…" 不可点；整段仍单行居中、不撑高。
+        val displayArtists = if (artists.isEmpty()) emptyList() else if (artists.size <= 3) artists else artists.take(3) + listOf("…")
+        if (displayArtists.isEmpty()) {
+            Text(
+                " ",
+                style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
+                color = textAccentColor,
+                maxLines = 1
+            )
+        } else {
+            displayArtists.forEachIndexed { idx, name ->
+                if (idx > 0) {
+                    Text(
+                        " · ",
+                        style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
+                        color = textAccentColor.copy(alpha = 0.6f),
+                        maxLines = 1
+                    )
+                }
+                if (name == "…") {
+                    Text(
+                        "…",
+                        style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
+                        color = textAccentColor,
+                        maxLines = 1
+                    )
+                } else {
+                    Text(
+                        name.ifEmpty { " " },
+                        style = MaterialTheme.typography.bodyLarge.copy(shadow = artistShadow),
+                        color = textAccentColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.clickable { onArtistClick(name) }
+                    )
+                }
+            }
+        }
         // [V8.125] 歌手右侧的歌曲格式徽章（FLAC / MP3 / M4A…）已按要求移除。
         // 格式信息仍在播放页下方的 SongSpecLabel 规格行显示（含位深/采样率/码率）。
     }
@@ -707,6 +912,8 @@ fun PlayerProgress(
     positionMs: Long,
     accentColor: Color,
     onSeekTo: (Float) -> Unit,
+    /** 【M3 Expressive】是否正在播放：决定波浪是否流动 / 振幅是否饱满（暂停时波会"躺平"）。 */
+    isPlaying: Boolean = true,
     /**
      * 【V8.184】歌曲规格标签插槽（FLAC · 24bit · 44.1kHz · 1462kbps）。
      * 原来它在进度条下方独占一整行居中，与「时长」不在同一水平线上、整体偏下。
@@ -741,27 +948,9 @@ fun PlayerProgress(
         }
     }
 
-    // 【液态】流动高光相位（无限循环）
-    val flowPhase = remember { Animatable(0f) }
-    val liquidOn = durationMs > 0 && !isDragging
-    LaunchedEffect(liquidOn) {
-        if (liquidOn) {
-            flowPhase.snapTo(0f)
-            flowPhase.animateTo(
-                1f,
-                animationSpec = infiniteRepeatable(
-                    animation = tween(durationMillis = 2600, easing = LinearEasing),
-                    repeatMode = RepeatMode.Restart
-                )
-            )
-        }
-    }
-
     Column(modifier = modifier.fillMaxWidth()) {
         if (durationMs > 0) {
-            // 【V8.34 液态进度条】渐变填充 + 流动高光 + 发光播放头（替代标准 Slider）
-            val trackHeight = 5.dp
-            val thumbR = 7.dp
+            // 【M3 Expressive】波浪播放条（替代原来的液态实心条 + 圆 thumb）
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -841,93 +1030,20 @@ fun PlayerProgress(
                             }
                         }
                     },
-                contentAlignment = Alignment.TopStart
+                contentAlignment = Alignment.Center
             ) {
-                val barTopDp = (28.dp - trackHeight) / 2
-                // 轨道底
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(trackHeight)
-                        .offset(y = barTopDp)
-                        .clip(RoundedCornerShape(trackHeight / 2))
-                        .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f))
-                )
-                // [V8.84] settle wobble rides on top of the seek value
+                // 【M3 Expressive】波浪播放条：已播段是正弦波（粗），未播段细直线，
+                // 播放头是一根竖短线游标；暂停时波平、拖动时波更"跳"。
+                // [V8.84] 松手后的阻尼摆动照旧叠在进度值上。
                 val fillFrac = (sliderValue + settleOffset.value).coerceIn(0f, 1f)
-                // 已播段（液态渐变）
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth(fillFrac)
-                        .height(trackHeight)
-                        .offset(y = barTopDp)
-                        .clip(RoundedCornerShape(trackHeight / 2))
-                        .background(
-                            Brush.horizontalGradient(
-                                0.0f to accentColor.copy(alpha = 0.55f),
-                                0.55f to accentColor,
-                                1.0f to lerp(accentColor, Color.White, 0.35f)
-                            )
-                        )
-                ) {
-                    // 流动高光斑（仅非拖动时）
-                    if (!isDragging) {
-                        val bandW = 60.dp
-                        Canvas(modifier = Modifier.matchParentSize()) {
-                            val w = this.size.width
-                            val h = this.size.height
-                            if (w > bandW.toPx() * 1.5f) {
-                                val span = w + bandW.toPx() * 2f
-                                val cx = flowPhase.value * span - bandW.toPx()
-                                drawRect(
-                                    brush = Brush.horizontalGradient(
-                                        0.0f to Color.White.copy(alpha = 0f),
-                                        0.5f to Color.White.copy(alpha = 0.35f),
-                                        1.0f to Color.White.copy(alpha = 0f)
-                                    ),
-                                    topLeft = Offset(cx, 0f),
-                                    size = Size(bandW.toPx(), h)
-                                )
-                            }
-                        }
-                    }
-                }
-                // 发光播放头（拖动放大）——精确居中于 fillFrac 位置
-                val thumbScale by animateFloatAsState(
-                    targetValue = if (isDragging) 1.4f else 1f,
-                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium),
-                    label = "thumbScale"
-                )
-                val thumbBaseDp = thumbR * 2f   // Dp（thumbR 已是 Dp）
-                val thumbDp = thumbBaseDp * thumbScale   // Dp * Float = Dp
-                var barWidthPx by remember { mutableIntStateOf(0) }
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(28.dp)
-                        .onSizeChanged { barWidthPx = it.width }
-                ) {}
-                // thumb 独立定位：x 从 0..(barWidth - thumbW) 映射 fillFrac，y 垂直居中
-                val thumbWpx = with(LocalDensity.current) { thumbDp.toPx() }
-                Box(
-                    modifier = Modifier
-                        .offset {
-                            val maxX = (barWidthPx - thumbWpx).coerceAtLeast(0f)
-                            IntOffset(
-                                x = (maxX * fillFrac).roundToInt(),
-                                y = (barTopDp.toPx() + (trackHeight.toPx() - thumbWpx) / 2f).roundToInt()
-                            )
-                        }
-                        .size(thumbDp)
-                        .graphicsLayer {
-                            // [V8.111] 阴影形状跟随图层 outline：graphicsLayer 默认 shape 是矩形，
-                            // 圆只是 background 画上去的，所以之前投出来是「方影」，圆头压不住。
-                            // 显式给图层设 CircleShape（clip=false 不裁内容），阴影才随圆变圆柔影。
-                            shape = CircleShape
-                            clip = false
-                            shadowElevation = 6f * thumbScale
-                        }
-                        .background(accentColor, CircleShape)
+                ExpressiveWavyProgress(
+                    fraction = fillFrac,
+                    color = accentColor,
+                    active = isPlaying,
+                    dragging = isDragging,
+                    unplayedTrack = true,
+                    trackColor = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.20f),
+                    modifier = Modifier.fillMaxSize()
                 )
             }
         }
@@ -968,82 +1084,6 @@ fun PlayerProgress(
     }
 }
 
-/** 液态涟漪 IconButton：按下时柔光圆从中心扩散（液态感），松手 spring 回弹。
- *  替代默认 ripple 的"实心圆扩散"，扩散圆带渐变边缘更像水滴涟漪。V8.37 */
-@Composable
-private fun LiquidIconButton(
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-    enabled: Boolean = true,
-    content: @Composable () -> Unit
-) {
-    val interaction = remember { MutableInteractionSource() }
-    val isPressed by interaction.collectIsPressedAsState()
-    val pressScale by animateFloatAsState(
-        targetValue = if (isPressed) 0.88f else 1f,
-        // [V8.44] livelier press response
-        animationSpec = spring(dampingRatio = 0.55f, stiffness = Spring.StiffnessMedium),
-        label = "liqPress"
-    )
-    // 涟漪扩散：按下 0→1，松手快速收尾
-    val rippleProgress = remember { Animatable(0f) }
-    val scope = rememberCoroutineScope()
-    LaunchedEffect(isPressed) {
-        if (isPressed) {
-            rippleProgress.snapTo(0f)
-            rippleProgress.animateTo(
-                1f,
-                animationSpec = tween(420, easing = FastOutSlowInEasing)
-            )
-        } else {
-            // 松手快速淡出（从当前值快速收尾，不跳变）
-            scope.launch {
-                rippleProgress.animateTo(
-                    0f,
-                    animationSpec = tween(180, easing = FastOutSlowInEasing)
-                )
-            }
-        }
-    }
-    Box(
-        modifier = modifier
-            .graphicsLayer {
-                scaleX = pressScale
-                scaleY = pressScale
-            }
-            .clickable(
-                interactionSource = interaction,
-                indication = null,
-                enabled = enabled,
-                onClick = onClick
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        // 液态涟漪圆（按下扩散、松手收拢）
-        Canvas(modifier = Modifier.matchParentSize()) {
-            val rMax = size.minDimension / 2f
-            if (rMax > 2f && rippleProgress.value > 0f) {
-                val r = rMax * (0.35f + 0.65f * rippleProgress.value)
-                // 扩散圆：外圈半透明 + 内圈渐隐 = 液态晕开
-                val alpha = (1f - rippleProgress.value) * 0.28f
-                drawCircle(
-                    brush = Brush.radialGradient(
-                        colors = listOf(
-                            Color.White.copy(alpha = alpha * 0.7f),
-                            Color.White.copy(alpha = alpha * 0.25f),
-                            Color.White.copy(alpha = 0f)
-                        ),
-                        center = Offset(size.width / 2f, size.height / 2f),
-                        radius = r
-                    ),
-                    radius = r,
-                    center = Offset(size.width / 2f, size.height / 2f)
-                )
-            }
-        }
-        content()
-    }
-}
 
 /**
  * 走带区五个键（随机 / 上曲 / 播放 / 下曲 / 循环）。
@@ -1065,10 +1105,13 @@ private fun LiquidIconButton(
  *
  * 播放/暂停做成两个独立键（不是可切换的单键），按用户明确要求。
  */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun DjTransportBar(
     isPlaying: Boolean,
     accentColor: Color,
+    /** 有封面时下一曲键按封面色取色；无封面回落主题色。 */
+    hasCoverColor: Boolean = false,
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onNext: () -> Unit,
@@ -1077,56 +1120,81 @@ fun DjTransportBar(
     onInteract: () -> Unit = {}
 ) {
     val stepSize = SDWTransport.Step
+    val cs = MaterialTheme.colorScheme
+    // 【M3 Expressive】DJ 走带三键与 PlayerControlBar 同一套层级：
+    //   「当前该按的那个」（暂停态→播放 / 播放态→暂停）做成 Filled（accent，hero），
+    //   另一个落回 FilledTonal（surfaceContainerHigh）；下一曲恒定 secondaryContainer（第二层）。
+    //   三者都走官方 IconButtonShapes：按下圆→方圆 morph。
+    //   注：按用户明确要求，播放/暂停是两个独立键（非可切换单键），此处保持两个独立键。
+    val heroContent = if (accentColor.luminance() > 0.5f) Color(0xFF101114) else Color.White
     Row(
         modifier = modifier,
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        // 播放
-        LiquidIconButton(
-            onClick = { onInteract(); onPlay() },
-            modifier = Modifier.size(stepSize)
-        ) {
-            Icon(
-                Icons.Default.PlayArrow,
-                null,
-                tint = if (isPlaying) accentColor else Color.White,
-                modifier = Modifier.size(32.dp)
-            )
+        // 播放（暂停态时是当前该按的 → hero）
+        if (!isPlaying) {
+            FilledIconButton(
+                onClick = { onInteract(); onPlay() },
+                modifier = Modifier.size(stepSize),
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = accentColor, contentColor = heroContent)
+            ) {
+                Icon(Icons.Default.PlayArrow, stringResource(R.string.action_play), modifier = Modifier.size(32.dp))
+            }
+        } else {
+            FilledTonalIconButton(
+                onClick = { onInteract(); onPlay() },
+                modifier = Modifier.size(stepSize),
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = cs.surfaceContainerHigh, contentColor = cs.onSurfaceVariant)
+            ) {
+                Icon(Icons.Default.PlayArrow, stringResource(R.string.action_play), modifier = Modifier.size(32.dp))
+            }
         }
-        // 暂停
-        LiquidIconButton(
-            onClick = { onInteract(); onPause() },
-            modifier = Modifier.size(stepSize)
-        ) {
-            Icon(
-                Icons.Default.Pause,
-                null,
-                tint = if (!isPlaying) accentColor else Color.White,
-                modifier = Modifier.size(32.dp)
-            )
+        // 暂停（播放态时是当前该按的 → hero）
+        if (isPlaying) {
+            FilledIconButton(
+                onClick = { onInteract(); onPause() },
+                modifier = Modifier.size(stepSize),
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.filledIconButtonColors(containerColor = accentColor, contentColor = heroContent)
+            ) {
+                Icon(Icons.Default.Pause, stringResource(R.string.action_pause), modifier = Modifier.size(32.dp))
+            }
+        } else {
+            FilledTonalIconButton(
+                onClick = { onInteract(); onPause() },
+                modifier = Modifier.size(stepSize),
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = cs.surfaceContainerHigh, contentColor = cs.onSurfaceVariant)
+            ) {
+                Icon(Icons.Default.Pause, stringResource(R.string.action_pause), modifier = Modifier.size(32.dp))
+            }
         }
-        // 下一曲
-        LiquidIconButton(
+        // 下一曲（恒定第二层）【M3 Expressive · 封面色跟随】有封面时容器/内容按封面色取色
+        val nextContainer = if (hasCoverColor) lerp(accentColor, cs.secondaryContainer, 0.45f) else cs.secondaryContainer
+        val nextContent = if (hasCoverColor) lerp(accentColor, cs.onSecondaryContainer, 0.45f) else cs.onSecondaryContainer
+        FilledTonalIconButton(
             onClick = { onInteract(); onNext() },
-            modifier = Modifier.size(stepSize)
+            modifier = Modifier.size(stepSize),
+            shapes = IconButtonDefaults.shapes(),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(containerColor = nextContainer, contentColor = nextContent)
         ) {
-            Icon(
-                Icons.Default.SkipNext,
-                stringResource(R.string.player_next),
-                tint = Color.White,
-                modifier = Modifier.size(32.dp)
-            )
+            Icon(Icons.Default.SkipNext, stringResource(R.string.player_next), modifier = Modifier.size(32.dp))
         }
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun PlayerControlBar(
     shuffleEnabled: Boolean,
     repeatMode: Int,
     isPlaying: Boolean,
     accentColor: Color,
+    /** 有封面时次级按键（上/下一曲、随机/循环激活态）按封面色取色；无封面回落主题色。 */
+    hasCoverColor: Boolean = false,
     onToggleShuffle: () -> Unit,
     onPrevious: () -> Unit,
     onPlay: () -> Unit,
@@ -1141,24 +1209,55 @@ fun PlayerControlBar(
 ) {
     val sideSize = SDWTransport.Side
     val stepSize = SDWTransport.Step
+    val cs = MaterialTheme.colorScheme
+    // 【M3 Expressive】按键层级：
+    //   主播放键 = Filled（实心 accent，最大，视觉焦点）
+    //   上/下一曲 = FilledTonal（secondaryContainer 系，有容器但不是主色，做第二层）
+    //   随机/循环 = FilledTonal，开时升到 primaryContainer（"激活"态），关时落回 surfaceContainerHigh
+    //   三者都走官方 IconButtonShapes：按下时圆→方圆（Expressive 的 shape morph）。
+    // 不再是"透明底 + 白图标"——官方 Expressive 的按键一律是有容器的。
+    // 【M3 Expressive · 封面色跟随】有封面时，上/下一曲容器与内容色按封面色 accentColor
+    // 与主题基色做 45% 混合，让整排按键都带封面色调；无封面时完全保持原主题色（回退）。
+    // 【M3 Expressive · 封面色跟随】走带键（上/下一曲、随机/循环激活态）一律按封面色 accentColor 取色，
+    // 与主播放键保持一致：有封面带封面色调，无封面时 accentColor 回落主题 primary，混合出中性 secondary 调。
+    // [2026-10-29] 上/下一曲也改成纯封面色（原来是「封面色 45% 混主题 secondaryContainer」，
+    // 混完偏灰，和实心封面色的播放键对不上）。图标按封面明度自动取深/浅。
+    val stepContainer = accentColor.copy(alpha = 0.72f)
+    val stepContent = if (accentColor.luminance() > 0.5f) Color(0xFF101114) else Color.White
     Row(
         modifier = modifier,
         horizontalArrangement = Arrangement.SpaceEvenly,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        LiquidIconButton(onClick = { onInteract(); onToggleShuffle() }, modifier = Modifier.size(sideSize)) {
+        // 随机（[2026-10-29] 透明背景：不再顶着一块灰容器，开关只靠图标颜色区分——
+        // 开 = 封面主色实心图标，关 = 中性 onSurfaceVariant。走带区因此少两块亮斑，
+        // 视觉重心回到中间的播放键。）
+        FilledTonalIconButton(
+            onClick = { onInteract(); onToggleShuffle() },
+            modifier = Modifier.size(sideSize),
+            shapes = IconButtonDefaults.shapes(),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = Color.Transparent,
+                contentColor = if (shuffleEnabled) accentColor else cs.onSurfaceVariant
+            )
+        ) {
             Icon(
                 if (shuffleEnabled) Icons.Default.ShuffleOn else Icons.Default.Shuffle,
                 null,
-                tint = if (shuffleEnabled) accentColor else Color.White,
-                modifier = Modifier.size(24.dp)
+                modifier = Modifier.size(26.dp)
             )
         }
-        LiquidIconButton(
+        // 上一曲
+        FilledTonalIconButton(
             onClick = { onInteract(); onPrevious() },
-            modifier = Modifier.size(stepSize).alpha(if (canSkip) 1f else 0.35f)
+            modifier = Modifier.size(stepSize).alpha(if (canSkip) 1f else 0.38f),
+            shapes = IconButtonDefaults.shapes(),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = stepContainer,
+                contentColor = stepContent
+            )
         ) {
-            Icon(Icons.Default.SkipPrevious, stringResource(R.string.player_previous), tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(36.dp))
+            Icon(Icons.Default.SkipPrevious, stringResource(R.string.player_previous), modifier = Modifier.size(32.dp))
         }
         Spacer(Modifier.width(6.dp))
         // Play/Pause 标准切换 — isPlaying 现走 MusicService 权威状态（DAC/Oboe 真实值），
@@ -1188,6 +1287,8 @@ fun PlayerControlBar(
         FilledIconButton(
             onClick = { onInteract(); if (isPlaying) onPause() else onPlay() },
             interactionSource = playInteraction,
+            // 【M3 Expressive】官方 shape morph：静止圆形，按下向方圆过渡
+            shapes = IconButtonDefaults.shapes(),
             modifier = Modifier
                 .size(playButtonSize)
                 .graphicsLayer {
@@ -1196,7 +1297,8 @@ fun PlayerControlBar(
                 },
             colors = IconButtonDefaults.filledIconButtonColors(
                 containerColor = accentColor,
-                contentColor = MaterialTheme.colorScheme.background
+                // 图标色按容器明度自动取深/浅，浅色封面取出来的 accent 也不会糊在一起
+                contentColor = if (accentColor.luminance() > 0.5f) Color(0xFF101114) else Color.White
             )
         ) {
             // [V8.44] both glyphs coexist and cross-fade off pauseProgress
@@ -1224,19 +1326,33 @@ fun PlayerControlBar(
             }
         }
         Spacer(Modifier.width(6.dp))
-        LiquidIconButton(
+        // 下一曲
+        FilledTonalIconButton(
             onClick = { onInteract(); onNext() },
-            modifier = Modifier.size(stepSize).alpha(if (canSkip) 1f else 0.35f)
+            modifier = Modifier.size(stepSize).alpha(if (canSkip) 1f else 0.38f),
+            shapes = IconButtonDefaults.shapes(),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = stepContainer,
+                contentColor = stepContent
+            )
         ) {
-            Icon(Icons.Default.SkipNext, stringResource(R.string.player_next), tint = MaterialTheme.colorScheme.onBackground, modifier = Modifier.size(36.dp))
+            Icon(Icons.Default.SkipNext, stringResource(R.string.player_next), modifier = Modifier.size(32.dp))
         }
-        LiquidIconButton(onClick = { onInteract(); onCycleRepeat() }, modifier = Modifier.size(sideSize)) {
-            val (icon, tintColor) = when (repeatMode) {
-                Player.REPEAT_MODE_ONE -> Icons.Default.RepeatOne to accentColor
-                Player.REPEAT_MODE_ALL -> Icons.Default.Repeat to accentColor
-                else -> Icons.Default.Repeat to Color.White
-            }
-            Icon(icon, null, tint = tintColor, modifier = Modifier.size(24.dp))
+        // 循环（[2026-10-29] 同随机键：透明背景，开 = 封面主色图标）
+        FilledTonalIconButton(
+            onClick = { onInteract(); onCycleRepeat() },
+            modifier = Modifier.size(sideSize),
+            shapes = IconButtonDefaults.shapes(),
+            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                containerColor = Color.Transparent,
+                contentColor = if (repeatMode != Player.REPEAT_MODE_OFF) accentColor else cs.onSurfaceVariant
+            )
+        ) {
+            Icon(
+                if (repeatMode == Player.REPEAT_MODE_ONE) Icons.Default.RepeatOne else Icons.Default.Repeat,
+                null,
+                modifier = Modifier.size(26.dp)
+            )
         }
     }
 }
@@ -1301,7 +1417,7 @@ fun rememberBottomAutoHide(enabled: Boolean, delayMs: Long = 4500L): BottomAutoH
  */
 // 【V8.310】Beat Jump 键用 Box+combinedClickable（IconButton 无 onLongClick），
 // combinedClickable 属 ExperimentalFoundationApi → 本函数需显式 OptIn。
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun PlayerBottomActions(
     eqEnabled: Boolean,
@@ -1310,6 +1426,7 @@ fun PlayerBottomActions(
     onToggleEqualizer: () -> Unit,
     onToggleFavorite: () -> Unit,
     onShare: () -> Unit,
+    accentColor: Color,
     modifier: Modifier = Modifier,
     autoHide: BottomAutoHide? = null,
     onDjTrigger: (() -> Boolean)? = null
@@ -1330,46 +1447,63 @@ fun PlayerBottomActions(
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            IconButton(
+            // [2026-10-29] 底部按键整排统一吃封面主色：原先 idle 态是「封面色 50% 混主题
+            // secondaryContainer」、DSP 开混 primaryContainer、收藏开混 errorContainer，
+            // 一颗键一个色系，看起来很乱。现在全部由 accentColor 派生：
+            //   关 = 封面色 @0.42（淡淡一层封面色调，仍是玻璃感的薄片）
+            //   开 = 封面色实心（一眼能看出激活，但不会跳进别的色系）
+            // 图标按封面明度自动取深/浅，浅封面也不会糊。
+            val onAccent = if (accentColor.luminance() > 0.5f) Color(0xFF101114) else Color.White
+            val smallContainer = accentColor.copy(alpha = 0.42f)
+            val smallContent = onAccent
+            val smallActive = accentColor
+            FilledTonalIconButton(
                 onClick = { autoHide?.poke(); onNavigateToLyrics() },
                 enabled = !hidden,
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                modifier = Modifier.size(46.dp),
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = smallContainer,
+                    contentColor = smallContent
+                )
             ) {
-                Icon(Icons.Default.Lyrics, stringResource(R.string.player_lyrics), tint = Color.White, modifier = Modifier.size(20.dp))
+                Icon(Icons.Default.Lyrics, stringResource(R.string.player_lyrics), modifier = Modifier.size(22.dp))
             }
-            IconButton(
+            FilledTonalIconButton(
                 onClick = { autoHide?.poke(); onToggleEqualizer() },
                 enabled = !hidden,
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                modifier = Modifier.size(46.dp),
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = if (eqEnabled) smallActive else smallContainer,
+                    contentColor = if (eqEnabled) onAccent else smallContent
+                )
             ) {
                 Icon(
                     Icons.Default.Equalizer, stringResource(R.string.title_dsp_equalizer),
-                    tint = if (eqEnabled) AccentRed else Color.White,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(22.dp)
                 )
             }
-            IconButton(
+            FilledTonalIconButton(
                 onClick = { autoHide?.poke(); onToggleFavorite() },
                 enabled = !hidden,
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                modifier = Modifier.size(46.dp),
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = if (isCurrentSongFavorite) smallActive else smallContainer,
+                    contentColor = if (isCurrentSongFavorite) onAccent else smallContent
+                )
             ) {
                 Icon(
                     if (isCurrentSongFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
                     null,
-                    tint = if (isCurrentSongFavorite) AccentRed else Color.White,
-                    modifier = Modifier.size(20.dp)
+                    modifier = Modifier.size(22.dp)
                 )
             }
             // 【V8.212】DJ 立即切歌键：与设置页「立即触发」同一入口 triggerCrossfadeNow()，
             // 被挡时 Toast 说明原因并落调试日志（同设置页的处理，方便现场排查）。
             if (onDjTrigger != null) {
-                IconButton(
+                FilledTonalIconButton(
                     onClick = {
                         autoHide?.poke()
                         val ok = onDjTrigger.invoke()
@@ -1404,15 +1538,17 @@ fun PlayerBottomActions(
                         }
                     },
                     enabled = !hidden,
-                    modifier = Modifier
-                        .size(44.dp)
-                        .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                    modifier = Modifier.size(46.dp),
+                    shapes = IconButtonDefaults.shapes(),
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = smallContainer,
+                        contentColor = onAccent
+                    )
                 ) {
                     Icon(
                         Icons.Default.Bolt,
                         stringResource(R.string.player_dj_trigger_now),
-                        tint = AccentGreen,
-                        modifier = Modifier.size(20.dp)
+                        modifier = Modifier.size(22.dp)
                     )
                 }
                 // 【V8.310 Beat Jump】往后跳 1 小节。长按 → 往前跳 1 小节。
@@ -1425,8 +1561,8 @@ fun PlayerBottomActions(
                     }
                     Box(
                         modifier = Modifier
-                            .size(44.dp)
-                            .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                            .size(46.dp)
+                            .background(smallContainer, CircleShape)
                             .combinedClickable(
                                 enabled = !hidden,
                                 onClick = {
@@ -1443,20 +1579,23 @@ fun PlayerBottomActions(
                         Icon(
                             Icons.Default.SkipNext,
                             stringResource(R.string.beat_jump),
-                            tint = AccentGreen,
+                            tint = onAccent,
                             modifier = Modifier.size(20.dp)
                         )
                     }
                 }
             }
-            IconButton(
+            FilledTonalIconButton(
                 onClick = { autoHide?.poke(); onShare() },
                 enabled = !hidden,
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(Color.Black.copy(alpha = 0.35f), CircleShape)
+                modifier = Modifier.size(46.dp),
+                shapes = IconButtonDefaults.shapes(),
+                colors = IconButtonDefaults.filledTonalIconButtonColors(
+                    containerColor = smallContainer,
+                    contentColor = smallContent
+                )
             ) {
-                Icon(Icons.Default.Share, stringResource(R.string.action_share), tint = Color.White, modifier = Modifier.size(20.dp))
+                Icon(Icons.Default.Share, stringResource(R.string.action_share), modifier = Modifier.size(22.dp))
             }
         }
         // 淡出后盖一层只吃点击不干别的：这一下只唤回，不会误触到下面的按钮。
@@ -1508,33 +1647,47 @@ fun PlayerEqLabel(
     }
 }
 
-/** 【V8.19】DTS 环绕（M/S 声场）快捷开关胶囊 — 独立于 MSEB 其他调音 */
+/** 【V8.19】DTS 环绕（M/S 声场）快捷开关胶囊 — 独立于 MSEB 其他调音。
+ *  【V9.4】locked=true（原声直通开启）时：强制按「关」态显示且不可点击。
+ *  直通模式下整条 DSP 被旁路，DTS 实际不发声，若仍点亮会误导用户以为声场已生效，
+ *  故加锁图标并置灰，明确「被直通禁用」，且点击不再触发 onToggleDts。 */
 @Composable
 fun PlayerDtsToggle(
     dtsOn: Boolean,
     accentColor: Color,
     textAccentColor: Color,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    locked: Boolean = false
 ) {
     val shape = SDWShapes.Pill
+    // 直通锁定：视觉与真实开关解耦，强制为「关」态，避免误导。
+    val lit = dtsOn && !locked
     Row(
         modifier = Modifier
             .widthIn(max = 300.dp)
             .clip(shape)
             .background(
-                if (dtsOn) accentColor.copy(alpha = 0.16f)
+                if (lit) accentColor.copy(alpha = 0.16f)
                 else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.08f)
             )
-            .clickable(onClick = onClick)
+            .clickable(enabled = !locked, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {
+        if (locked) {
+            Icon(
+                Icons.Default.Lock,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(13.dp).padding(end = 4.dp)
+            )
+        }
         // 【V8.20】去掉指示灯圆点（视觉更简洁）
         Text(
-            text = stringResource(if (dtsOn) R.string.dts_on else R.string.dts_off),
+            text = stringResource(if (lit) R.string.dts_on else R.string.dts_off),
             style = MaterialTheme.typography.labelLarge.copy(fontWeight = FontWeight.Medium),
-            color = if (dtsOn) textAccentColor else MaterialTheme.colorScheme.onSurfaceVariant,
+            color = if (lit) textAccentColor else MaterialTheme.colorScheme.onSurfaceVariant,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
@@ -2290,7 +2443,7 @@ fun QueueSheet(
                 Text("${queue.size} songs", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 // 【V8.246】队列级自动流程排序（Rekordbox Auto-Flow）：以当前曲为锚按能量/调性重排
                 if (onFlowSort != null) {
-                    IconButton(onClick = onFlowSort, modifier = Modifier.size(32.dp)) {
+                    FilledTonalIconButton(onClick = onFlowSort, modifier = Modifier.size(32.dp), shapes = IconButtonDefaults.shapes()) {
                         Icon(
                             Icons.Default.AutoAwesome,
                             contentDescription = stringResource(R.string.action_flow_sort_queue),
@@ -2468,4 +2621,131 @@ fun QueueSheet(
         )
     }
 
+}
+
+// ============================================================================
+// [2026-10-29 · M3 Expressive] 播放页三点菜单 → 底部抽屉的组成件
+//
+// 旧菜单是 14 项 DropdownMenuItem 连成的一根窄长条：密度高、行矮、字小，且从右上角
+// 一路盖到半山腰。改成底部抽屉后：
+//  - SheetQuickAction：常用动作收成一排大图标胶囊（单手够得着）；
+//  - SheetGroupCard：按功能分组的子容器卡片（卡片之间留 12dp 空隙，层级清晰）；
+//  - SheetActionRow：组内行，行高约 50dp，开关态右侧给 Switch，破坏性操作走 error 色。
+// ============================================================================
+
+/** 抽屉顶部的快捷动作：圆形容器 + 图标 + 一行标签。 */
+@Composable
+private fun SheetQuickAction(
+    icon: ImageVector,
+    label: String,
+    tint: Color = MaterialTheme.colorScheme.onSurface,
+    onClick: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .clickable { onClick() }
+            .padding(vertical = 8.dp, horizontal = 4.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Surface(
+            shape = CircleShape,
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+            contentColor = tint,
+            modifier = Modifier.size(52.dp)
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Icon(icon, label, modifier = Modifier.size(24.dp))
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = label,
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.width(72.dp)
+        )
+    }
+}
+
+/**
+ * 分组子容器：一张 24dp 圆角 Surface 卡片里放若干行。
+ * 卡片底色比抽屉容器低一级（surfaceContainerLow vs High），形成清晰的层级。
+ */
+@Composable
+private fun SheetGroupCard(
+    title: String,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Surface(
+        shape = RoundedCornerShape(24.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp)
+            )
+            content()
+        }
+    }
+}
+
+/**
+ * 抽屉里的一行：[checked] 非空表示这是个开关（右侧给 Switch，整行可点切换），
+ * [danger] 表示破坏性操作（图标与文字走 error 色）。
+ */
+@Composable
+private fun SheetActionRow(
+    icon: ImageVector,
+    text: String,
+    checked: Boolean? = null,
+    danger: Boolean = false,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val disabledTint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(enabled = enabled) { onClick() }
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = text,
+            tint = when {
+                !enabled -> disabledTint
+                danger -> MaterialTheme.colorScheme.error
+                checked == true -> MaterialTheme.colorScheme.primary
+                else -> MaterialTheme.colorScheme.onSurfaceVariant
+            },
+            modifier = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.width(16.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyLarge,
+            color = when {
+                !enabled -> disabledTint
+                danger -> MaterialTheme.colorScheme.error
+                else -> MaterialTheme.colorScheme.onSurface
+            },
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        if (checked != null) {
+            ExpressiveSwitch(checked = checked, enabled = enabled, onCheckedChange = { onClick() })
+        }
+    }
 }

@@ -571,6 +571,9 @@ class MusicService : MediaLibraryService() {
 
     // 【Crossfade】顺序自动交叉淡化（只 Oboe 路径，方案 B：先 mix 再 DSP）
     private var crossfadeEnabled = false
+    /** 【V9.6 修复 Bug3】标记本次 play 是否由 crossfade 自动接歌触发；true 时播放器不启用启动淡入（B 已响，淡入会咬一口）。
+     *  由 playNext 按 fromUser 设置，playSongOboeDirect 消费后复位。 */
+    @Volatile private var crossfadeHandoff = false
     private var crossfadeDurationMs = 5000
     private var crossfadeBars = 4   // 【V8.152/V8.415】过渡长度按小节：2/4/8/16
     /** 【V8.415】小节折算的上限。原先是 20000ms，导致新增的「16 小节」在 120BPM 下
@@ -660,6 +663,10 @@ private var xfadeBChorusMs = -1L
     // 【V8.15】两阶段 crossfade：preloading 提前（候选窗口），预扫完成后才触发
     @Volatile private var xfadePreloading = false
     @Volatile private var xfadePreloadReady = false  // 【2026-09-02】B 轨 openIncoming 后台完成标志
+    // 【V9.6 修复 Bug2】本曲预加载退避标记：auto 预加载 openIncoming 一旦失败就放弃本曲重试，
+    // 避免 500ms 轮询里反复 openIncoming 把 MediaCodec 生命周期锁占满、永远重试不过
+    // （表现=屏幕闪、下一曲切不过来）。切到新歌(playSongOboeDirect)时复位。
+    @Volatile private var xfadePreloadGiveUp = false
     // 【V8.24 A 轨拍点触发】拍点延迟已安排标志（防 monitor 每 tick 重复 postDelayed）
     @Volatile private var xfadeBeatPending = false          // 正在预加载 B（尚未触发）
     // 【V8.183 拍点触发可取消】在飞的拍点延迟 Runnable + 递增令牌。
@@ -1026,12 +1033,12 @@ private var xfadeBChorusMs = -1L
                             // entire song (1412 Crossfade log lines, only 4 meaningful).
                             val preloadByChorus = xfadeAChorusEndMs > 0 && pos >= xfadeAChorusEndMs - 8000
                             val preloadByRemain = remain <= dur + 8000
-                            val nextIndex = if (!xfadePreloading && (preloadByChorus || preloadByRemain)) {
+                            val nextIndex = if (!xfadePreloading && !xfadePreloadGiveUp && (preloadByChorus || preloadByRemain)) {
                                 pickNextIndex(songs, realIdx).takeIf { it != realIdx } ?: -1
                             } else xfadePreloadIndex
                             if (nextIndex >= 0 && nextIndex != realIdx) {
                                 // ===== 阶段1：候选窗口（A 副歌结束前 8s 或 remain<=dur+8s，取先到）→ 启动预加载+副歌预扫（不触发） =====
-                                if (!xfadePreloading && (preloadByChorus || preloadByRemain)) {
+                                if (!xfadePreloading && !xfadePreloadGiveUp && (preloadByChorus || preloadByRemain)) {
                                     xfadePreloading = true
                                     xfadePreloadIndex = nextIndex
                                     xfadePreloadSong = songs[nextIndex]
@@ -1097,10 +1104,18 @@ private var xfadeBChorusMs = -1L
                                                     xfadePreloadPath = null
                                                     xfadePreloadSong = null
                                                     xfadePreloadIndex = -1
+                                                    // 【V9.6 修复 Bug2】预加载失败：标记本曲退避（不再每 tick 重开 openIncoming），
+                                                    // 并清掉残留的 PRELOADING 叠加层，避免"下一曲卡片卡死/反复闪、却切不过来"。
+                                                    xfadePreloadGiveUp = true
+                                                    handler.post { crossfadeUiInfo = CrossfadeUiInfo() }
                                                 }
                                             } catch (e: Throwable) {
                                                 Log.w(TAG, "Crossfade: openIncoming exception ${e.message}")
                                                 xfadePreloadReady = false
+                                                xfadePreloading = false
+                                                // 【V9.6 修复 Bug2】异常同上：退避 + 清叠加层
+                                                xfadePreloadGiveUp = true
+                                                handler.post { crossfadeUiInfo = CrossfadeUiInfo() }
                                             }
                                         }.apply { isDaemon = true }.start()
                                         // 副歌/首拍 —— 【v8.166】优先查缓存（扫描阶段已入库）。
@@ -1450,9 +1465,15 @@ private var xfadeBChorusMs = -1L
                                             crossfadeNativeStarted = true
                                             scheduleCrossfadeCompletionPoll(p, preSong, preIndex, cfDurMs = cfDurEff.toLong())
                                         } else {
-                                            Log.w(TAG, "Crossfade: startCrossfade failed (floor)")
+                                            Log.w(TAG, "Crossfade: startCrossfade failed (floor) -> hard cut fallback")
                                             crossfadeUiInfo = CrossfadeUiInfo()
                                             p.stopIncoming()
+                                            // 【V9.6 修复 Bug2】FLOOR 兜底也失败：清掉残留 busy（否则 monitor 被永久挡死、
+                                            // 后续再也不切歌），并直接硬切到下一曲，保证"下一曲能跳出来"。
+                                            crossfadeBusy = false
+                                            crossfadeNextIndex = -1
+                                            crossfadeBusySinceMs = 0L
+                                            handler.post { playNext() }
                                         }
                                     }
                                 }
@@ -1847,7 +1868,7 @@ private var xfadeBChorusMs = -1L
      * 用户只能看到一句「未触发」，无从排查 —— 现在每条都给出具体原因。
      * 另外：手动触发不再被单曲循环挡死，选不出下一首时直接顺延到下一首。
      */
-    fun triggerCrossfadeNowDetailed(): String {
+    fun triggerCrossfadeNowDetailed(targetIndex: Int = -1): String {
         fun fail(msg: String): String {
             Log.w(TAG, "Crossfade manual: skip ($msg)")
             lastManualTriggerReason = msg
@@ -1860,7 +1881,7 @@ private var xfadeBChorusMs = -1L
         // 应用自身文案 settings_dj_still_on 也写明"总开关没开：手动切歌键仍可用"。
         // 原先这里用 !crossfadeEnabled 拦截，导致单开 DJ 模式（总开关仍关）时，每次手动切歌
         // 都被挡下、UI 统一显示"未触发"。现只校验 DJ 模式(djMode)本身。
-        if (!xfadeCfg().djMode) return failRes(R.string.dj_reason_crossfade_off)
+        if (!xfadeCfg().djMode && !crossfadeEnabled) return failRes(R.string.dj_reason_crossfade_off)
         if (crossfadeBusy) {
             // 【V8.271】① 卡死自愈：置位超过 30s 说明完成轮询没兜住，强制复位；
             // ② 正常过渡中：不再干拒，记下来等本次过渡结束自动补切（实测用户频繁撞上这个挡）。
@@ -1904,10 +1925,16 @@ private var xfadeBChorusMs = -1L
         val songs = servicePlaylist.ifEmpty { SongRepository.getSongs() }
         if (songs.isEmpty()) return failRes(R.string.dj_reason_queue_empty)
         val realIdx = currentIndex
-        var nextIndex = pickNextIndex(songs, realIdx).takeIf { it != realIdx && it >= 0 } ?: -1
-        // 【V8.271】手动触发要「此刻就切一首」：选曲失败/只剩自己时顺延下一首（单曲循环也放行）
-        if (nextIndex < 0) nextIndex = (realIdx + 1) % songs.size
-        if (nextIndex == realIdx) return failRes(R.string.dj_reason_single_song)
+        // 【V9.8】支持显式目标轨：playNext/playPrevious 在交叉淡化开启时复用本过渡，
+        // 直接把已算好的 next/prev 索引传进来；不传则保持原 DJ「立即切下一首」语义。
+        val nextIndex = if (targetIndex >= 0) {
+            targetIndex
+        } else {
+            var n = pickNextIndex(songs, realIdx).takeIf { it != realIdx && it >= 0 } ?: -1
+            if (n < 0) n = (realIdx + 1) % songs.size
+            if (n == realIdx) return failRes(R.string.dj_reason_single_song)
+            n
+        }
         val nextSong = songs[nextIndex]
         val fp = nextSong.filePath.ifEmpty { nextSong.path }
         val path = if (fp.startsWith("content://")) resolveContentUriToPath(fp) else fp
@@ -2636,7 +2663,20 @@ private var xfadeBChorusMs = -1L
     // 不再依赖 ExoPlayer 状态。命令经 handleXxx 路由到 MusicService 权威方法。
     // =====================================================================
     private val musicPlayerState: MusicPlayerState by lazy {
-        MusicPlayerState(Looper.getMainLooper())
+        MusicPlayerState(Looper.getMainLooper()).also { s ->
+            // 【2026-10-28】DAC (USB Exclusive / Bit-Perfect) 熄屏音量桥接：
+            // Media3 锁屏/熄屏硬件音量键经 Player.volume 下发，触发 onVolumeChanged；
+            // DAC 活跃时直接映射到 UsbDacManager.setVolume()（0..1 数字增益），绕过
+            // STREAM_MUSIC。前台仍走 VolumeGuard（VOLUME_CHANGED_ACTION 桥接），两者互补。
+            s.addListener(object : Player.Listener {
+                override fun onVolumeChanged(volume: Float) {
+                    if (com.sdw.music.player.core.audio.engine.UsbDacManager.isClaimed()) {
+                        android.util.Log.d(TAG, "DAC volume bridge: volume=$volume")
+                        com.sdw.music.player.core.audio.engine.UsbDacManager.setVolume(volume)
+                    }
+                }
+            })
+        }
     }
 
     private inner class MusicPlayerState(
@@ -3385,6 +3425,39 @@ private var xfadeBChorusMs = -1L
 
         createNotificationChannel()
 
+        // 【DAC 熄屏音量桥接 2026-10-28】USB DAC（独占 / bit-perfect）走的是软件增益
+        // 直写 USB，输出完全不经过系统 STREAM_MUSIC 流。屏幕亮着时硬件音量键改的是
+        // STREAM_MUSIC，VolumeGuard 收到 VOLUME_CHANGED_ACTION 后桥接成 DAC 增益（可用）；
+        // 熄屏 / 锁屏时系统常把按键改走 MediaSession 远程音量，广播不再发出，桥接断掉，
+        // 于是"按音量键没反应"。这里补一条与广播无关的兜底：DAC 会话占用期间以 1s 粒度
+        // 轻量轮询系统档位，只要档位变化就同步成 DAC 增益。非 DAC 模式下立即空转退出，
+        // 只在 DAC 占用时才做一次 getStreamVolume，开销可忽略。
+        val dacVolumeBridge = object : Runnable {
+            var lastIndex = -1
+            override fun run() {
+                try {
+                    if (UsbDacManager.isClaimed()) {
+                        val am = getSystemService(android.content.Context.AUDIO_SERVICE) as? android.media.AudioManager
+                        if (am != null) {
+                            val idx = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                            val max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                            if (idx != lastIndex) {
+                                lastIndex = idx
+                                if (max > 0) {
+                                    UsbDacManager.setVolume(idx.toFloat() / max.toFloat())
+                                    Log.d(TAG, "DAC volume bridge: sys=$idx/$max -> dac")
+                                }
+                            }
+                        }
+                    } else {
+                        lastIndex = -1
+                    }
+                } catch (_: Throwable) { /* ignore */ }
+                handler.postDelayed(this, 1000L)
+            }
+        }
+        handler.postDelayed(dacVolumeBridge, 1000L)
+
         // 【V8.194】shuffle_mode 只在 settings 里存一份（off / random / bpm）。
         // 旧代码还在 MusicPlayer prefs 里存了一份同名的 boolean，两处互不同步：
         // 设置页写 settings 的 string，于是这里 getBoolean 永远取到 false ——
@@ -3450,7 +3523,7 @@ private var xfadeBChorusMs = -1L
                         // 3:Previous/
                         // [V3.3.2] Use system default MediaNotification buttons - removed custom layout to avoid duplicates
                         .build()
-                }
+                    }
 
                 override fun onCustomCommand(
                     session: MediaSession,
@@ -4344,6 +4417,7 @@ private var xfadeBChorusMs = -1L
                 // cannot be reused by the preload thread afterwards.
                 xfadePreloading = false
                 xfadePreloadReady = false
+                xfadePreloadGiveUp = false   // 【V9.6 修复 Bug2】新歌开始，解除上首歌的预加载退避
                 crossfadeBusy = false
                 crossfadeBusySinceMs = 0L
                 crossfadeNextIndex = -1   // non-null Int, -1 = none
@@ -4570,6 +4644,7 @@ private var xfadeBChorusMs = -1L
                 oboeFlowTrace = "4F3B5 playing..."
                 var played = newPlayer.play()
                 Log.i(TAG, "oboeDirectPlayer.play() = $played")
+                crossfadeHandoff = false   // 【V9.6】标记消费完毕，复位（下次首播/硬切默认启用启动淡入）
                 if (!played) {
                     Thread.sleep(150)
                     played = newPlayer.play()
@@ -4588,6 +4663,9 @@ private var xfadeBChorusMs = -1L
                 oboeUsbGuardMs = System.currentTimeMillis() + 8000L  // [V8.1] block USB-DAC race for 8s
                 oboeSuppressUsbRestart = true  // [V8.2] prevent Oboe restart loop after first song
                 oboeFlowTrace = "2705 Oboe OK (exclusive=${newPlayer.isExclusiveMode()})"
+
+                // 【V9.6 修复 Bug3】启动淡入开关：crossfade 自动接歌(crossfadeHandoff)时不启用，避免咬正在响的 B 轨；其余(首播/硬切/恢复)启用。
+                newPlayer.startupFadeEnabled = !crossfadeHandoff
 
                 // 【V8.446 手动切歌入场点】播起来后立刻 seek 到进歌点。
                 // 放在 play() 之后而不是之前：open() 还没完成时 native seek 拿不到解码器，
@@ -8156,11 +8234,7 @@ private var xfadeBChorusMs = -1L
      *  fromUser=true 时若在过渡窗口（crossfadeBusy）内，直接忽略并提示，避免连点打断交叉淡化
      *  （djay 同款行为）。内部自动续播一律 fromUser=false，永不被本锁拦截。 */
     fun playNext(fromUser: Boolean = false) {
-        if (fromUser && crossfadeBusy) {
-            Log.i(TAG, "playNext: ignored (transition in progress, skip locked)")
-            toastSkipLocked()
-            return
-        }
+        crossfadeHandoff = !fromUser   // 自动接歌(fromUser=false)→不启用启动淡入；手动/首播→启用
         com.sdw.music.player.BpmKeyCache.init(this)
         val songs = servicePlaylist.ifEmpty { SongRepository.getSongs() }
         DebugLog.add(TAG, "playNext: servicePlaylist=${servicePlaylist.size} songs=${songs.size} curIdx=$currentIndex shuffle=$isShuffleMode")
@@ -8185,19 +8259,26 @@ private var xfadeBChorusMs = -1L
         android.util.Log.d(TAG, "playNext: realIdx=$realIdx isShuffleMode=$isShuffleMode")
         val nextIndex = pickNextIndex(songs, realIdx)
         android.util.Log.d(TAG, "playNext: nextIndex=$nextIndex (random=${isShuffleMode && songs.size > 1})")
-        // 【V8.446】手动切歌与自动切歌统一入场点。
-        // 只算起播位置，不做过渡 —— 手动 ⏭ 仍然是硬切，只是起点落在进歌点。
-        // 小节数（4/8 拍）不参与这里：它是过渡时长，不是进入时间点。
-        nextSongEntryMs = if (fromUser) resolveManualEntryMs(songs[nextIndex]) else -1L
+
+        // 【V9.8】交叉淡化开启时，手动切歌改走平滑过渡（A 淡出 / B 从 0:00 淡入），
+        // 复用 DJ 手动触发那套 openIncoming + startCrossfade(...,0,...) 引擎；过渡失败
+        // （如解码器未就绪/未播放）时退化为硬切兜底。自动续播(fromUser=false)不受影响。
+        if (fromUser && crossfadeEnabled) {
+            nextSongEntryMs = -1L
+            val reason = triggerCrossfadeNowDetailed(nextIndex)
+            if (reason.isNotEmpty()) playSong(nextIndex)
+            return
+        }
+        if (fromUser && crossfadeBusy) {
+            Log.i(TAG, "playNext: ignored (transition in progress, skip locked)")
+            toastSkipLocked()
+            return
+        }
+        nextSongEntryMs = -1L
         playSong(nextIndex)
     }
 
     fun playPrevious(fromUser: Boolean = false) {
-        if (fromUser && crossfadeBusy) {
-            Log.i(TAG, "playPrevious: ignored (transition in progress, skip locked)")
-            toastSkipLocked()
-            return
-        }
         // [V3.3.22] REMOVED direct stopDecode() �� releaseUsbDacController() in playSong() handles it
         val songs = servicePlaylist.ifEmpty { SongRepository.getSongs() }
         if (songs.isEmpty()) return
@@ -8209,6 +8290,20 @@ private var xfadeBChorusMs = -1L
         val realIdx = if (currentId != null) songs.indexOfFirst { it.id == currentId }.coerceAtLeast(0)
                        else currentIndex
         val prevIndex = if (realIdx > 0) realIdx - 1 else songs.size - 1
+
+        // 【V9.8】交叉淡化开启时，手动切歌改走平滑过渡（同 playNext）。
+        if (fromUser && crossfadeEnabled) {
+            nextSongEntryMs = -1L
+            val reason = triggerCrossfadeNowDetailed(prevIndex)
+            if (reason.isNotEmpty()) playSong(prevIndex)
+            return
+        }
+        if (fromUser && crossfadeBusy) {
+            Log.i(TAG, "playPrevious: ignored (transition in progress, skip locked)")
+            toastSkipLocked()
+            return
+        }
+        nextSongEntryMs = -1L
         playSong(prevIndex)
     }
 

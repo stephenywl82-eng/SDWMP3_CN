@@ -36,7 +36,7 @@ import com.sdw.music.player.ui.components.springPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun LyricSearchScreen(
     songId: Long,
@@ -75,8 +75,9 @@ fun LyricSearchScreen(
                     Text(stringResource(R.string.title_search_lyrics), color = MaterialTheme.colorScheme.onBackground)
                 },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    // [P2 · M3 Expressive] 裸 IconButton → tonal 容器键，与全站顶栏统一
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
             )
@@ -85,7 +86,8 @@ fun LyricSearchScreen(
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             // Search bar
-            OutlinedTextField(
+            // [P2 · M3 Expressive] 描边式 → 容器式（半透明玻璃），与主界面搜索框统一。
+            TextField(
                 value = searchQuery,
                 onValueChange = { searchQuery = it },
                 placeholder = { Text("Title + Artist", color = MaterialTheme.colorScheme.outlineVariant) },
@@ -110,11 +112,13 @@ fun LyricSearchScreen(
                 },
                 singleLine = true,
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-                colors = OutlinedTextFieldDefaults.colors(
+                colors = TextFieldDefaults.colors(
                     focusedTextColor = MaterialTheme.colorScheme.onBackground,
                     unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                    focusedIndicatorColor = Color.Transparent,
+                    unfocusedIndicatorColor = Color.Transparent,
                     cursorColor = MaterialTheme.colorScheme.primary
                 ),
                 shape = SDWShapes.Media
@@ -123,7 +127,7 @@ fun LyricSearchScreen(
             when {
                 isLoading -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                        LoadingIndicator()
                     }
                 }
                 selectedResult != null -> {

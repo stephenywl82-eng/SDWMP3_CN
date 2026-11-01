@@ -3,8 +3,9 @@ package com.sdw.music.player.ui.components
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
@@ -51,11 +52,13 @@ fun SDWTopBar(
     navigationIcon: @Composable () -> Unit = {
         val cb = onNavigateBack
         if (cb != null) {
-            IconButton(onClick = cb) {
+            FilledTonalIconButton(
+                onClick = cb,
+                shapes = IconButtonDefaults.shapes()
+            ) {
                 Icon(
                     Icons.AutoMirrored.Filled.ArrowBack,
-                    stringResource(R.string.action_back),
-                    tint = MaterialTheme.colorScheme.onBackground
+                    stringResource(R.string.action_back)
                 )
             }
         }

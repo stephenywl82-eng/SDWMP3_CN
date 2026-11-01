@@ -472,7 +472,7 @@
     <string name="vu_style_mixer">混音台</string>
     <string name="settings_section_display">顯示與介面</string>
     <string name="settings_section_library">媒體庫</string>
-    <string name="settings_section_playback">播放與過渡</string>
+    <string name="settings_section_playback">轉場與 DJ</string>
     <string name="settings_section_system">系統與除錯</string>
     <string name="action_play_all">播放全部</string>
     <string name="queue_single_song">播放列表只有一首歌</string>

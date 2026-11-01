@@ -109,8 +109,9 @@ fun Modifier.glassSurface(
         this.shadow(
             elevation = elevation,
             shape = shape,
-            ambientColor = Color.Black.copy(alpha = 0.30f),
-            spotColor = Color.Black.copy(alpha = 0.42f)
+            // [2026-10-31] 阴影减淡：抬升面用更轻的投影，读起来是悬浮的薄玻璃而非深坑。
+            ambientColor = Color.Black.copy(alpha = 0.18f),
+            spotColor = Color.Black.copy(alpha = 0.26f)
         )
     } else this
 

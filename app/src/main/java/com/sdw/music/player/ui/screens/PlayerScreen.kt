@@ -1,6 +1,8 @@
 @file:OptIn(ExperimentalMaterial3Api::class)
 
 package com.sdw.music.player.ui.screens
+
+import androidx.compose.material3.MaterialTheme
 import com.sdw.music.player.core.audio.dsp.EqualizerManager
 import com.sdw.music.player.core.audio.dsp.MsebCalculator
 import com.sdw.music.player.core.audio.playback.MusicService
@@ -956,8 +958,11 @@ fun PlayerScreen(
     var midBeat by remember { mutableStateOf(BandBeat()) }
     var highBeat by remember { mutableStateOf(BandBeat()) }
 
-    // 播放器页固定深色配色：无论全局切浅色还是深色，播放器内部始终走深色（含文字）
-    MaterialTheme(colorScheme = SDWDarkColorScheme) {
+    // 播放器页固定深色：无论全局切浅色还是深色，播放器内部始终走深色（含文字）。
+    // [M3 Expressive · 自动主题色] 但**不锁配色**——原来这里写死 SDWDarkColorScheme，
+    // 把 primary 钉成 AccentBlue，绕过全局动态取色。改为「当前主题配色 + 强制深色」。
+    val playerScheme = sdwForcedDarkScheme()
+    MaterialTheme(colorScheme = playerScheme) {
     // 【V9.02 防误触】返回（出播放页）转场期间播放页仍在顶层逐渐淡出，此刻点击会打在播放页控件
     // （如中央播放/暂停键）上造成误触发。isAnimating 在转场期间为真，故在此期间吞掉播放页所有指针
     // 事件；转场结束播放页被销毁后列表立即正常可点，无残留副作用。
@@ -1598,6 +1603,7 @@ private fun FoldableLayout(coverUri: String?,
     // 【Lyrico 联动】三点菜单「用 Lyrico 编辑」返回后的回调，透传给 PlayerTopBar
     onLyricoExternalEditReturned: (songId: Long, filePath: String, extras: Bundle?) -> Unit = { _, _, _ -> }
 ) {
+    val hasCoverColor = state.accentColor != 0L && coverUri?.isNotEmpty() == true
     // [V8.99] Insets parity with PortraitLayout: this page has no Scaffold, so the
     // navigation-bar inset must be consumed here or bottom-anchored controls sit under
     // the 3-button navigation bar. PortraitLayout already did this; Foldable/Landscape
@@ -1642,6 +1648,7 @@ private fun FoldableLayout(coverUri: String?,
                 immersivePlayer = immersive,
                 onToggleImmersive = onToggleImmersive,
                 onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
+                accentColor = accentColor,
                 modifier = Modifier.padding(horizontal = 0.dp, vertical = 4.dp)
             )
 
@@ -1750,6 +1757,7 @@ private fun FoldableLayout(coverUri: String?,
 
             PlayerProgress(
                 progressFraction, durationMs, positionMs, accentColor,
+                isPlaying = isPlaying,
                 onSeekTo = { bottomAutoHide?.poke(); onSeekTo((durationMs * it).toLong()) },
                 // 【V8.184】规格并入进度条下方的时间行，与「时长」同水平、右对齐
                 specSlot = { if (!hideSpec) SongSpecLabel(songSpec, accentColor, textAccentColor) },
@@ -1768,7 +1776,8 @@ private fun FoldableLayout(coverUri: String?,
                             dtsOn = dtsOn,
                             accentColor = accentColor,
                             textAccentColor = textAccentColor,
-                            onClick = onToggleDts
+                            onClick = onToggleDts,
+                            locked = directPassthrough
                         )
                     }
                     Spacer(Modifier.height(2.dp))
@@ -1782,6 +1791,7 @@ private fun FoldableLayout(coverUri: String?,
                     onPause = onPause,
                     // 【V8.362】DJ 模式的切歌键 = DJ 切歌：先走交叉淡化（triggerCrossfadeNow），
                     // 仅当"失败且未排队"（暂停中/无曲目等）才回退普通硬切，保证键永远可用。
+                    hasCoverColor = hasCoverColor,
                     onNext = djCutOrFallbackNext(onNext),
                     modifier = Modifier.fillMaxWidth().padding(horizontal = SDWTransport.Gutter),
                     onInteract = { bottomAutoHide?.poke() }
@@ -1792,6 +1802,7 @@ private fun FoldableLayout(coverUri: String?,
                 repeatMode = state.repeatMode,
                 isPlaying = isPlaying,
                 accentColor = accentColor,
+                hasCoverColor = hasCoverColor,
                 onToggleShuffle = onToggleShuffle,
                 onPrevious = onPrevious,
                 onPlay = onPlay,
@@ -1814,6 +1825,7 @@ private fun FoldableLayout(coverUri: String?,
                     onToggleEqualizer = onToggleEqualizer,
                     onToggleFavorite = onToggleFavorite,
                     onShare = onShare,
+                    accentColor = accentColor,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
                     autoHide = bottomAutoHide
                 )
@@ -1841,7 +1853,7 @@ private fun FoldableLayout(coverUri: String?,
                     style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f)
                 )
-                IconButton(onClick = onNavigateToLyrics, modifier = Modifier.size(32.dp)) {
+                FilledTonalIconButton(onClick = onNavigateToLyrics, modifier = Modifier.size(32.dp), shapes = IconButtonDefaults.shapes()) {
                     Icon(Icons.Default.Search, stringResource(R.string.action_search), tint = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f), modifier = Modifier.size(18.dp))
                 }
 
@@ -1983,6 +1995,7 @@ private fun LandscapeLayout(coverUri: String?,
     // 【Lyrico 联动】三点菜单「用 Lyrico 编辑」返回后的回调，透传给 PlayerTopBar
     onLyricoExternalEditReturned: (songId: Long, filePath: String, extras: Bundle?) -> Unit = { _, _, _ -> }
 ) {
+    val hasCoverColor = state.accentColor != 0L && coverUri?.isNotEmpty() == true
     // 【V8.380】DJ 模式不再走独立界面。
     // 之前给 DJ 做了横屏卡片 / 竖屏卡片 / 彩虹频谱 / 整曲波形 / 切片 / BPM 读数，
     // 用户反馈「太复杂」—— DJ 的价值在**引擎自动混音**，界面只需能播、能停、能切下一首。
@@ -2033,7 +2046,8 @@ private fun LandscapeLayout(coverUri: String?,
                 onToggleVu = onToggleVu,
                 immersivePlayer = immersive,
                 onToggleImmersive = onToggleImmersive,
-                onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic
+                onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
+                accentColor = accentColor
             )
 
             // 【V8.21 fix】滚动区只放信息（标题/歌词/VU/EQ/DAC/进度/规格/DTS），
@@ -2103,21 +2117,6 @@ private fun LandscapeLayout(coverUri: String?,
                 LiveVuMeter(bandLevelsState = bandLevelsState, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, coverColors = vuCoverColors, isAnimating = isAnimating, modifier = Modifier.padding(horizontal = 8.dp).heightIn(max = 50.dp))
                 Spacer(Modifier.height(6.dp))
             }
-            if (visualMode.showWave) {
-                FullSongWaveform(
-                    modifier = Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 8.dp),
-                    progress = progressFraction,
-                    showSliceMarkers = false,
-                    showBarLabels = false,
-                    // 【V8.439】省电：播放页只等 20 × 600ms = 12s，扫不完就留着单色
-                    // （后台 warmDjStructure 会继续填缓存，下次进来直接就有颜色）。
-                    pollBudget = 20,
-                    onSeekToFraction = { frac ->
-                        if (durationMs > 0) onSeekTo((durationMs * frac).toLong())
-                    }
-                )
-                Spacer(Modifier.height(6.dp))
-            }
             DacInfoBar(accentColor, textAccentColor, isPlaying,
                 onClick = onNavigateToAudioDiagnostic,
                 show = !immersive,
@@ -2131,6 +2130,7 @@ private fun LandscapeLayout(coverUri: String?,
             // 【V8.21 fix】固定底部控制区：进度/规格/DTS/控制键/底部操作 旋转后始终可见
             PlayerProgress(
                 progressFraction, durationMs, positionMs, accentColor,
+                isPlaying = isPlaying,
                 onSeekTo = { bottomAutoHide?.poke(); onSeekTo((durationMs * it).toLong()) },
                 // 【V8.184】规格并入进度条下方的时间行，与「时长」同水平、右对齐
                 specSlot = { if (!hideSpec) SongSpecLabel(songSpec, accentColor, textAccentColor) },
@@ -2147,7 +2147,8 @@ private fun LandscapeLayout(coverUri: String?,
                         dtsOn = dtsOn,
                         accentColor = accentColor,
                         textAccentColor = textAccentColor,
-                        onClick = onToggleDts
+                        onClick = onToggleDts,
+                        locked = directPassthrough
                     )
                 }
                 Spacer(Modifier.height(2.dp))
@@ -2161,6 +2162,7 @@ private fun LandscapeLayout(coverUri: String?,
                     onPause = onPause,
                     // 【V8.362】DJ 模式的切歌键 = DJ 切歌：先走交叉淡化（triggerCrossfadeNow），
                     // 仅当"失败且未排队"（暂停中/无曲目等）才回退普通硬切，保证键永远可用。
+                    hasCoverColor = hasCoverColor,
                     onNext = djCutOrFallbackNext(onNext),
                     modifier = Modifier.fillMaxWidth().padding(top = 2.dp),
                     onInteract = { bottomAutoHide?.poke() }
@@ -2171,6 +2173,7 @@ private fun LandscapeLayout(coverUri: String?,
                 repeatMode = state.repeatMode,
                 isPlaying = isPlaying,
                 accentColor = accentColor,
+                hasCoverColor = hasCoverColor,
                 onToggleShuffle = onToggleShuffle,
                 onPrevious = onPrevious,
                 onPlay = onPlay,
@@ -2193,6 +2196,7 @@ private fun LandscapeLayout(coverUri: String?,
                     onToggleEqualizer = onToggleEqualizer,
                     onToggleFavorite = onToggleFavorite,
                     onShare = onShare,
+                    accentColor = accentColor,
                     modifier = Modifier.fillMaxWidth(),
                     autoHide = bottomAutoHide
                 )
@@ -2326,6 +2330,7 @@ private fun PortraitLayout(coverUri: String?,
     // 【Lyrico 联动】三点菜单「用 Lyrico 编辑」返回后的回调，透传给 PlayerTopBar
     onLyricoExternalEditReturned: (songId: Long, filePath: String, extras: Bundle?) -> Unit = { _, _, _ -> }
 ) {
+    val hasCoverColor = state.accentColor != 0L && coverUri?.isNotEmpty() == true
     val hPadding = if (isRazrOuter) 12.dp else if (isCompact) 24.dp else 48.dp
     val infoPadding = if (isRazrOuter) 14.dp else if (isCompact) 20.dp else 32.dp
 
@@ -2365,6 +2370,7 @@ private fun PortraitLayout(coverUri: String?,
                 immersivePlayer = immersive,
                 onToggleImmersive = onToggleImmersive,
                 onNavigateToAudioDiagnostic = onNavigateToAudioDiagnostic,
+                accentColor = accentColor,
                 verticalPadding = 0.dp,
             backIconSize = 32.dp,
             modifier = Modifier.then(portraitModifier)
@@ -2557,20 +2563,6 @@ private fun PortraitLayout(coverUri: String?,
                 LiveVuMeter(bandLevelsState = bandLevelsState, isActive = isPlaying, style = VuMeterStyle.entries[vuStyleIdx.coerceIn(0, VuMeterStyle.entries.lastIndex)], accentColor = accentColor, coverColors = vuCoverColors, isAnimating = isAnimating, modifier = Modifier.padding(horizontal = infoPadding))
             Spacer(Modifier.height(6.dp))
         }
-        if (!isRazrOuter && visualMode.showWave) {
-            FullSongWaveform(
-                modifier = Modifier.fillMaxWidth().height(46.dp).padding(horizontal = infoPadding),
-                progress = progressFraction,
-                showSliceMarkers = false,
-                showBarLabels = false,
-                // 【V8.439】省电：播放页只等 20 × 600ms = 12s
-                pollBudget = 20,
-                onSeekToFraction = { frac ->
-                    if (durationMs > 0) onSeekTo((durationMs * frac).toLong())
-                }
-            )
-            Spacer(Modifier.height(6.dp))
-        }
 
             Spacer(Modifier.height(8.dp))
 
@@ -2588,6 +2580,7 @@ private fun PortraitLayout(coverUri: String?,
         // Progress
             PlayerProgress(
                 progressFraction, durationMs, positionMs, accentColor,
+                isPlaying = isPlaying,
                 onSeekTo = { bottomAutoHide?.poke(); onSeekTo((durationMs * it).toLong()) },
                 // 【V8.184】规格并入进度条下方的时间行，与「时长」同水平、右对齐
                 specSlot = { if (!hideSpec) SongSpecLabel(songSpec, accentColor, textAccentColor) },
@@ -2606,7 +2599,8 @@ private fun PortraitLayout(coverUri: String?,
                     dtsOn = dtsOn,
                     accentColor = accentColor,
                     textAccentColor = textAccentColor,
-                    onClick = onToggleDts
+                    onClick = onToggleDts,
+                    locked = directPassthrough
                 )
             }
             Spacer(Modifier.height(2.dp))
@@ -2620,6 +2614,7 @@ private fun PortraitLayout(coverUri: String?,
                 onPlay = onPlay,
                 onPause = onPause,
                 // 【V8.362】同上：切歌键 = DJ 切歌，失败且未排队才回退普通硬切。
+                hasCoverColor = hasCoverColor,
                 onNext = djCutOrFallbackNext(onNext),
                 modifier = Modifier.fillMaxWidth().padding(horizontal = SDWTransport.Gutter),
                 onInteract = { bottomAutoHide?.poke() }
@@ -2630,6 +2625,7 @@ private fun PortraitLayout(coverUri: String?,
             repeatMode = state.repeatMode,
             isPlaying = isPlaying,
             accentColor = accentColor,
+            hasCoverColor = hasCoverColor,
             onToggleShuffle = onToggleShuffle,
             onPrevious = onPrevious,
             onPlay = onPlay,
@@ -2654,6 +2650,7 @@ private fun PortraitLayout(coverUri: String?,
                 onToggleEqualizer = onToggleEqualizer,
                 onToggleFavorite = onToggleFavorite,
                 onShare = onShare,
+                accentColor = accentColor,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = hPadding),
                     autoHide = bottomAutoHide
             )

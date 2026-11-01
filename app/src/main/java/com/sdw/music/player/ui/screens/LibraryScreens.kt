@@ -51,6 +51,7 @@ import com.sdw.music.player.ui.components.CountText
 import com.sdw.music.player.ui.components.LibraryEmptyState
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.components.springPress
+import com.sdw.music.player.ui.components.SDWAlertDialog
 import com.sdw.music.player.ui.theme.itemTitleStyle
 import androidx.compose.foundation.interaction.MutableInteractionSource
 
@@ -85,8 +86,8 @@ fun FolderListScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
             )
@@ -229,8 +230,8 @@ fun PlaylistListScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
             )
@@ -242,7 +243,7 @@ fun PlaylistListScreen(
                     showCreateDialog = true
                 },
                 containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = Color.White
+                contentColor = MaterialTheme.colorScheme.onPrimary
             ) {
                 Icon(Icons.Default.Add, stringResource(R.string.placeholder_new_playlist))
             }
@@ -365,21 +366,26 @@ fun PlaylistListScreen(
     }
 
     if (showCreateDialog) {
-        AlertDialog(
+        // [P2 · M3 Expressive] 全站弹窗统一到 SDWAlertDialog（玻璃容器 + Panel 圆角）
+        SDWAlertDialog(
             onDismissRequest = { showCreateDialog = false },
             title = { Text(stringResource(R.string.title_new_playlist), color = MaterialTheme.colorScheme.onBackground) },
             text = {
-                OutlinedTextField(
+                // [P2] 描边式输入框 → 容器式（半透明玻璃），与主界面搜索框统一
+                TextField(
                     value = newPlaylistName,
                     onValueChange = { newPlaylistName = it },
-                    placeholder = { Text(stringResource(R.string.playlist_name_placeholder)) },
+                    placeholder = { Text(stringResource(R.string.playlist_name_placeholder), color = MaterialTheme.colorScheme.onSurfaceVariant) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = MaterialTheme.colorScheme.onBackground,
-                        unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
-                        focusedBorderColor = MaterialTheme.colorScheme.primary,
-                        unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
+                    colors = TextFieldDefaults.colors(
+                        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        cursorColor = MaterialTheme.colorScheme.primary,
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent
                     )
                 )
             },
@@ -401,14 +407,13 @@ fun PlaylistListScreen(
                 TextButton(onClick = { showCreateDialog = false }) {
                     Text(stringResource(R.string.action_cancel), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            },
-            containerColor = MaterialTheme.colorScheme.surface
+            }
         )
     }
 
     showDeleteConfirm?.let { playlistId ->
         val pl = playlists.find { it.id == playlistId }
-        AlertDialog(
+        SDWAlertDialog(
             onDismissRequest = { showDeleteConfirm = null },
             title = { Text(stringResource(R.string.title_delete_playlist), color = MaterialTheme.colorScheme.onBackground) },
             text = {
@@ -432,8 +437,7 @@ fun PlaylistListScreen(
                 TextButton(onClick = { showDeleteConfirm = null }) {
                     Text(stringResource(R.string.action_cancel), color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            },
-            containerColor = MaterialTheme.colorScheme.surface
+            }
         )
     }
 }
@@ -487,14 +491,15 @@ fun FolderDetailScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
                 actions = {
                     if (allSongs.isNotEmpty()) {
-                        IconButton(onClick = { onPlaySongs(allSongs, 0) }) {
-                            Icon(Icons.Default.PlayArrow, stringResource(R.string.placeholder_play_folder), tint = MaterialTheme.colorScheme.primary)
+                        // [P2 · M3 Expressive] 裸 IconButton → tonal 容器键，与同页返回键同一形态
+                        FilledTonalIconButton(onClick = { onPlaySongs(allSongs, 0) }, shapes = IconButtonDefaults.shapes()) {
+                            Icon(Icons.Default.PlayArrow, stringResource(R.string.placeholder_play_folder))
                         }
                     }
                 },

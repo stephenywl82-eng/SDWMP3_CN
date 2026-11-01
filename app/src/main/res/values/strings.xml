@@ -179,6 +179,10 @@
 <string name="songlist_song_count">%1$d songs</string>
 <string name="songlist_close_details">Close details</string>
 <string name="songlist_close_search">Close search</string>
+<string name="search_history_title">Recent searches</string>
+<string name="search_history_clear_all">Clear all</string>
+<string name="search_history_empty">No recent searches</string>
+<string name="search_history_remove">Remove this entry</string>
 <string name="songlist_tile_all">All</string>
 <string name="songlist_tile_hires">Hi-Res</string>
 <string name="songlist_tile_recent">Recent</string>
@@ -255,7 +259,7 @@
 <string name="eq_activated">Activated</string>
 <string name="eq_autoeq_desc">Based on AutoEq project · 10-band parametric · Harman target curve</string>
 <string name="eq_android_unavailable">Android equalizer unavailable.\nSwitch audio output to AAudio/OpenSL ES/AudioTrack.</string>
-<string name="brand_name">Moto Music Premium</string>
+<string name="brand_name">Moto Music</string>
 <string name="brand_audio">Moto Audio</string>
 <string name="search_songs">Search songs…</string>
 <string name="diag_usb_direct_write">USB direct write bypasses AudioFlinger</string>
@@ -562,6 +566,9 @@
     <string name="songlist_sort_added">Recently added</string>
     <string name="songlist_sort_filename">File name</string>
     <string name="songlist_sort_duration">Duration</string>
+    <string name="songlist_sort_format">Format</string>
+    <string name="song_delete_confirm_title">Delete Song</string>
+    <string name="song_delete_confirm_message">\"%1$s\" will be removed from this device. This can\'t be undone.</string>
     <string name="eq_autoeq_search">Search model or brand</string>
     <string name="eq_autoeq_hint">Search 6000+ headphone models, or tap a brand below</string>
     <string name="eq_autoeq_results">%1$d results</string>
@@ -830,13 +837,13 @@
     <string name="vu_style_mixer">Mixer</string>
     <string name="settings_section_display">Display &amp; Interface</string>
     <string name="settings_section_library">Library</string>
-    <string name="settings_section_playback">Playback &amp; Transitions</string>
+    <string name="settings_section_playback">Transitions &amp; DJ</string>
     <string name="settings_grp_select">Track selection &amp; bands</string>
     <string name="settings_collapse_all">Collapse all</string>
     <string name="settings_expand_all">Expand all</string>
     <string name="settings_grp_template">Transition template &amp; FX depth</string>
     <string name="settings_grp_stem">Stems &amp; advanced DJ</string>
-    <string name="settings_grp_basic">Basic playback</string>
+    <string name="settings_grp_basic">Basic</string>
     <string name="settings_collapse">Collapse</string>
     <string name="settings_expand">Expand</string>
     <string name="settings_section_system">System &amp; Debug</string>

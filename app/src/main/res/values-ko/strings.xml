@@ -467,7 +467,7 @@
     <string name="vu_style_mixer">믹서</string>
     <string name="settings_section_display">디스플레이 및 인터페이스</string>
     <string name="settings_section_library">라이브러리</string>
-    <string name="settings_section_playback">재생 및 전환</string>
+    <string name="settings_section_playback">Transitions &amp; DJ</string>
     <string name="settings_section_system">시스템 및 디버그</string>
     <string name="action_play_all">전체 재생</string>
     <string name="diag_dac_capabilities">DAC 기능</string>

@@ -25,6 +25,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.geometry.CornerRadius
@@ -201,6 +202,22 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
     // 【V8.209】上面那条 1000ms 主循环保留（.async 检测类），但频响/电平不再由它或任何
     // 页面级 State 驱动 —— 见下方 「Signal Path」注释：整页重组的代价远大于读数本身。
 
+    // 【P6】单一帧源：整页只做一次 readBandLevels + 一次 withFrameMillis，三处可视化共享
+    // 这一帧缓冲区与 tick。原先 FreqBars / LevelBarLine×2 / LevelHistory 各自起一个 60fps
+    // 重组环、每帧各调一次 JNI，4 个高频协程 + 每帧 3~4 次 JNI 把主线程帧预算打爆，在
+    // LazyColumn + 大量玻璃卡片的页面上就表现为「三处动画都掉帧卡卡」。收敛后每帧只 1 次
+    // JNI、1 次无效化批次，三个 Canvas 在同一帧内一并重绘。
+    val levelBuf = remember { FloatArray(25) }
+    val levelTick = remember { mutableLongStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            withFrameMillis { t ->
+                MusicService.instance?.getOboePlayer()?.readBandLevels(levelBuf)
+                levelTick.longValue = t
+            }
+        }
+    }
+
     // Resampling status (uses live Exclusive state; null → assume non-exclusive)
     val effectiveDeviceRate = when {
         isUsbDacMode && dacStreamRate > 0 -> dacStreamRate
@@ -217,8 +234,8 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
             SDWTopBar(
                 title = { Text(stringResource(R.string.title_audio_diagnostic), color = MaterialTheme.colorScheme.onBackground) },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
             )
@@ -235,12 +252,12 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                 val (statusText, statusColor, statusIcon) = when {
                     isUsbDacMode && bitPerfect -> Triple("Bit-Perfect · USB DAC Exclusive", AccentGreen, Icons.Default.CheckCircle)
                     isUsbDacMode -> Triple("USB DAC Exclusive · Direct Write", AccentGreen, Icons.Default.Usb)
-                    !isOboeMode -> Triple(stringResource(R.string.diag_engine_idle), Color(0xFFFF9800), Icons.Default.MusicNote)
+                    !isOboeMode -> Triple(stringResource(R.string.diag_engine_idle), MaterialTheme.colorScheme.tertiary, Icons.Default.MusicNote)
                     // [V8.132] BT route wins over the sharing-mode badge: A2DP re-encodes,
                     // so an MMAP exclusive lock must never be shown as bit-perfect/exclusive.
-                    btActive -> Triple("Bluetooth · A2DP Re-encode", Color(0xFFFF9800), Icons.Default.Bluetooth)
+                    btActive -> Triple("Bluetooth · A2DP Re-encode", MaterialTheme.colorScheme.tertiary, Icons.Default.Bluetooth)
                     isExclusiveLive == true -> Triple("Oboe Exclusive · MMAP Direct", AccentGreen, Icons.Default.CheckCircle)
-                    isOboeMode -> Triple("AAudio Shared · System Mixer In Path", Color(0xFFFF9800), Icons.Default.Warning)
+                    isOboeMode -> Triple("AAudio Shared · System Mixer In Path", MaterialTheme.colorScheme.tertiary, Icons.Default.Warning)
                     else -> Triple(stringResource(R.string.diag_detecting), MaterialTheme.colorScheme.onSurfaceVariant, Icons.Default.Info)
                 }
                 // [V8.115] 统一玻璃语言：状态卡用 status 色做 accent 洗底（保留原语义色）。
@@ -277,7 +294,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                         label = "DAC Stream",
                         value = "${dacStreamRate / 1000.0} kHz / ${dacStreamBits}bit",
                         sublabel = stringResource(R.string.diag_dac_stream_desc, dacName),
-                        accent = if (matchesSource) AccentGreen else Color(0xFFFF9800)
+                        accent = if (matchesSource) AccentGreen else MaterialTheme.colorScheme.tertiary
                     )
                 }
             }
@@ -291,7 +308,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                         label = stringResource(R.string.diag_stream_rate),
                         value = "${streamRate / 1000.0} kHz",
                         sublabel = stringResource(R.string.diag_stream_rate_desc),
-                        accent = if (matchesSource) AccentGreen else Color(0xFFFF9800)
+                        accent = if (matchesSource) AccentGreen else MaterialTheme.colorScheme.tertiary
                     )
                 }
             }
@@ -404,7 +421,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                                 }
                                 val healthColor = when (health) {
                                     stringResource(R.string.diag_health_stable) -> AccentGreen
-                                    stringResource(R.string.diag_health_fluctuating) -> Color(0xFFFF9800)
+                                    stringResource(R.string.diag_health_fluctuating) -> MaterialTheme.colorScheme.tertiary
                                     stringResource(R.string.diag_health_critical) -> AccentRed
                                     stringResource(R.string.diag_health_wedge) -> AccentRed
                                     else -> MaterialTheme.colorScheme.onSurfaceVariant
@@ -437,7 +454,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                         btActive -> MaterialTheme.colorScheme.primary   // [V8.132] BT route
                         isExclusiveLive == null -> MaterialTheme.colorScheme.onSurfaceVariant
                         isExclusiveLive == true -> AccentGreen
-                        else -> Color(0xFFFF9800)
+                        else -> MaterialTheme.colorScheme.tertiary
                     },
                     animationSpec = tween(400)
                 )
@@ -458,12 +475,20 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(12.dp)
-                                .clip(SDWShapes.Thumb)
-                                .drawWithContent {
-                                    drawCircle(dotColor)
-                                }
-                        )
+                                .size(40.dp)
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(dotColor.copy(alpha = 0.16f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(12.dp)
+                                    .clip(SDWShapes.Thumb)
+                                    .drawWithContent {
+                                        drawCircle(dotColor)
+                                    }
+                            )
+                        }
                         Spacer(Modifier.width(10.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(stringResource(R.string.diag_live_monitor), color = MaterialTheme.colorScheme.onBackground, fontSize = 13.sp, fontWeight = FontWeight.Medium)
@@ -501,7 +526,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                     isExclusiveLive == true -> AccentGreen
                     isExclusiveLive == null -> MaterialTheme.colorScheme.onSurfaceVariant
                     isOboeMode -> MaterialTheme.colorScheme.primary
-                    else -> Color(0xFFFF9800)
+                    else -> MaterialTheme.colorScheme.tertiary
                 }
                 DiagnosticRow(
                     icon = Icons.Default.Speaker,
@@ -521,7 +546,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
             // ── Signal Path [V8.124] ──
             item { Spacer(Modifier.height(4.dp)) }
             item { SectionTitle("Signal Path") }
-            item { SignalPathCard(oboePlayer) }
+            item { SignalPathCard(oboePlayer, levelBuf, levelTick) }
 
             // ── 【V8.210】响度归一化 ──
             item { Spacer(Modifier.height(4.dp)) }
@@ -531,14 +556,14 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
             // ── 【V8.209】输出电平实时监控 ──
             item { Spacer(Modifier.height(4.dp)) }
             item { SectionTitle(stringResource(R.string.diag_level_section)) }
-            item { LevelMonitorCard() }
+            item { LevelMonitorCard(levelBuf, levelTick) }
 
             // ── AudioFlinger Track Flags ──
             item {
                 val flagAccent = when {
                     trackFlagsHex.contains("0x004") || trackFlagsHex.contains("0x100") -> AccentGreen
                     trackFlagsHex == "—" -> MaterialTheme.colorScheme.onSurfaceVariant
-                    else -> Color(0xFFFF9800)
+                    else -> MaterialTheme.colorScheme.tertiary
                 }
                 DiagnosticRow(
                     icon = Icons.Default.Memory,
@@ -565,7 +590,7 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                                 val (icon, color) = when (event.event) {
                                     "GAIN" -> Icons.Default.CheckCircle to AccentGreen
                                     "LOSS" -> Icons.Default.Cancel to AccentRed
-                                    "LOSS_TRANSIENT" -> Icons.Default.Warning to Color(0xFFFF9800)
+                                    "LOSS_TRANSIENT" -> Icons.Default.Warning to MaterialTheme.colorScheme.tertiary
                                     "LOSS_TRANSIENT_CAN_DUCK" -> Icons.Default.Remove to MaterialTheme.colorScheme.primary
                                     else -> Icons.Default.Info to MaterialTheme.colorScheme.onSurfaceVariant
                                 }
@@ -667,11 +692,11 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                                 )
                             } else if (isExclusiveLive == false && isOboeMode) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Warning, null, tint = Color(0xFFFF9800), modifier = Modifier.size(20.dp))
+                                    Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(20.dp))
                                     Spacer(Modifier.width(8.dp))
                                     Text(
                                         stringResource(R.string.diag_aaudio_shared),
-                                        color = Color(0xFFFF9800),
+                                        color = MaterialTheme.colorScheme.tertiary,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium
                                     )
@@ -692,11 +717,11 @@ fun AudioDiagnosticScreen(onNavigateBack: () -> Unit) {
                                 )
                             } else {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Default.Warning, null, tint = Color(0xFFFF9800), modifier = Modifier.size(20.dp))
+                                    Icon(Icons.Default.Warning, null, tint = MaterialTheme.colorScheme.tertiary, modifier = Modifier.size(20.dp))
                                     Spacer(Modifier.width(8.dp))
                                     Text(
                                         stringResource(R.string.diag_app_resampling),
-                                        color = Color(0xFFFF9800),
+                                        color = MaterialTheme.colorScheme.tertiary,
                                         fontSize = 13.sp,
                                         fontWeight = FontWeight.Medium
                                     )
@@ -776,9 +801,9 @@ private fun fmtDb(v: Float): String =
 private fun dbFrac(v: Float): Float =
     if (v <= 1e-6f) 0f else ((dbfsOf(v) + 60f) / 60f).coerceIn(0f, 1f)
 
-private fun levelColor(v: Float): Color = when {
+private fun levelColor(v: Float, mid: Color): Color = when {
     v >= 0.999f -> AccentRed      // 已经到顶，随时会削波
-    v >= 0.70f -> Color(0xFFFFB300)
+    v >= 0.70f -> mid
     else -> AccentGreen
 }
 
@@ -793,7 +818,7 @@ private fun levelColor(v: Float): Color = when {
 //     完全不进快照，既没有重组也没有 delay(80) 那种台阶感。
 // ═══════════════════════════════════════════════════════════════════
 @Composable
-private fun SignalPathCard(oboe: OboeDirectPlayer?) {
+private fun SignalPathCard(oboe: OboeDirectPlayer?, levelBuf: FloatArray, levelTick: MutableLongState) {
     var dspChain by remember { mutableStateOf(IntArray(16)) }
     var clipCount by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
@@ -849,16 +874,8 @@ private fun SignalPathCard(oboe: OboeDirectPlayer?) {
             }
             if (dspChain.all { it == 0 }) {
                 Spacer(Modifier.height(6.dp))
-                Text(stringResource(R.string.diag_raw_passthrough), color = Color(0xFFFF9800), fontSize = 11.sp)
+                Text(stringResource(R.string.diag_raw_passthrough), color = MaterialTheme.colorScheme.tertiary, fontSize = 11.sp)
             }
-            Spacer(Modifier.height(14.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Default.ShowChart, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text(stringResource(R.string.diag_realtime_response), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
-            }
-            Spacer(Modifier.height(8.dp))
-            FreqBars()
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -882,43 +899,6 @@ private fun SignalPathCard(oboe: OboeDirectPlayer?) {
                     }
                 }
             }
-        }
-    }
-}
-
-/**
- * 逐帧频响条。
- *
- * 关键点：数据是从 native **直接读进普通 FloatArray** 的（bulk 接口，一次 JNI、不分配），
- * 既不进 Compose 快照也不触发重组 —— 重绘只由 `tick` 这个时间戳驱动，读它的地方只有
- * 这一个小组件。旧实现是 State + delay(80)：12.5Hz 的台阶 + 整页重组，看着就「卡卡的」。
- */
-@Composable
-private fun FreqBars() {
-    val buf = remember { FloatArray(25) }
-    val smoothed = remember { FloatArray(8) }
-    var tick by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
-        while (true) { withFrameMillis { tick = it } }
-    }
-    @Suppress("UNUSED_VARIABLE") val frame = tick     // 读进组合作用域 → 每帧重组这一个 Canvas
-    Canvas(modifier = Modifier.fillMaxWidth().height(64.dp)) {
-        MusicService.instance?.getOboePlayer()?.readBandLevels(buf)
-        val gap = size.width / 8f
-        for (i in 0 until 8) {
-            // 每段取 L/R 中较大的那一条：这是「有多少内容」而不是「偏左还是偏右」
-            val target = maxOf(buf[i], buf[8 + i]).coerceIn(0f, 1f)
-            // 起快落慢的一阶平滑：60fps 下既跟得上鼓点，又不会因为帧间抖动而刺眼
-            val s = smoothed[i]
-            val k = if (target > s) 0.45f else 0.16f
-            smoothed[i] = s + (target - s) * k
-            val barH = (size.height * smoothed[i].coerceIn(0f, 1f)).coerceAtLeast(2f)
-            drawRoundRect(
-                color = AccentGreen,
-                topLeft = Offset(i * gap + gap * 0.2f, size.height - barH),
-                size = Size(gap * 0.6f, barH),
-                cornerRadius = CornerRadius(2f, 2f)
-            )
         }
     }
 }
@@ -1076,7 +1056,7 @@ private fun LoudnessNormCard() {
                     Spacer(Modifier.height(6.dp))
                     Text(
                         stringResource(R.string.diag_norm_mismatch),
-                        color = Color(0xFFFF9800), fontSize = 11.sp
+                        color = MaterialTheme.colorScheme.tertiary, fontSize = 11.sp
                     )
                 }
             }
@@ -1088,7 +1068,7 @@ private fun LoudnessNormCard() {
 // 【V8.208 / V8.209】输出电平监控
 // ═══════════════════════════════════════════════════════════════════
 @Composable
-private fun LevelMonitorCard() {
+private fun LevelMonitorCard(levelBuf: FloatArray, levelTick: MutableLongState) {
     Column(modifier = Modifier.fillMaxWidth().glassSurface(shape = SDWShapes.Row)) {
         Column(modifier = Modifier.padding(14.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1097,18 +1077,18 @@ private fun LevelMonitorCard() {
                 Text(stringResource(R.string.diag_level_realtime), color = MaterialTheme.colorScheme.primary, fontSize = 13.sp, fontWeight = FontWeight.Medium)
             }
             Spacer(Modifier.height(10.dp))
-            LevelBarLine("L", 0)
+            LevelBarLine("L", 0, levelBuf, levelTick)
             Spacer(Modifier.height(6.dp))
-            LevelBarLine("R", 1)
+            LevelBarLine("R", 1, levelBuf, levelTick)
             Spacer(Modifier.height(8.dp))
-            LevelReadout()
+            LevelReadout(levelBuf)
             Spacer(Modifier.height(12.dp))
             Text(
                 stringResource(R.string.diag_level_history),
                 color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 10.sp, fontFamily = FontFamily.Monospace
             )
             Spacer(Modifier.height(4.dp))
-            LevelHistory()
+            LevelHistory(levelBuf, levelTick)
             Spacer(Modifier.height(8.dp))
             Text(
                 stringResource(R.string.diag_level_tap_point),
@@ -1123,36 +1103,32 @@ private fun LevelMonitorCard() {
  * 和 [FreqBars] 同样的套路 —— 数据不进 State，因此这组条形的动态更新不引起任何重组。
  */
 @Composable
-private fun LevelBarLine(label: String, channel: Int) {
-    val buf = remember { FloatArray(25) }
-    var tick by remember { mutableLongStateOf(0L) }
-    LaunchedEffect(Unit) {
-        while (true) { withFrameMillis { tick = it } }
-    }
-    @Suppress("UNUSED_VARIABLE") val frame = tick
+private fun LevelBarLine(label: String, channel: Int, levelBuf: FloatArray, levelTick: MutableLongState) {
+    @Suppress("UNUSED_VARIABLE") val frame = levelTick.longValue
+    val midColor = MaterialTheme.colorScheme.tertiary
+    val errorColor = MaterialTheme.colorScheme.error
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(
             label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp,
             fontFamily = FontFamily.Monospace, modifier = Modifier.width(14.dp)
         )
         Canvas(modifier = Modifier.weight(1f).height(9.dp)) {
-            MusicService.instance?.getOboePlayer()?.readBandLevels(buf)
             drawRoundRect(
                 color = Color.White.copy(alpha = 0.07f), topLeft = Offset.Zero,
                 size = size, cornerRadius = CornerRadius(3f, 3f)
             )
-            val rms = buf[21 + channel]
+            val rms = levelBuf[21 + channel]
             val w = size.width * dbFrac(rms)
             if (w > 1f) {
                 drawRoundRect(
-                    color = levelColor(rms), topLeft = Offset.Zero,
+                    color = levelColor(rms, midColor), topLeft = Offset.Zero,
                     size = Size(w, size.height), cornerRadius = CornerRadius(3f, 3f)
                 )
             }
-            val px = size.width * dbFrac(buf[23 + channel])
+            val px = size.width * dbFrac(levelBuf[23 + channel])
             if (px > 1f) {
                 drawRoundRect(
-                    color = Color(0xFFFF3D3D), topLeft = Offset((px - 1.5f).coerceAtLeast(0f), 0f),
+                    color = errorColor, topLeft = Offset((px - 1.5f).coerceAtLeast(0f), 0f),
                     size = Size(3f, size.height), cornerRadius = CornerRadius(1.5f, 1.5f)
                 )
             }
@@ -1165,16 +1141,14 @@ private fun LevelBarLine(label: String, channel: Int) {
  * 只有这一行会重组。
  */
 @Composable
-private fun LevelReadout() {
+private fun LevelReadout(levelBuf: FloatArray) {
     var rmsL by remember { mutableFloatStateOf(0f) }
     var rmsR by remember { mutableFloatStateOf(0f) }
     var peakL by remember { mutableFloatStateOf(0f) }
     var peakR by remember { mutableFloatStateOf(0f) }
     LaunchedEffect(Unit) {
-        val b = FloatArray(25)
         while (true) {
-            MusicService.instance?.getOboePlayer()?.readBandLevels(b)
-            rmsL = b[21]; rmsR = b[22]; peakL = b[23]; peakR = b[24]
+            rmsL = levelBuf[21]; rmsR = levelBuf[22]; peakL = levelBuf[23]; peakR = levelBuf[24]
             delay(100L)
         }
     }
@@ -1191,24 +1165,19 @@ private fun LevelReadout() {
 
 /** 24 秒电平滚动历史：200ms 采样写环形数组，Canvas 逐帧重绘。 */
 @Composable
-private fun LevelHistory() {
+private fun LevelHistory(levelBuf: FloatArray, levelTick: MutableLongState) {
     val hist = remember { FloatArray(120) }
     val head = remember { intArrayOf(0) }
-    var tick by remember { mutableLongStateOf(0L) }
     // 采样：200ms 一点，写环形数组（普通数组，不触发重组）
     LaunchedEffect(Unit) {
-        val b = FloatArray(25)
         while (true) {
-            MusicService.instance?.getOboePlayer()?.readBandLevels(b)
-            hist[head[0]] = maxOf(b[21], b[22])
+            hist[head[0]] = maxOf(levelBuf[21], levelBuf[22])
             head[0] = (head[0] + 1) % hist.size
             delay(200L)
         }
     }
-    LaunchedEffect(Unit) {
-        while (true) { withFrameMillis { tick = it } }
-    }
-    @Suppress("UNUSED_VARIABLE") val frame = tick
+    @Suppress("UNUSED_VARIABLE") val frame = levelTick.longValue
+    val midColor = MaterialTheme.colorScheme.tertiary
     Canvas(modifier = Modifier.fillMaxWidth().height(44.dp)) {
         val bw = size.width / hist.size
         val refY = size.height * (1f - dbFrac(0.5f))       // -6 dBFS 参考线
@@ -1222,7 +1191,7 @@ private fun LevelHistory() {
             if (v <= 1e-6f) continue
             val hgt = (size.height * dbFrac(v)).coerceAtLeast(1f)
             drawRoundRect(
-                color = levelColor(v),
+                color = levelColor(v, midColor),
                 topLeft = Offset(i * bw, size.height - hgt),
                 size = Size((bw * 0.7f).coerceAtLeast(1f), hgt),
                 cornerRadius = CornerRadius(1f, 1f)
@@ -1244,9 +1213,12 @@ private fun SectionTitle(title: String) {
 
 @Composable
 private fun CapRow(label: String, value: String) {
-    Row(modifier = Modifier.padding(vertical = 1.dp)) {
-        Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(90.dp))
-        Text(value, color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+    Column {
+        Row(modifier = Modifier.padding(vertical = 5.dp)) {
+            Text(label, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(90.dp))
+            Text(value, color = MaterialTheme.colorScheme.onBackground, fontSize = 11.sp, fontFamily = FontFamily.Monospace)
+        }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.22f))
     }
 }
 
@@ -1265,13 +1237,22 @@ private fun DiagnosticRow(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(icon, null, tint = accent, modifier = Modifier.size(22.dp))
+            // [Unify] 统一 M3 Expressive 图标容器：圆角色块 + 主题强调色，消除图标/数值配色混用
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(accent.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(icon, null, tint = accent, modifier = Modifier.size(22.dp))
+            }
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(label, color = MaterialTheme.colorScheme.onBackground, fontSize = 14.sp, fontWeight = FontWeight.Medium)
                 Text(sublabel, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
             }
-            Text(value, color = accent, fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
+            Text(value, color = MaterialTheme.colorScheme.onBackground, fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace)
         }
     }
 }

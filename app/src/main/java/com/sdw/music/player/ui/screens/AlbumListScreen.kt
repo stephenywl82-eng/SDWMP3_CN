@@ -107,16 +107,22 @@ fun AlbumListScreen(
             SDWTopBar(
                 title = {
                     if (isSearching) {
-                        OutlinedTextField(
+                        // [P2 · M3 Expressive] OutlinedTextField（描边式）→ TextField（容器式），
+                        // 与主界面搜索框统一为半透明玻璃容器（描边框和顶栏 tonal 键互相干扰）。
+                        TextField(
                             value = searchQuery,
                             onValueChange = { searchQuery = it },
                             placeholder = { Text(stringResource(R.string.songlist_search_placeholder), color = MaterialTheme.colorScheme.onSurfaceVariant) },
                             singleLine = true,
                             modifier = Modifier.fillMaxWidth(),
-                            colors = OutlinedTextFieldDefaults.colors(
-                                focusedBorderColor = Color.Transparent,
-                                unfocusedBorderColor = Color.Transparent,
-                                cursorColor = MaterialTheme.colorScheme.tertiary
+                            colors = TextFieldDefaults.colors(
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                cursorColor = MaterialTheme.colorScheme.tertiary,
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                                focusedIndicatorColor = Color.Transparent,
+                                unfocusedIndicatorColor = Color.Transparent
                             )
                         )
                     } else {
@@ -124,18 +130,18 @@ fun AlbumListScreen(
                     }
                 },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
                 actions = {
                     if (isSearching) {
-                        IconButton(onClick = { isSearching = false; searchQuery = "" }) {
-                            Icon(Icons.Default.Close, stringResource(R.string.songlist_close_search), tint = MaterialTheme.colorScheme.onSurface)
+                        FilledTonalIconButton(onClick = { isSearching = false; searchQuery = "" }, shapes = IconButtonDefaults.shapes()) {
+                            Icon(Icons.Default.Close, stringResource(R.string.songlist_close_search))
                         }
                     } else {
-                        IconButton(onClick = { isSearching = true }) {
-                            Icon(Icons.Default.Search, stringResource(R.string.action_search), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        FilledTonalIconButton(onClick = { isSearching = true }, shapes = IconButtonDefaults.shapes()) {
+                            Icon(Icons.Default.Search, stringResource(R.string.action_search))
                         }
                     }
                 },

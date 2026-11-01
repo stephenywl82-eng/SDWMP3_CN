@@ -44,6 +44,11 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.*
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
@@ -85,6 +90,8 @@ import com.sdw.music.player.WallpaperManager
 import com.sdw.music.player.ui.theme.*
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.components.springPress
+import com.sdw.music.player.ui.components.ExpressiveWavyProgress
+import com.sdw.music.player.ui.components.SDWAlertDialog
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -92,12 +99,21 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import com.sdw.music.player.BuildConfig
 
+// [M3E] 诊断/状态色统一为一组常量：material3 1.4.0 无 success/warning 角色，故自管，
+// 避免散落的魔法数字。绿=正常/激活，橙=警告/强制，红=错误/崩溃。
+private val StatusOk = Color(0xFF00FF88)        // 正常 / 激活（DAC 诊断、采样率匹配等）
+private val StatusPositive = Color(0xFF4CAF50)  // 正面提示（DAC 已识别、备份成功）
+private val StatusWarn = Color(0xFFFF9800)       // 警告 / 强制路径（forced Oboe 等）
+private val StatusError = Color(0xFFFF6B6B)      // 错误 / 崩溃标签
+private val StatusErrorSoft = Color(0xFFFFB4A2) // 错误详情（崩溃日志正文）
+
+
 // [V8.164] 设置界面布局整理：
 // 1) 所有条目归入统一分组玻璃卡（SettingsCard），组内用发丝分隔线，不再一堆孤立开关 + 散落 Spacer；
 // 2) 所有"标题 + 一排 chip"改为 Column 内 FlowRow（SettingsOptionRow），窄屏自动换行，不再挤爆一行；
 // 3) 开关/滑块/chip 配色与按压反馈统一（SettingsPrefSwitch / SettingsSliderRow）；
 // 4) 界面内硬编码文案全部走 stringResource，补齐 9 种语言。
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() -> Unit)? = null, onNavigateToAudioQuality: (() -> Unit)? = null, onNavigateToCoverEmbed: (() -> Unit)? = null, onBpmScanned: () -> Unit = {}) {
     val context = LocalContext.current
@@ -247,8 +263,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
             SDWTopBar(
                 title = { Text(stringResource(R.string.action_settings), color = MaterialTheme.colorScheme.onBackground) },
                 navigationIcon = {
-                    IconButton(onClick = onNavigateBack) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                    // [P2 · M3 Expressive] 裸 IconButton → tonal 容器键，与全站顶栏统一
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
                     }
                 },
             )
@@ -346,161 +363,18 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 // 用普通 val 直接读 pref，切换后由 bump()/refreshTrigger 触发重组成效。
                 val devShowDjAdvanced = settingsPrefs.getBoolean("dev_show_dj_advanced", true)
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_grp_basic)) }
-                // 【V8.219】节拍同步（beatmatch 变速不变调）功能整体移除：
-                // WSOLA 拉伸听感差（用户评价"像个半成品"），设置项删除，
-                // MusicService.beatmatchRatio() 恒返回 1.0，变速链路彻底不再触发。
-                // 【v8.13】随机播放模式：顺序 / A 纯随机 / B BPM 匹配
-                item {
-                    SettingsCard {
-                        SettingsOptionRow(
-                            title = stringResource(R.string.settings_shuffle_mode),
-                            options = listOf(
-                                "off" to stringResource(R.string.settings_shuffle_mode_off),
-                                "random" to stringResource(R.string.settings_shuffle_mode_random),
-                                "bpm" to stringResource(R.string.settings_shuffle_mode_bpm)
-                            ),
-                            // 【V8.194】shuffle_mode 收敛成 settings 里的三态字符串
-                            // （off / random / bpm）。遗留值：缺失或 "random" = 纯随机，
-                            // "true" = bpm，"false" = off。点一下就写回，不再出现"显示成纯随机
-                            // 但服务里其实是顺序播放"的错位。
-                            selectedKey = when (settingsPrefs.getString("shuffle_mode", null)) {
-                                "bpm", "true" -> "bpm"
-                                "random", "" -> "random"
-                                "off", "false" -> "off"
-                                else -> "random"
-                            },
-                            onSelect = { key ->
-                                settingsPrefs.edit().putString("shuffle_mode", key).apply()
-                                bump()
-                            }
-                        )
-                        SDWDivider()
-                        SettingsNoteRow(text = stringResource(R.string.settings_shuffle_mode_sub))
-                        SDWDivider()
-                        // 【V8.427】「智能选曲（和声+能量）」从 DJ 折叠移出：随机/列表播放挑下一首，
-                        // 与 DJ 模式解耦，普通模式也可见可关（不破铁律：普通模式音频链路不受 DJ 栈影响）。
-                        var smartPickPlayback by remember(refreshTrigger) {
-                            mutableStateOf(settingsPrefs.getBoolean("crossfade_smartpick", true))
-                        }
-                        SettingsSwitchItem(
-                            icon = Icons.Default.Insights,
-                            title = stringResource(R.string.settings_smartpick),
-                            subtitle = if (smartPickPlayback) stringResource(R.string.settings_smartpick_on)
-                            else stringResource(R.string.settings_smartpick_off),
-                            checked = smartPickPlayback,
-                            inCard = true,
-                            onCheckedChange = { enabled ->
-                                smartPickPlayback = enabled
-                                settingsPrefs.edit().putBoolean("crossfade_smartpick", enabled).apply()
-                                bump()
-                            }
-                        )
-                        // 【#6】cue 点感知入场开关（djay 式：B 从检测到的前奏/乐句头进）
-                        var cueEntryOn by remember(refreshTrigger) {
-                            mutableStateOf(settingsPrefs.getBoolean("crossfade_cue_entry", true))
-                        }
-                        SettingsSwitchItem(
-                            icon = Icons.Default.PlayArrow,
-                            title = stringResource(R.string.settings_cue_entry),
-                            subtitle = if (cueEntryOn) stringResource(R.string.settings_cue_entry_on)
-                                       else stringResource(R.string.settings_cue_entry_off),
-                            checked = cueEntryOn,
-                            inCard = true,
-                            onCheckedChange = { enabled ->
-                                cueEntryOn = enabled
-                                settingsPrefs.edit().putBoolean("crossfade_cue_entry", enabled).apply()
-                                bump()
-                            }
-                        )
-                    }
-                }
-
-                // 【整理】音频焦点注册：原误放 USB DAC 下（注释自述"非 DAC 路径"），实为通用播放音频策略，移入播放与过渡。
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "audio_focus_register",
-                            defaultValue = true, icon = Icons.Default.Hearing,
-                            title = stringResource(R.string.settings_audio_focus),
-                            subtitleOn = stringResource(R.string.settings_audio_focus_on),
-                            subtitleOff = stringResource(R.string.settings_audio_focus_off),
-                            onChange = { enabled -> MusicService.setAudioFocusRegister(context.applicationContext, enabled) }
-                        )
-                    }
-                }
-                // 【整理】原声直通：全局 DSP 主旁路（EQ/MSEB/DTS/压缩/等响/瞬态/环绕/AGC/限幅/softClip/dither 全跳），
-                // 与 DAC 硬件无关，按与 AGC 同样的逻辑移出 DAC，归入播放与过渡。
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "direct_passthrough",
-                            icon = Icons.Default.SurroundSound,
-                            title = stringResource(R.string.settings_direct_passthrough),
-                            subtitleOn = stringResource(R.string.settings_direct_passthrough_on),
-                            subtitleOff = stringResource(R.string.settings_direct_passthrough_off),
-                            note = stringResource(R.string.settings_direct_passthrough_note),
-                            onChange = { enabled -> MusicService.instance?.applyDirectPassthrough(enabled) }
-                        )
-                    }
-                }
-                // [fix10] 高音量提示总开关：关掉后 DAC 高音量预警 Toast 完全不再弹。
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs,
-                            key = "loud_warn_enabled",
-                            icon = Icons.Default.Warning,
-                            title = stringResource(R.string.settings_loud_warn_enabled),
-                            subtitleOn = stringResource(R.string.settings_loud_warn_on),
-                            subtitleOff = stringResource(R.string.settings_loud_warn_off),
-                            note = stringResource(R.string.settings_loud_warn_note),
-                            onChange = { enabled -> MusicService.instance?.applyLoudWarnEnabled(enabled) }
-                        )
-                    }
-                }
-                // [Stage0 2026-10-23] 比特完美下是否仍提示高音量。旧逻辑在 bitPerfect 时直接
-                // return NONE，把满音量(gain=1.0)、峰值接近削波的用户唯一保护关掉了；这里
-                // 交还给用户决定，默认开。
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs,
-                            key = "loud_warn_in_bitperfect",
-                            icon = Icons.Default.Warning,
-                            title = stringResource(R.string.settings_loud_warn_bitperfect),
-                            subtitleOn = stringResource(R.string.settings_loud_warn_bitperfect_on),
-                            subtitleOff = stringResource(R.string.settings_loud_warn_bitperfect_off),
-                            note = stringResource(R.string.settings_loud_warn_bitperfect_note),
-                            onChange = { enabled -> MusicService.instance?.applyLoudWarnInBitPerfect(enabled) }
-                        )
-                    }
-                }
-                // 【整理】自动播放：启动即播是播放行为，从「显示与界面」移入此处。
-                item {
-                    SettingsCard {
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "auto_play_on_launch",
-                            icon = Icons.Default.PlayArrow,
-                            title = stringResource(R.string.settings_auto_play),
-                            subtitleOn = stringResource(R.string.settings_auto_on),
-                            subtitleOff = stringResource(R.string.settings_auto_off)
-                        )
-                    }
-                }
-
-                item { SettingsGroupLabel(stringResource(R.string.settings_section_playback)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_grp_basic), icon = Icons.Default.MusicNote, tone = SectionTone.Primary) }
                 if (devShowDjAdvanced) {
                 item {
                     var cfEnabled by remember(refreshTrigger) {
                         mutableStateOf(settingsPrefs.getBoolean("crossfade_enabled", true))
                     }
-                    // 【V8.379】DJ 总开关状态。过渡参数（小节数/时长/间隔/风格/落点/对齐）
-                    // 原本露在折叠外，用户反馈「太复杂」，现全部收进 DJ 折叠。
+                    // 【V8.379】DJ 主开关状态：仅用于下方「DJ 仍开启」提示的判断。
+                    // 过渡参数（小节数/时长/间隔/风格/落点/对齐）已移至「转场与 DJ」卡片下，随 DJ 主开关显隐。
                     var djEnabledForCf by remember(refreshTrigger) {
                         mutableStateOf(settingsPrefs.getBoolean("crossfade_dj_enabled", true))
                     }
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         SettingsSwitchItem(
                             icon = Icons.Default.SwapHoriz,
                             title = stringResource(R.string.settings_crossfade),
@@ -546,192 +420,93 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             }
                         }
 
-                        // 【V8.152/V8.415】过渡长度：**只按小节**（DJ 式 2/4/8/16 小节，用 A 轨 BPM 折算）。
-                        // 秒数档 5/10/15s 已按用户要求删除 —— 落点对不齐乐句，且历史上多次被残留值盖掉小节。
-                        if (cfEnabled && djEnabledForCf) {
-                            // 读时归一：老配置里可能存着 0(Auto) 或 6 之类的值，这里吸附到合法档位
-                            val rawBars = settingsPrefs.getInt("crossfade_bars", 4)
-                            val curBars = if (rawBars in setOf(2, 4, 8, 16)) rawBars else 4
-                            // 【V8.425·#3】吸附后回写，避免"界面显示 4 小节、服务端按原值(如 6)算时长"的错位
-                            if (curBars != rawBars) {
-                                settingsPrefs.edit().putInt("crossfade_bars", curBars).apply()
-                            }
-                            SDWDivider()
-                            SettingsOptionRow(
-                                title = stringResource(R.string.settings_crossfade_bars),
-                                options = listOf("2", "4", "8", "16").map { bars ->
-                                    bars to stringResource(R.string.settings_bars_value, bars)
-                                },
-                                selectedKey = curBars.toString(),
-                                onSelect = { key ->
-                                    val b = key.toInt()
-                                    settingsPrefs.edit().putInt("crossfade_bars", b).apply()
-                                    MusicService.instance?.setCrossfadeBars(b)
-                                    // 小节是唯一模式：秒数档一律归零，防止设备上残留的
-                                    // crossfade_duration_ms 反过来盖掉小节数（V8.413 的根因）。
-                                    settingsPrefs.edit().putInt("crossfade_duration_ms", 0).apply()
-                                    MusicService.instance?.setCrossfadeDurationMs(0)
-                                    bump()
-                                }
-                            )
-                        }
 
-                        // 【P3】Master Sync 真实同步。默认关：关闭时 MasterSyncShadow 仍是纯观测，
-                        // 不改任何播放行为；打开后过渡时长会被微调（±1 拍内）以对齐 master 小节线。
-                        if (cfEnabled && djEnabledForCf) {
-                            var masterSync by remember(refreshTrigger) {
-                                mutableStateOf(settingsPrefs.getBoolean("crossfade_master_sync", false))
-                            }
-                            SDWDivider()
-                            SettingsSwitchItem(
-                                icon = Icons.Default.GraphicEq,
-                                title = stringResource(R.string.settings_master_sync),
-                                subtitle = stringResource(R.string.settings_master_sync_sub),
-                                checked = masterSync,
-                                inCard = true,
-                                onCheckedChange = { on ->
-                                    masterSync = on
-                                    settingsPrefs.edit().putBoolean("crossfade_master_sync", on).apply()
-                                    // 立刻生效，不等服务重启
-                                    com.sdw.music.player.core.audio.dsp.MasterSyncShadow.enabled = on
-                                    bump()
-                                }
-                            )
-                        }
-
-                        // 【V8.250】过渡方式：淡化（交叉）/ 硬切（djay CUT，在对齐点直接切歌）
-                        if (cfEnabled && djEnabledForCf) {
-                            // 【V8.312·A】自动切歌最小间隔：两次自动过渡之间的冷却时间。
-                            // 治「一直自己不停切歌」。0 = 不限（回到旧的紧追行为）。
-                            SDWDivider()
-                            SettingsChipGroup(
-                                label = stringResource(R.string.settings_min_gap),
-                                options = listOf(
-                                    "0" to stringResource(R.string.settings_min_gap_off),
-                                    "10" to stringResource(R.string.settings_min_gap_10),
-                                    "25" to stringResource(R.string.settings_min_gap_25),
-                                    "40" to stringResource(R.string.settings_min_gap_40),
-                                    "60" to stringResource(R.string.settings_min_gap_60)
-                                ),
-                                selectedKey = settingsPrefs.getInt("crossfade_min_gap_sec", 25).toString(),
-                                onSelect = { key ->
-                                    settingsPrefs.edit().putInt("crossfade_min_gap_sec", key.toIntOrNull() ?: 25).apply()
-                                    bump()
-                                }
-                            )
-                            // 【V8.322】对拍锁相整定：把「跟随手感」交给用户可调，不必等我们盲调。
-                            // 存int（微单位/千分位）—— SharedPreferences 无原生 Float XML 类型。
-                            SettingsChipGroup(
-                                label = stringResource(R.string.pll_deadzone),
-                                options = listOf(
-                                    "1000" to stringResource(R.string.pll_deadzone_1000),
-                                    "500" to stringResource(R.string.pll_deadzone_500),
-                                    "200" to stringResource(R.string.pll_deadzone_200),
-                                    "50" to stringResource(R.string.pll_deadzone_50)
-                                ),
-                                selectedKey = settingsPrefs.getInt("pll_deadzone_micro", 200).toString(),
-                                onSelect = { key ->
-                                    settingsPrefs.edit().putInt("pll_deadzone_micro", key.toIntOrNull() ?: 200).apply()
-                                    bump()
-                                }
-                            )
-                            SettingsChipGroup(
-                                label = stringResource(R.string.pll_gain),
-                                options = listOf(
-                                    "15" to stringResource(R.string.pll_gain_soft),
-                                    "30" to stringResource(R.string.pll_gain_mid),
-                                    "50" to stringResource(R.string.pll_gain_strong)
-                                ),
-                                selectedKey = settingsPrefs.getInt("pll_gain_hi_pct", 30).toString(),
-                                onSelect = { key ->
-                                    settingsPrefs.edit().putInt("pll_gain_hi_pct", key.toIntOrNull() ?: 30).apply()
-                                    // 小增益跟着大增益走，保持"误差大→强、接近→弱"的单调关系
-                                    val hi = key.toIntOrNull() ?: 30
-                                    val lo = (hi * 0.33f).toInt().coerceAtLeast(5)
-                                    settingsPrefs.edit().putInt("pll_gain_lo_pct", lo).apply()
-                                    bump()
-                                }
-                            )
-                            SettingsNoteRow(stringResource(R.string.settings_pll_tuning_hint))
-                            SDWDivider()
-                            SettingsOptionRow(
-                                title = stringResource(R.string.settings_crossfade_style),
-                                options = listOf(
-                                    "fade" to stringResource(R.string.settings_crossfade_style_fade),
-                                    "cut" to stringResource(R.string.settings_crossfade_style_cut)
-                                ),
-                                selectedKey = settingsPrefs.getString("crossfade_style", "fade") ?: "fade",
-                                onSelect = { key ->
-                                    settingsPrefs.edit().putString("crossfade_style", key).apply()
-                                    bump()
-                                }
-                            )
-                        }
-
-                        // 【V8.194】交叉淡化总开关关着时，下面两项都不会生效，直接收起来
-                        // （原来就地显示但点了不生效，看着像有 bug）。
-                        if (cfEnabled && djEnabledForCf) {
-                            SDWDivider()
-                            // 【V8.248】落点模式（合并原 智能对齐/落点偏好/Automix 乐句切入 三个键，
-                            // 首次读取自动迁移老配置）。标准=小节线进场；拍点=智能对齐选更优落点；
-                            // 乐句=djay Automix 式 8 小节乐句切入。
-                            val landingMode = settingsPrefs.getString("crossfade_landing_mode", null) ?: run {
-                                val m = when {
-                                    settingsPrefs.getBoolean("crossfade_automix", true) -> "phrase"
-                                    settingsPrefs.getBoolean("crossfade_smart_align", true) -> "beat"
-                                    else -> "standard"
-                                }
-                                settingsPrefs.edit().putString("crossfade_landing_mode", m).apply()
-                                m
-                            }
-                            SettingsOptionRow(
-                                title = stringResource(R.string.settings_landing_mode),
-                                options = listOf(
-                                    "standard" to stringResource(R.string.settings_landing_mode_standard),
-                                    "beat" to stringResource(R.string.settings_landing_mode_beat),
-                                    "phrase" to stringResource(R.string.settings_landing_mode_phrase)
-                                ),
-                                selectedKey = landingMode,
-                                onSelect = { key ->
-                                    settingsPrefs.edit().putString("crossfade_landing_mode", key).apply()
-                                    bump()
-                                }
-                            )
-                            // 落点偏好（仅拍点模式）：静音段优先(稳) / 拍点优先(DJ 拍上交接)
-                            if (landingMode == "beat") {
-                                SDWDivider()
-                                SettingsOptionRow(
-                                    title = stringResource(R.string.settings_crossfade_align_prefer),
-                                    options = listOf(
-                                        "quiet" to stringResource(R.string.settings_crossfade_align_quiet),
-                                        "beat" to stringResource(R.string.settings_crossfade_align_beat)
-                                    ),
-                                    selectedKey = settingsPrefs.getString("crossfade_align_prefer", "quiet") ?: "quiet",
-                                    onSelect = { key ->
-                                        settingsPrefs.edit().putString("crossfade_align_prefer", key).apply()
-                                        bump()
-                                    }
-                                )
-                            }
-                        }
                     }
                 }
+                }// 【整理】音频焦点注册：原误放 USB DAC 下（注释自述"非 DAC 路径"），实为通用播放音频策略，移入播放与过渡。
+                item {
+                    SettingsCard(tone = SectionTone.Primary) {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "audio_focus_register",
+                            defaultValue = true, icon = Icons.Default.Hearing,
+                            title = stringResource(R.string.settings_audio_focus),
+                            subtitleOn = stringResource(R.string.settings_audio_focus_on),
+                            subtitleOff = stringResource(R.string.settings_audio_focus_off),
+                            onChange = { enabled -> MusicService.setAudioFocusRegister(context.applicationContext, enabled) }
+                        )
+                    }
                 }
+                // 【整理】原声直通：全局 DSP 主旁路（EQ/MSEB/DTS/压缩/等响/瞬态/环绕/AGC/限幅/softClip/dither 全跳），
+                // 与 DAC 硬件无关，按与 AGC 同样的逻辑移出 DAC，归入播放与过渡。
+                item {
+                    SettingsCard(tone = SectionTone.Primary) {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "direct_passthrough",
+                            icon = Icons.Default.SurroundSound,
+                            title = stringResource(R.string.settings_direct_passthrough),
+                            subtitleOn = stringResource(R.string.settings_direct_passthrough_on),
+                            subtitleOff = stringResource(R.string.settings_direct_passthrough_off),
+                            note = stringResource(R.string.settings_direct_passthrough_note),
+                            onChange = { enabled -> MusicService.instance?.applyDirectPassthrough(enabled) }
+                        )
+                    }
+                }
+                // [fix10] 高音量提示总开关：关掉后 DAC 高音量预警 Toast 完全不再弹。
+                item {
+                    SettingsCard(tone = SectionTone.Primary) {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs,
+                            key = "loud_warn_enabled",
+                            icon = Icons.Default.Warning,
+                            title = stringResource(R.string.settings_loud_warn_enabled),
+                            subtitleOn = stringResource(R.string.settings_loud_warn_on),
+                            subtitleOff = stringResource(R.string.settings_loud_warn_off),
+                            note = stringResource(R.string.settings_loud_warn_note),
+                            onChange = { enabled -> MusicService.instance?.applyLoudWarnEnabled(enabled) }
+                        )
+                    }
+                }
+                // [Stage0 2026-10-23] 比特完美下是否仍提示高音量。旧逻辑在 bitPerfect 时直接
+                // return NONE，把满音量(gain=1.0)、峰值接近削波的用户唯一保护关掉了；这里
+                // 交还给用户决定，默认开。
+                item {
+                    SettingsCard(tone = SectionTone.Primary) {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs,
+                            key = "loud_warn_in_bitperfect",
+                            icon = Icons.Default.Warning,
+                            title = stringResource(R.string.settings_loud_warn_bitperfect),
+                            subtitleOn = stringResource(R.string.settings_loud_warn_bitperfect_on),
+                            subtitleOff = stringResource(R.string.settings_loud_warn_bitperfect_off),
+                            note = stringResource(R.string.settings_loud_warn_bitperfect_note),
+                            onChange = { enabled -> MusicService.instance?.applyLoudWarnInBitPerfect(enabled) }
+                        )
+                    }
+                }
+                // 【整理】自动播放：启动即播是播放行为，从「显示与界面」移入此处。
+                item {
+                    SettingsCard(tone = SectionTone.Primary) {
+                        SettingsPrefSwitch(
+                            refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "auto_play_on_launch",
+                            icon = Icons.Default.PlayArrow,
+                            title = stringResource(R.string.settings_auto_play),
+                            subtitleOn = stringResource(R.string.settings_auto_on),
+                            subtitleOff = stringResource(R.string.settings_auto_off)
+                        )
+                    }
+                }
+
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_section_playback), icon = Icons.Default.PlayArrow, tone = SectionTone.Secondary) }
+                val djModeOn = settingsPrefs.getBoolean("crossfade_dj_enabled", true)
+
                 // 【V8.150 Live FX 总线】切歌效果：作用于混音后总线、可随时开关、即时生效
                 item {
                     val context = LocalContext.current
                     var djEnabled by remember(refreshTrigger) {
                         mutableStateOf(settingsPrefs.getBoolean("crossfade_dj_enabled", true))
                     }
-                    // 【DJ 单开关整合】主控=唯一真相源：首次进入把交叉淡化总闸对齐到主控，
-                    // 自愈历史残留（crossfade_enabled 旧默认 false 与 crossfade_dj_enabled 不一致）。
-                    LaunchedEffect(Unit) {
-                        val cur = settingsPrefs.getBoolean("crossfade_enabled", false)
-                        if (!settingsPrefs.contains("crossfade_enabled") || cur != djEnabled) {
-                            settingsPrefs.edit().putBoolean("crossfade_enabled", djEnabled).apply()
-                        }
-                    }
-                    SettingsCard {
+                    // [2026-10-31] 解耦：交叉淡化总开关与 DJ 主开关各自独立，不再强制对齐。
+                    SettingsCard(tone = SectionTone.Secondary) {
                         // 【V8.427】长按本行（调试）切换 dev_show_dj_advanced，展开/收起下方高级 DJ 开关。
                         // 副标题「调试可长按展开」此前名存实亡——该 pref 只有读、没有写入口，长按无效，现已补上。
                         Box(
@@ -763,8 +538,6 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 // 【DJ 单开关整合】唯一主控：开=全栈 djay Automix（含交叉淡化总开关），
                                 // 关=纯播放硬切（关掉交叉淡化总开关）。普通模式音频链路代码不动，只驱动既有总闸。
                                 settingsPrefs.edit().putBoolean("crossfade_dj_enabled", enabled).apply()
-                                settingsPrefs.edit().putBoolean("crossfade_enabled", enabled).apply()
-                                MusicService.instance?.setCrossfadeEnabled(enabled)
                                 MusicService.instance?.applyLiveFx()
                                 // 【待办#2/#3 单开关归总】主控即唯一真相源：切换时立即把后台 DJ 音频栈
                                 // 重发（低频交换 / 三段频 / 变速）。ON→按 pref+gating 满血激活；
@@ -1378,6 +1151,251 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         }
                     }
                 }
+
+
+                // 【v8.13】随机播放模式：顺序 / A 纯随机 / B BPM 匹配
+                item {
+                    SettingsCard(tone = SectionTone.Secondary) {
+                        SettingsOptionRow(
+                            title = stringResource(R.string.settings_shuffle_mode),
+                            options = listOf(
+                                "off" to stringResource(R.string.settings_shuffle_mode_off),
+                                "random" to stringResource(R.string.settings_shuffle_mode_random),
+                                "bpm" to stringResource(R.string.settings_shuffle_mode_bpm)
+                            ),
+                            // 【V8.194】shuffle_mode 收敛成 settings 里的三态字符串
+                            // （off / random / bpm）。遗留值：缺失或 "random" = 纯随机，
+                            // "true" = bpm，"false" = off。点一下就写回，不再出现"显示成纯随机
+                            // 但服务里其实是顺序播放"的错位。
+                            selectedKey = when (settingsPrefs.getString("shuffle_mode", null)) {
+                                "bpm", "true" -> "bpm"
+                                "random", "" -> "random"
+                                "off", "false" -> "off"
+                                else -> "random"
+                            },
+                            onSelect = { key ->
+                                settingsPrefs.edit().putString("shuffle_mode", key).apply()
+                                bump()
+                            }
+                        )
+                        SDWDivider()
+                        SettingsNoteRow(text = stringResource(R.string.settings_shuffle_mode_sub))
+                        SDWDivider()
+                        // 【V8.427】「智能选曲（和声+能量）」从 DJ 折叠移出：随机/列表播放挑下一首，
+                        // 与 DJ 模式解耦，普通模式也可见可关（不破铁律：普通模式音频链路不受 DJ 栈影响）。
+                        var smartPickPlayback by remember(refreshTrigger) {
+                            mutableStateOf(settingsPrefs.getBoolean("crossfade_smartpick", true))
+                        }
+                        SettingsSwitchItem(
+                            icon = Icons.Default.Insights,
+                            title = stringResource(R.string.settings_smartpick),
+                            subtitle = if (smartPickPlayback) stringResource(R.string.settings_smartpick_on)
+                            else stringResource(R.string.settings_smartpick_off),
+                            checked = smartPickPlayback,
+                            inCard = true,
+                            enabled = djModeOn,
+                            onCheckedChange = { enabled ->
+                                smartPickPlayback = enabled
+                                settingsPrefs.edit().putBoolean("crossfade_smartpick", enabled).apply()
+                                bump()
+                            }
+                        )
+                        // 【#6】cue 点感知入场开关（djay 式：B 从检测到的前奏/乐句头进）
+                        var cueEntryOn by remember(refreshTrigger) {
+                            mutableStateOf(settingsPrefs.getBoolean("crossfade_cue_entry", true))
+                        }
+                        SettingsSwitchItem(
+                            icon = Icons.Default.PlayArrow,
+                            title = stringResource(R.string.settings_cue_entry),
+                            subtitle = if (cueEntryOn) stringResource(R.string.settings_cue_entry_on)
+                                       else stringResource(R.string.settings_cue_entry_off),
+                            checked = cueEntryOn,
+                            inCard = true,
+                            enabled = djModeOn,
+                            onCheckedChange = { enabled ->
+                                cueEntryOn = enabled
+                                settingsPrefs.edit().putBoolean("crossfade_cue_entry", enabled).apply()
+                                bump()
+                            }
+                        )
+                    }
+                }
+
+                
+
+                // [2026-10-31] 过渡参数归 DJ：小节数/主同步/过渡方式/落点模式随 DJ 主开关显隐，
+                // 与「交叉淡化总开关」解耦（交叉淡化是独立的基础过渡开关，DJ 关了它不停）。
+                item {
+                    if (djModeOn) {
+                        SettingsCard(tone = SectionTone.Secondary) {
+                        // 【V8.152/V8.415】过渡长度：**只按小节**（DJ 式 2/4/8/16 小节，用 A 轨 BPM 折算）。
+                        // 秒数档 5/10/15s 已按用户要求删除 —— 落点对不齐乐句，且历史上多次被残留值盖掉小节。
+                        if (djModeOn) {
+                            // 读时归一：老配置里可能存着 0(Auto) 或 6 之类的值，这里吸附到合法档位
+                            val rawBars = settingsPrefs.getInt("crossfade_bars", 4)
+                            val curBars = if (rawBars in setOf(2, 4, 8, 16)) rawBars else 4
+                            // 【V8.425·#3】吸附后回写，避免"界面显示 4 小节、服务端按原值(如 6)算时长"的错位
+                            if (curBars != rawBars) {
+                                settingsPrefs.edit().putInt("crossfade_bars", curBars).apply()
+                            }
+                            SettingsOptionRow(
+                                title = stringResource(R.string.settings_crossfade_bars),
+                                options = listOf("2", "4", "8", "16").map { bars ->
+                                    bars to stringResource(R.string.settings_bars_value, bars)
+                                },
+                                selectedKey = curBars.toString(),
+                                onSelect = { key ->
+                                    val b = key.toInt()
+                                    settingsPrefs.edit().putInt("crossfade_bars", b).apply()
+                                    MusicService.instance?.setCrossfadeBars(b)
+                                    // 小节是唯一模式：秒数档一律归零，防止设备上残留的
+                                    // crossfade_duration_ms 反过来盖掉小节数（V8.413 的根因）。
+                                    settingsPrefs.edit().putInt("crossfade_duration_ms", 0).apply()
+                                    MusicService.instance?.setCrossfadeDurationMs(0)
+                                    bump()
+                                }
+                            )
+                        }
+                        // 【P3】Master Sync 真实同步。默认关：关闭时 MasterSyncShadow 仍是纯观测，
+                        // 不改任何播放行为；打开后过渡时长会被微调（±1 拍内）以对齐 master 小节线。
+                        if (djModeOn) {
+                            var masterSync by remember(refreshTrigger) {
+                                mutableStateOf(settingsPrefs.getBoolean("crossfade_master_sync", false))
+                            }
+                            SDWDivider()
+                            SettingsSwitchItem(
+                                icon = Icons.Default.GraphicEq,
+                                title = stringResource(R.string.settings_master_sync),
+                                subtitle = stringResource(R.string.settings_master_sync_sub),
+                                checked = masterSync,
+                                inCard = true,
+                                onCheckedChange = { on ->
+                                    masterSync = on
+                                    settingsPrefs.edit().putBoolean("crossfade_master_sync", on).apply()
+                                    // 立刻生效，不等服务重启
+                                    com.sdw.music.player.core.audio.dsp.MasterSyncShadow.enabled = on
+                                    bump()
+                                }
+                            )
+                        }
+                        // 【V8.250】过渡方式：淡化（交叉）/ 硬切（djay CUT，在对齐点直接切歌）
+                        if (djModeOn) {
+                            // 【V8.312·A】自动切歌最小间隔：两次自动过渡之间的冷却时间。
+                            // 治「一直自己不停切歌」。0 = 不限（回到旧的紧追行为）。
+                            SDWDivider()
+                            SettingsChipGroup(
+                                label = stringResource(R.string.settings_min_gap),
+                                options = listOf(
+                                    "0" to stringResource(R.string.settings_min_gap_off),
+                                    "10" to stringResource(R.string.settings_min_gap_10),
+                                    "25" to stringResource(R.string.settings_min_gap_25),
+                                    "40" to stringResource(R.string.settings_min_gap_40),
+                                    "60" to stringResource(R.string.settings_min_gap_60)
+                                ),
+                                selectedKey = settingsPrefs.getInt("crossfade_min_gap_sec", 25).toString(),
+                                onSelect = { key ->
+                                    settingsPrefs.edit().putInt("crossfade_min_gap_sec", key.toIntOrNull() ?: 25).apply()
+                                    bump()
+                                }
+                            )
+                            // 【V8.322】对拍锁相整定：把「跟随手感」交给用户可调，不必等我们盲调。
+                            // 存int（微单位/千分位）—— SharedPreferences 无原生 Float XML 类型。
+                            SettingsChipGroup(
+                                label = stringResource(R.string.pll_deadzone),
+                                options = listOf(
+                                    "1000" to stringResource(R.string.pll_deadzone_1000),
+                                    "500" to stringResource(R.string.pll_deadzone_500),
+                                    "200" to stringResource(R.string.pll_deadzone_200),
+                                    "50" to stringResource(R.string.pll_deadzone_50)
+                                ),
+                                selectedKey = settingsPrefs.getInt("pll_deadzone_micro", 200).toString(),
+                                onSelect = { key ->
+                                    settingsPrefs.edit().putInt("pll_deadzone_micro", key.toIntOrNull() ?: 200).apply()
+                                    bump()
+                                }
+                            )
+                            SettingsChipGroup(
+                                label = stringResource(R.string.pll_gain),
+                                options = listOf(
+                                    "15" to stringResource(R.string.pll_gain_soft),
+                                    "30" to stringResource(R.string.pll_gain_mid),
+                                    "50" to stringResource(R.string.pll_gain_strong)
+                                ),
+                                selectedKey = settingsPrefs.getInt("pll_gain_hi_pct", 30).toString(),
+                                onSelect = { key ->
+                                    settingsPrefs.edit().putInt("pll_gain_hi_pct", key.toIntOrNull() ?: 30).apply()
+                                    // 小增益跟着大增益走，保持"误差大→强、接近→弱"的单调关系
+                                    val hi = key.toIntOrNull() ?: 30
+                                    val lo = (hi * 0.33f).toInt().coerceAtLeast(5)
+                                    settingsPrefs.edit().putInt("pll_gain_lo_pct", lo).apply()
+                                    bump()
+                                }
+                            )
+                            SettingsNoteRow(stringResource(R.string.settings_pll_tuning_hint))
+                            SDWDivider()
+                            SettingsOptionRow(
+                                title = stringResource(R.string.settings_crossfade_style),
+                                options = listOf(
+                                    "fade" to stringResource(R.string.settings_crossfade_style_fade),
+                                    "cut" to stringResource(R.string.settings_crossfade_style_cut)
+                                ),
+                                selectedKey = settingsPrefs.getString("crossfade_style", "fade") ?: "fade",
+                                onSelect = { key ->
+                                    settingsPrefs.edit().putString("crossfade_style", key).apply()
+                                    bump()
+                                }
+                            )
+                        }
+                        // 【V8.194】交叉淡化总开关关着时，下面两项都不会生效，直接收起来
+                        // （原来就地显示但点了不生效，看着像有 bug）。
+                        if (djModeOn) {
+                            SDWDivider()
+                            // 【V8.248】落点模式（合并原 智能对齐/落点偏好/Automix 乐句切入 三个键，
+                            // 首次读取自动迁移老配置）。标准=小节线进场；拍点=智能对齐选更优落点；
+                            // 乐句=djay Automix 式 8 小节乐句切入。
+                            val landingMode = settingsPrefs.getString("crossfade_landing_mode", null) ?: run {
+                                val m = when {
+                                    settingsPrefs.getBoolean("crossfade_automix", true) -> "phrase"
+                                    settingsPrefs.getBoolean("crossfade_smart_align", true) -> "beat"
+                                    else -> "standard"
+                                }
+                                settingsPrefs.edit().putString("crossfade_landing_mode", m).apply()
+                                m
+                            }
+                            SettingsOptionRow(
+                                title = stringResource(R.string.settings_landing_mode),
+                                options = listOf(
+                                    "standard" to stringResource(R.string.settings_landing_mode_standard),
+                                    "beat" to stringResource(R.string.settings_landing_mode_beat),
+                                    "phrase" to stringResource(R.string.settings_landing_mode_phrase)
+                                ),
+                                selectedKey = landingMode,
+                                onSelect = { key ->
+                                    settingsPrefs.edit().putString("crossfade_landing_mode", key).apply()
+                                    bump()
+                                }
+                            )
+                            // 落点偏好（仅拍点模式）：静音段优先(稳) / 拍点优先(DJ 拍上交接)
+                            if (landingMode == "beat") {
+                                SDWDivider()
+                                SettingsOptionRow(
+                                    title = stringResource(R.string.settings_crossfade_align_prefer),
+                                    options = listOf(
+                                        "quiet" to stringResource(R.string.settings_crossfade_align_quiet),
+                                        "beat" to stringResource(R.string.settings_crossfade_align_beat)
+                                    ),
+                                    selectedKey = settingsPrefs.getString("crossfade_align_prefer", "quiet") ?: "quiet",
+                                    onSelect = { key ->
+                                        settingsPrefs.edit().putString("crossfade_align_prefer", key).apply()
+                                        bump()
+                                    }
+                                )
+                            }
+                        }
+                        }
+                    }
+                }
+
             }
 
             item {
@@ -1452,7 +1470,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     SettingsNoteRow(stringResource(R.string.settings_balance_hint))
                     SDWDivider()
                 }
-                item { SettingsGroupLabel(stringResource(R.string.settings_usb_dac)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_usb_dac), icon = Icons.Default.Usb, tone = SectionTone.Tertiary) }
                 item {
                     LaunchedEffect(usbExclusiveEnabled, refreshTrigger) {
                         if (usbExclusiveEnabled) {
@@ -1476,7 +1494,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
 
                     ThemeStagger(index = 3) {
-                        SettingsCard {
+                        SettingsCard(tone = SectionTone.Tertiary) {
                             SettingsSwitchItem(
                                 icon = Icons.Default.Usb,
                                 title = stringResource(R.string.settings_hardware_exclusive),
@@ -1508,7 +1526,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 }
                             )
                             if (usbExclusiveEnabled && usbAvailable) {
-                                SettingsNoteRow(text = dacDetected, color = Color(0xFF4CAF50))
+                                SettingsNoteRow(text = dacDetected, color = StatusPositive)
                             }
 
                             SDWDivider()
@@ -1581,10 +1599,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 }
 
                 // ── [NeriPlayer 引擎] USB 独占输出设置（选项集与 NeriPlayer 一致） ──
-                item { SettingsGroupLabel(stringResource(R.string.settings_usb_ex_group)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_usb_ex_group), icon = Icons.Default.HighQuality, tone = SectionTone.Tertiary) }
                 item {
                     ThemeStagger(index = 3) {
-                        SettingsCard {
+                        SettingsCard(tone = SectionTone.Tertiary) {
                             // 引擎选择：neri（默认）/ legacy 逃生通道
                             SettingsOptionRow(
                                 title = stringResource(R.string.settings_usb_ex_engine),
@@ -1611,6 +1629,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
 
                 // 【V9.01】创意 DSP 开关（引擎 DSP 主开关 + 5 个子开关）置于「USB DAC 独占」模块下。
                 // 原声直通（direct_passthrough）最高优先级：开启后本组全部失效。
+                // [M3 Expressive · Phase 2] 每个开关独立成高反差大卡片（激活 primaryContainer /
+                // 未激活 surfaceVariant、24.dp 留白），剔除 SDWDivider，靠卡片间距与色块对比分区。
+                // 引擎 DSP 总开关状态在参数均衡卡的 item 内读取（LazyListScope 非 composable 作用域，
+                // 不可在此直接调用 remember），供其联动禁用。
                 val dacLockedByPassthrough = settingsPrefs.getBoolean("direct_passthrough", false)
                 if (dacLockedByPassthrough) {
                     item {
@@ -1622,60 +1644,53 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         )
                     }
                 }
+                // [M3 Expressive · Phase 4] 主从嵌套：引擎 DSP 是总闸，做成超大 Hero 主卡片，
+                // 6 个子开关以「暗一档、小一号」的子卡片嵌在它内部；总闸关闭时整组折叠收起。
                 item {
-                    SettingsCard {
-                        val engineDspEnabled = remember(refreshTrigger) { settingsPrefs.getBoolean("engine_dsp_enabled", true) }
-                        SettingsPrefSwitch(
-                            refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "engine_dsp_enabled",
-                            defaultValue = true, icon = Icons.Default.Tune,
-                            enabled = !dacLockedByPassthrough,
-                            title = stringResource(R.string.settings_engine_dsp),
-                            subtitleOn = stringResource(R.string.settings_engine_dsp_on),
-                            subtitleOff = stringResource(R.string.settings_engine_dsp_off),
-                            note = stringResource(R.string.settings_engine_dsp_note),
-                            onChange = { enabled -> MusicService.instance?.applyEngineDspEnabled(enabled) }
-                        )
-                        SDWDivider()
-                        SettingsPrefSwitch(
+                    SettingsDspMasterCard(
+                        refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "engine_dsp_enabled",
+                        defaultValue = true, icon = Icons.Default.Tune,
+                        enabled = !dacLockedByPassthrough,
+                        title = stringResource(R.string.settings_engine_dsp),
+                        subtitleOn = stringResource(R.string.settings_engine_dsp_on),
+                        subtitleOff = stringResource(R.string.settings_engine_dsp_off),
+                        note = stringResource(R.string.settings_engine_dsp_note),
+                        onChange = { v -> MusicService.instance?.applyEngineDspEnabled(v) }
+                    ) {
+                        SettingsDspSwitchCard(
                             refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "crossfade_bass_swap",
                             defaultValue = true, icon = Icons.Default.GraphicEq,
-                            enabled = !dacLockedByPassthrough,
+                            enabled = !dacLockedByPassthrough, nested = true,
                             title = stringResource(R.string.settings_dac_bass_swap),
                             subtitleOn = stringResource(R.string.settings_dac_bass_swap_on),
                             subtitleOff = stringResource(R.string.settings_dac_bass_swap_off),
                             onChange = { enabled -> MusicService.instance?.applyBassSwapEnabled(enabled) }
                         )
-                        SDWDivider()
-                        SettingsPrefSwitch(
+                        SettingsDspSwitchCard(
                             refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "mseb_enabled",
                             defaultValue = true, icon = Icons.Default.Equalizer,
-                            enabled = !dacLockedByPassthrough,
+                            enabled = !dacLockedByPassthrough, nested = true,
                             title = stringResource(R.string.settings_dac_mseb),
                             subtitleOn = stringResource(R.string.settings_dac_mseb_on),
                             subtitleOff = stringResource(R.string.settings_dac_mseb_off),
                             onChange = { enabled -> MusicService.instance?.applyMsebEnabled(enabled) }
                         )
-                        SDWDivider()
-                        SettingsPrefSwitch(
+                        SettingsDspSwitchCard(
                             refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "limiter_enabled",
                             defaultValue = true, icon = Icons.Default.LineWeight,
-                            enabled = !dacLockedByPassthrough,
+                            enabled = !dacLockedByPassthrough, nested = true,
                             title = stringResource(R.string.settings_dac_limiter),
                             subtitleOn = stringResource(R.string.settings_dac_limiter_on),
                             subtitleOff = stringResource(R.string.settings_dac_limiter_off),
                             onChange = { enabled -> MusicService.instance?.applyLimiterEnabled(enabled) }
                         )
-                        SDWDivider()
-                        // 【V8.690 修复】DTS 开关改为读写 "mseb" pref（与 DSP 界面 MsebScreen 同源）。
-                        // 旧实现读写 "settings" 的同名字段——两个 UI 各写各的永远不通，且
-                        // 播放器重建时旧 refreshDtsEnabled 也只认 "settings"，导致"开了没效果"。
-                        // key 恰好同为 "dts_enabled"，defaultValue 对齐 MsebCalculator 的 false。
-                        SettingsPrefSwitch(
+                        // 【V8.690 修复】DTS 开关读写 "mseb" pref（与 DSP 界面 MsebScreen 同源），见 onChange 同步 M/S 曲线。
+                        SettingsDspSwitchCard(
                             refreshKey = refreshTrigger, bump = bump,
                             prefs = context.getSharedPreferences("mseb", android.content.Context.MODE_PRIVATE),
                             key = "dts_enabled",
                             defaultValue = false, icon = Icons.Default.SurroundSound,
-                            enabled = !dacLockedByPassthrough,
+                            enabled = !dacLockedByPassthrough, nested = true,
                             title = stringResource(R.string.settings_dac_dts),
                             subtitleOn = stringResource(R.string.settings_dac_dts_on),
                             subtitleOff = stringResource(R.string.settings_dac_dts_off),
@@ -1692,21 +1707,19 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 }
                             }
                         )
-                        SDWDivider()
-                        SettingsPrefSwitch(
+                        SettingsDspSwitchCard(
                             refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "autoeq_enabled",
                             defaultValue = true, icon = Icons.Default.Headphones,
-                            enabled = !dacLockedByPassthrough,
+                            enabled = !dacLockedByPassthrough, nested = true,
                             title = stringResource(R.string.settings_dac_autoeq),
                             subtitleOn = stringResource(R.string.settings_dac_autoeq_on),
                             subtitleOff = stringResource(R.string.settings_dac_autoeq_off),
                             onChange = { enabled -> MusicService.instance?.applyAutoEqEnabled(enabled) }
                         )
-                        SDWDivider()
-                        SettingsPrefSwitch(
+                        SettingsDspSwitchCard(
                             refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "parametric_eq_enabled",
                             defaultValue = false, icon = Icons.Default.Speed,
-                            enabled = !dacLockedByPassthrough && engineDspEnabled,
+                            enabled = !dacLockedByPassthrough, nested = true,
                             title = stringResource(R.string.settings_dac_parametric_eq),
                             subtitleOn = stringResource(R.string.settings_dac_parametric_eq_on),
                             subtitleOff = stringResource(R.string.settings_dac_parametric_eq_off),
@@ -1715,9 +1728,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_bt_output)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_bt_output), icon = Icons.Default.Bluetooth, tone = SectionTone.Secondary) }
                 item {
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Secondary) {
                         SettingsPrefSwitch(
                             refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "bt_pre_emphasis",
                             defaultValue = true, icon = Icons.Default.Bluetooth,
@@ -1729,7 +1742,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_loudness_norm)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_loudness_norm), icon = Icons.Default.VolumeDown, tone = SectionTone.Primary) }
                 item {
                     val normCfg = remember(refreshTrigger) { LoudnessNormalizer.load(context) }
                     // 【V8.236】这一行原来只在 refreshTrigger 变化时重算：切歌、以及后台扫描
@@ -1758,7 +1771,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             }.getOrNull()
                         }
                     }
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         SettingsSwitchItem(
                             icon = Icons.Default.GraphicEq,
                             title = stringResource(R.string.settings_loudness_norm),
@@ -1835,9 +1848,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_agc)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_agc), icon = Icons.Default.Hearing, tone = SectionTone.Secondary) }
                 item {
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Secondary) {
                         SettingsPrefSwitch(
                             refreshKey = refreshTrigger, bump = bump, prefs = settingsPrefs, key = "agc_enabled",
                             defaultValue = false, icon = Icons.Default.GraphicEq,
@@ -1862,7 +1875,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 )
             }
             if (isSectionOpen("cat_ui")) {
-                item { SettingsGroupLabel(stringResource(R.string.settings_appearance)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_appearance), icon = Icons.Default.Palette, tone = SectionTone.Tertiary) }
                 item {
                     ThemeStagger(index = 6) {
                         Box(modifier = Modifier.onGloballyPositioned { coords ->
@@ -1872,7 +1885,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             themeSwitchX = pos.x + size.width * 0.82f
                             themeSwitchY = pos.y + size.height * 0.5f
                         }) {
-                            SettingsCard {
+                            SettingsCard(tone = SectionTone.Tertiary) {
                                 SettingsSwitchItem(
                                     icon = Icons.Default.LightMode,
                                     title = stringResource(R.string.settings_light_mode),
@@ -1902,7 +1915,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             followSwitchX = pos.x + size.width * 0.82f
                             followSwitchY = pos.y + size.height * 0.5f
                         }) {
-                            SettingsCard {
+                            SettingsCard(tone = SectionTone.Tertiary) {
                                 SettingsSwitchItem(
                                     icon = Icons.Default.BrightnessAuto,
                                     title = stringResource(R.string.settings_follow_system),
@@ -1969,16 +1982,27 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         )
                     }
                     if (showLastFmKey) {
-                        AlertDialog(
+                        // [P2 · M3 Expressive] 全站弹窗统一到 SDWAlertDialog（玻璃容器 + Panel 圆角）
+                        SDWAlertDialog(
                             onDismissRequest = { showLastFmKey = false },
                             title = { Text(stringResource(R.string.settings_lastfm_key)) },
                             text = {
-                                OutlinedTextField(
+                                // [P2] 描边式 → 容器式（半透明玻璃），与主界面搜索框统一
+                                TextField(
                                     value = keyDraft,
                                     onValueChange = { keyDraft = it },
                                     label = { Text(stringResource(R.string.settings_lastfm_key_hint)) },
                                     singleLine = true,
-                                    modifier = Modifier.fillMaxWidth()
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = TextFieldDefaults.colors(
+                                        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                        unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                        cursorColor = MaterialTheme.colorScheme.primary,
+                                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                                        focusedIndicatorColor = Color.Transparent,
+                                        unfocusedIndicatorColor = Color.Transparent
+                                    )
                                 )
                             },
                             confirmButton = {
@@ -1997,7 +2021,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_section_display)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_section_display), icon = Icons.Default.LightMode, tone = SectionTone.Primary) }
                 item {
                     // 【V8.439】进度条上方显示什么：四选一（VU 表 / 整曲波形 / 两者 / 都不显示）。
                     // 原来是单一开关，只能"有VU 表 / 没 VU 表"。波形（djay 着色 + 进拍/出拍横线）
@@ -2007,7 +2031,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                     val vuOnlyLabel = stringResource(R.string.pv_mode_vu)
                     val noneLabel = stringResource(R.string.pv_mode_none)
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         SettingsChipGroup(
                             options = listOf(
                                 "0" to vuOnlyLabel,
@@ -2044,7 +2068,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
                 item {
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         SettingsPrefSwitch(
                             refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs, key = "cover_color_bg",
                             defaultValue = true, icon = Icons.Default.Palette,
@@ -2067,7 +2091,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     var immersivePlayer by remember(refreshTrigger) {
                         mutableStateOf(uiPrefs.getBoolean("immersive_player", false))
                     }
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         SettingsSwitchItem(
                             icon = Icons.Default.Fullscreen,
                             title = stringResource(R.string.settings_immersive_player),
@@ -2110,7 +2134,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 }
                 // === 播放页底部按键自动隐藏 ===
                 item {
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         SettingsPrefSwitch(
                             refreshKey = refreshTrigger, bump = bump, prefs = uiPrefs,
                             key = "auto_hide_bottom", defaultValue = true,
@@ -2122,7 +2146,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_wallpaper)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_wallpaper), icon = Icons.Default.Wallpaper, tone = SectionTone.Secondary) }
                 item {
                     val imagePicker = rememberLauncherForActivityResult(
                         ActivityResultContracts.GetContent()
@@ -2132,7 +2156,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             bump()
                         }
                     }
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Secondary) {
                         SettingsItem(
                             icon = Icons.Default.Wallpaper,
                             title = stringResource(R.string.settings_wallpaper_pick),
@@ -2187,7 +2211,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_lyrics_display)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_lyrics_display), icon = Icons.Default.Lyrics, tone = SectionTone.Tertiary) }
                 item {
                     var lyricFontSize by remember(refreshTrigger) {
                         mutableStateOf(uiPrefs.getInt("lyric_font_size", 28))
@@ -2195,7 +2219,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     var lyricVisibleLines by remember(refreshTrigger) {
                         mutableStateOf(uiPrefs.getInt("lyric_visible_lines", 7))
                     }
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Tertiary) {
                         SettingsItem(
                             icon = Icons.Default.FormatSize,
                             title = stringResource(R.string.settings_lyric_font_size),
@@ -2255,10 +2279,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_widget)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_widget), icon = Icons.Default.BlurOn, tone = SectionTone.Primary) }
                 item {
                     val widgetPref = context.getSharedPreferences("widget_prefs", android.content.Context.MODE_PRIVATE)
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         SettingsPrefSwitch(
                             refreshKey = refreshTrigger, bump = bump, prefs = widgetPref, key = "transparent_bg",
                             icon = Icons.Default.BlurOn,
@@ -2275,7 +2299,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.language)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.language), icon = Icons.Default.Translate, tone = SectionTone.Secondary) }
                 item {
                     val currentLang = AppLanguageManager.getCurrent(context)
                     val langLabel = when (currentLang) {
@@ -2290,7 +2314,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         "hi" -> stringResource(R.string.language_hindi)
                         else -> stringResource(R.string.language_system)
                     }
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Secondary) {
                         SettingsItem(
                             icon = Icons.Default.Translate,
                             title = stringResource(R.string.language),
@@ -2320,10 +2344,10 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 )
             }
             if (isSectionOpen("cat_library")) {
-                item { SettingsGroupLabel(stringResource(R.string.settings_scan)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_scan), icon = Icons.Default.Sync, tone = SectionTone.Tertiary) }
                 item {
                     ThemeStagger(index = 1) {
-                        SettingsCard {
+                        SettingsCard(tone = SectionTone.Tertiary) {
                             SettingsItem(
                                 icon = Icons.Default.Timer,
                                 title = stringResource(R.string.settings_min_duration),
@@ -2344,7 +2368,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_section_library)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_section_library), icon = Icons.AutoMirrored.Filled.ViewList, tone = SectionTone.Primary) }
                 item {
                     val ctx = context
                     var scanning by remember(refreshTrigger) { mutableStateOf(false) }
@@ -2355,16 +2379,14 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     // [V8.102] 「修复媒体库」专属进度（不分阶段时不会再和列表扫描互顶）
                     val rp by com.sdw.music.player.SongRepository.repairProgress.collectAsState()
 
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         if (scanning) {
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                CircularProgressIndicator(
-                                    strokeWidth = 3.dp,
-                                    modifier = Modifier.size(22.dp),
-                                    color = MaterialTheme.colorScheme.primary
+                                LoadingIndicator(
+                                    modifier = Modifier.size(22.dp)
                                 )
                                 Spacer(Modifier.width(12.dp))
                                 Text(
@@ -2488,12 +2510,16 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                     2 -> stringResource(R.string.settings_repair_phase_scan)
                                     else -> stringResource(R.string.settings_repair_phase_merge)
                                 }
+                                // [P2 · M3 Expressive] 线性直条 → 波浪条，与全站进度语言统一。
                                 if (rpNow.total > 0) {
-                                    LinearProgressIndicator(
-                                        progress = { (rpNow.done.toFloat() / rpNow.total).coerceIn(0f, 1f) },
-                                        modifier = Modifier.fillMaxWidth().height(4.dp),
+                                    ExpressiveWavyProgress(
+                                        fraction = (rpNow.done.toFloat() / rpNow.total).coerceIn(0f, 1f),
                                         color = MaterialTheme.colorScheme.primary,
-                                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                        active = true,
+                                        showTrack = true,
+                                        amplitude = 3.dp,
+                                        activeStroke = 3.dp,
+                                        modifier = Modifier.fillMaxWidth().height(12.dp)
                                     )
                                     Spacer(Modifier.height(6.dp))
                                     Text(
@@ -2505,10 +2531,15 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                         style = MaterialTheme.typography.labelSmall
                                     )
                                 } else {
-                                    LinearProgressIndicator(
-                                        modifier = Modifier.fillMaxWidth().height(4.dp),
+                                    ExpressiveWavyProgress(
+                                        fraction = 0f,
                                         color = MaterialTheme.colorScheme.primary,
-                                        trackColor = MaterialTheme.colorScheme.surfaceVariant
+                                        active = true,
+                                        indeterminate = true,
+                                        showTrack = true,
+                                        amplitude = 3.dp,
+                                        activeStroke = 3.dp,
+                                        modifier = Modifier.fillMaxWidth().height(12.dp)
                                     )
                                     Spacer(Modifier.height(6.dp))
                                     Text(
@@ -2522,9 +2553,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_backup)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_backup), icon = Icons.Default.Backup, tone = SectionTone.Secondary) }
                 item {
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Secondary) {
                         SettingsNoteRow(stringResource(R.string.settings_backup_sub))
 
                         SDWDivider()
@@ -2620,7 +2651,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
 
                         backupMsg?.let { msg ->
                             SDWDivider()
-                            SettingsNoteRow(msg, if (backupMsgOk) Color(0xFF4CAF50) else MaterialTheme.colorScheme.error)
+                            SettingsNoteRow(msg, if (backupMsgOk) StatusPositive else MaterialTheme.colorScheme.error)
                         }
                     }
                 }
@@ -2637,9 +2668,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                 )
             }
             if (isSectionOpen("cat_system")) {
-                item { SettingsGroupLabel(stringResource(R.string.settings_tools)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_tools), icon = Icons.Default.BugReport, tone = SectionTone.Tertiary) }
                 item {
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Tertiary) {
                         SettingsItem(
                             icon = Icons.Default.Image,
                             title = stringResource(R.string.settings_cover_tool),
@@ -2666,7 +2697,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_standby)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_standby), icon = Icons.Default.BatteryAlert, tone = SectionTone.Primary) }
                 item {
                     // [UI-TIDY] 档位键改成稳定 ASCII：中文只作为展示文案（走 stringResource），
                     // 不再当键值 —— 之前键值和界面文案同一份中文，改文案就会误伤已存偏好。
@@ -2676,7 +2707,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         val raw = uiPrefs.getString("idle_level", "rare") ?: "rare"
                         mutableStateOf(legacyIdleKeys[raw] ?: raw.takeIf { it in idleKeys } ?: "rare")
                     }
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Primary) {
                         SettingsItem(
                             icon = Icons.Default.Schedule,
                             title = stringResource(R.string.settings_idle),
@@ -2737,9 +2768,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_section_system)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_section_system), icon = Icons.Default.Info, tone = SectionTone.Secondary) }
                 item {
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Secondary) {
                         if (onNavigateToAudioDiagnostic != null) {
                             SettingsItem(
                                 icon = Icons.Default.QueryStats,
@@ -2789,7 +2820,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             Column(modifier = Modifier.heightIn(max = 240.dp)) {
                                 Text(
                                     text = fullLog.ifEmpty { logEmpty },
-                                    color = Color(0xFF00FF88),
+                                    color = StatusOk,
                                     fontSize = 9.sp,
                                     lineHeight = 12.sp,
                                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
@@ -2837,7 +2868,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                         ) {
                             Text(
                                 text = stringResource(R.string.settings_last_crash),
-                                color = Color(0xFFFF6B6B),
+                                color = StatusError,
                                 fontSize = 12.sp,
                                 fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
                                 modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
@@ -2845,7 +2876,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             Column(modifier = Modifier.heightIn(max = 240.dp)) {
                                 Text(
                                     text = crashLog,
-                                    color = Color(0xFFFFB4A2),
+                                    color = StatusErrorSoft,
                                     fontSize = 9.sp,
                                     lineHeight = 12.sp,
                                     fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
@@ -2887,7 +2918,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             InfoChip(stringResource(R.string.settings_info_stream), if (streaming) statusOn else statusOff,
                                 if (streaming) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                             InfoChip(stringResource(R.string.settings_info_underrun), "$underruns",
-                                if (underruns > 0) Color(0xFFFF6B6B) else Color(0xFF00FF88))
+                                if (underruns > 0) StatusError else StatusOk)
                             InfoChip(stringResource(R.string.settings_info_native_log), "${nativeLogLen}B", MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                         Spacer(Modifier.height(8.dp))
@@ -2926,9 +2957,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             else -> stringResource(R.string.dacdiag_route_host)
                         }
                         val routeColor = when {
-                            forcedOboe -> Color(0xFFFF9800)
+                            forcedOboe -> StatusWarn
                             useOboe -> MaterialTheme.colorScheme.primary
-                            else -> Color(0xFF00FF88)
+                            else -> StatusOk
                         }
                         Column(
                             modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp)
@@ -2968,7 +2999,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             }
                             Row(Modifier.padding(vertical = 2.dp)) {
                                 Text(stringResource(R.string.dacdiag_clock_44k), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
-                                Text(if (profile.lacks44k1Clock) stringResource(R.string.dacdiag_clock_missing) else stringResource(R.string.dacdiag_clock_ok), color = if (profile.lacks44k1Clock) Color(0xFFFF9800) else Color(0xFF00FF88), fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+                                Text(if (profile.lacks44k1Clock) stringResource(R.string.dacdiag_clock_missing) else stringResource(R.string.dacdiag_clock_ok), color = if (profile.lacks44k1Clock) StatusWarn else StatusOk, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
                             }
                             Row(Modifier.padding(vertical = 2.dp)) {
                                 Text(stringResource(R.string.dacdiag_clock_probe), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
@@ -2983,7 +3014,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             Text(stringResource(R.string.dacdiag_sec_quirk), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
                             Row(Modifier.padding(vertical = 2.dp)) {
                                 Text(stringResource(R.string.dacdiag_match), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
-                                Text(if (profile.autoProbe) stringResource(R.string.dacdiag_match_generic) else profile.name, color = if (profile.autoProbe) Color(0xFFFF9800) else Color(0xFF00FF88), fontSize = 11.sp)
+                                Text(if (profile.autoProbe) stringResource(R.string.dacdiag_match_generic) else profile.name, color = if (profile.autoProbe) StatusWarn else StatusOk, fontSize = 11.sp)
                             }
                             val quirkSummary = mutableListOf<String>().apply {
                                 if (profile.skipSetCur) add("skipSetCur")
@@ -3003,7 +3034,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             Text(stringResource(R.string.dacdiag_sec_rates), color = MaterialTheme.colorScheme.primary, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold, modifier = Modifier.padding(top = 6.dp, bottom = 2.dp))
                             Row(Modifier.padding(vertical = 2.dp)) {
                                 Text(stringResource(R.string.dacdiag_p3_verified), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
-                                Text(if (verified.isNotEmpty()) verified.joinToString(" ") { fmtRate(it) } else stringResource(R.string.dacdiag_no_probe_data), color = Color(0xFF00FF88), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                                Text(if (verified.isNotEmpty()) verified.joinToString(" ") { fmtRate(it) } else stringResource(R.string.dacdiag_no_probe_data), color = StatusOk, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                             }
                             Row(Modifier.padding(vertical = 2.dp)) {
                                 Text(stringResource(R.string.dacdiag_declared), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
@@ -3028,9 +3059,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                                 else -> stringResource(R.string.dacdiag_reason_known, profile.name)
                             }
                             val reasonColor = when {
-                                forcedOboe -> Color(0xFFFF9800)
+                                forcedOboe -> StatusWarn
                                 useOboe -> MaterialTheme.colorScheme.primary
-                                else -> Color(0xFF00FF88)
+                                else -> StatusOk
                             }
                             Spacer(Modifier.height(4.dp))
                             Text(stringResource(R.string.dacdiag_diag_label, reasonText), color = reasonColor, fontSize = 11.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium, modifier = Modifier.fillMaxWidth())
@@ -3042,7 +3073,7 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             Row(Modifier.padding(vertical = 2.dp)) {
                                 Text(stringResource(R.string.dac_fb_status_label), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp, modifier = Modifier.width(112.dp))
                                 if (fbActive) {
-                                    Text(stringResource(R.string.dac_fb_active).format(fbRate / 1000.0, fbPpm), color = Color(0xFF00FF88), fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
+                                    Text(stringResource(R.string.dac_fb_active).format(fbRate / 1000.0, fbPpm), color = StatusOk, fontSize = 11.sp, fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace)
                                 } else {
                                     Text(stringResource(R.string.dac_fb_inactive), color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                                 }
@@ -3069,9 +3100,9 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                     }
                 }
 
-                item { SettingsGroupLabel(stringResource(R.string.settings_about)) }
+                item { ExpressiveGroupHeader(title = stringResource(R.string.settings_about), icon = Icons.Default.Info, tone = SectionTone.Tertiary) }
                 item {
-                    SettingsCard {
+                    SettingsCard(tone = SectionTone.Tertiary) {
                         SettingsItem(
                             icon = Icons.Default.Info,
                             title = stringResource(R.string.settings_about_name),
@@ -3172,29 +3203,168 @@ private fun SettingsSectionTitle(
  */
 @Composable
 private fun SettingsGroupLabel(text: String) {
-    Text(
-        text,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        style = MaterialTheme.typography.labelSmall,
-        fontWeight = FontWeight.SemiBold,
+    // 【M3 Expressive · Phase 5】卡内二级分组也带上板块色（读不到就退回中性灰）。
+    val tone = LocalSectionTone.current
+    val onTone = sectionOnContainer(tone)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.padding(start = 16.dp, top = 12.dp, bottom = 2.dp)
-    )
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = 3.dp, height = 12.dp)
+                .background(onTone.copy(alpha = 0.75f), RoundedCornerShape(2.dp))
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text,
+            color = onTone.copy(alpha = 0.92f),
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold
+        )
+    }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 【M3 Expressive · Phase 5】全站板块「有颜色 + 有父子」体系
+//
+// 之前只有「引擎 DSP」一块是 Hero 主卡 + 内嵌子卡，其余板块还是
+// 「灰标题 + 一块近乎透明的玻璃卡 + 素行」，颜色全无、层级全平。
+// 这里把 DSP 那套推广到全站：
+//   父 —— 板块头：实心容器色（primary / secondary / tertiary 轮换，全部来自动态取色）
+//   子 —— 板块卡：父色调弱化版实心块（仍是看得见的实心色，不是薄纱）
+//   孙 —— 卡内条目：小色块，开关打开时加深一档（与 DSP 子卡同一套语言）
+// ─────────────────────────────────────────────────────────────────────────────
+
+private enum class SectionTone { Primary, Secondary, Tertiary }
+
+/** 子层通过它拿到所属板块的色调，无需每个调用点显式传参。 */
+private val LocalSectionTone = staticCompositionLocalOf { SectionTone.Primary }
+
+@Composable
+private fun sectionContainerColor(tone: SectionTone): Color = when (tone) {
+    SectionTone.Primary -> MaterialTheme.colorScheme.primaryContainer
+    SectionTone.Secondary -> MaterialTheme.colorScheme.secondaryContainer
+    SectionTone.Tertiary -> MaterialTheme.colorScheme.tertiaryContainer
+}
+
+@Composable
+private fun sectionOnContainer(tone: SectionTone): Color = when (tone) {
+    SectionTone.Primary -> MaterialTheme.colorScheme.onPrimaryContainer
+    SectionTone.Secondary -> MaterialTheme.colorScheme.onSecondaryContainer
+    SectionTone.Tertiary -> MaterialTheme.colorScheme.onTertiaryContainer
+}
+
+/** 两个颜色按比例混合（用来做"父色调的弱化版"，避免整页三原色对撞）。 */
+private fun blendColor(from: Color, to: Color, t: Float): Color = Color(
+    red = from.red + (to.red - from.red) * t,
+    green = from.green + (to.green - from.green) * t,
+    blue = from.blue + (to.blue - from.blue) * t,
+    alpha = from.alpha + (to.alpha - from.alpha) * t
+)
+
+/** 父：板块主头 —— 实心容器色 + 色调徽标里的图标 + 加粗标题。 */
+@Composable
+private fun ExpressiveGroupHeader(
+    title: String,
+    icon: ImageVector,
+    tone: SectionTone = SectionTone.Primary,
+    subtitle: String? = null
+) {
+    val container = sectionContainerColor(tone)
+    val onContainer = sectionOnContainer(tone)
+    Surface(
+        // 父：上圆下方——像一块"盖"压在下面几张子卡上，父子关系靠形状就能读出来
+        shape = RoundedCornerShape(topStart = 26.dp, topEnd = 26.dp, bottomStart = 10.dp, bottomEnd = 10.dp),
+        color = container,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 5.dp)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            // 图标坐在同色系更深一点的"徽标"里，避免图标直接压在容器色上糊成一团
+            Surface(
+                shape = RoundedCornerShape(16.dp),
+                color = onContainer.copy(alpha = 0.14f),
+                modifier = Modifier.size(42.dp)
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Icon(icon, null, tint = onContainer, modifier = Modifier.size(22.dp))
+                }
+            }
+            Spacer(Modifier.width(14.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    title,
+                    color = onContainer,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold
+                )
+                if (subtitle != null) {
+                    Text(
+                        subtitle,
+                        color = onContainer.copy(alpha = 0.78f),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 孙：卡内条目的小色块底色。
+ * 开关打开 → 板块色占比提高（"激活"更浓）；关闭 → 只留一点点色调，退到背景里。
+ */
+@Composable
+private fun subRowColor(active: Boolean): Color {
+    val tone = LocalSectionTone.current
+    val base = MaterialTheme.colorScheme.surfaceContainerLow
+    return blendColor(base, sectionContainerColor(tone), if (active) 0.34f else 0.13f)
+}
+
+/** 子：条目外壳形状（卡内条目统一这个圆角，和 DSP 子卡同形）。 */
+private val SubRowShape = RoundedCornerShape(18.dp)
 
 /**
  * V8.164 分组玻璃卡：一组相关条目共用一块玻璃面，组内用发丝线分隔。
  * 之前每个条目各自一小块玻璃 + 一堆 Spacer/Divider，滚动时看起来是"碎片列表"。
  */
 @Composable
-private fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 12.dp, vertical = 4.dp)
-            .glassSurface(shape = SDWShapes.Row, fillBoost = 0f)
-            .padding(vertical = 6.dp),
-        content = content
-    )
+private fun SettingsCard(
+    /** 【Phase 5】所属板块色调：卡面取该色调的弱化版，卡内条目再往下一档。 */
+    tone: SectionTone = SectionTone.Primary,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    // [M3 Expressive · Phase 2] 拉开 Surface 色阶：卡片必须是**看得见的实心色块**
+    // （surfaceContainer），而不是一层几乎透明的薄纱。旧实现只有 glassSurface 的
+    // 0.30/0.15 scrim，卡片和页面底色糊成一片——正是"素雅过头的伪高级"的根源。
+    // 实心色块打底 + 玻璃光泽盖面：既分得清层次，又保留质感。
+    // [Phase 5] 底色从"中性灰"改成"板块主色的弱化版"——整页每个板块都有自己的颜色身份，
+    // 同时明度仍压在父头之下，父子关系靠明度差而不是靠分隔线表达。
+    val wallpaper = WallpaperManager.hasWallpaper()
+    val cardTone = blendColor(
+        MaterialTheme.colorScheme.surfaceContainer,
+        sectionContainerColor(tone),
+        0.22f
+    ).copy(alpha = if (wallpaper) 0.52f else 0.96f)
+    CompositionLocalProvider(LocalSectionTone provides tone) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                // 子：比父头再往里缩一点（16 vs 12），圆角更小（20 vs 26）——
+                // 视觉上就"嵌在父头下面"的一格，而不是和父头平起平坐的另一块板。
+                .padding(horizontal = 16.dp, vertical = 3.dp)
+                .background(color = cardTone, shape = RoundedCornerShape(20.dp))
+                .glassSurface(shape = RoundedCornerShape(20.dp), fillBoost = 0f)
+                // 线条已被 Spacer 取代，组内分区靠留白撑开
+                .padding(vertical = 10.dp),
+            content = content
+        )
+    }
 }
 
 /** 卡片内的条目外壳：inCard=true 时只做内缩，外层卡片已经提供玻璃面。 */
@@ -3215,10 +3385,13 @@ private fun SettingsItem(
     inCard: Boolean = false
 ) {
     // [V8.115] 设置项统一到主界面玻璃语言：可点击项走弹簧按压，与主界面列表行同形。
+    // [Phase 5] 卡内条目不再是素行：套一层板块色调的小色块（导航项按未激活档着色）。
     val interaction = remember { MutableInteractionSource() }
+    val rowBg = if (inCard) subRowColor(active = false) else Color.Unspecified
     Row(
         modifier = Modifier
             .settingsShell(inCard)
+            .then(if (inCard) Modifier.background(rowBg, SubRowShape) else Modifier)
             .then(
                 if (onClick != null)
                     Modifier.springPress(interaction, pressedScale = 0.975f)
@@ -3248,22 +3421,39 @@ private fun SettingsSwitchItem(
     enabled: Boolean = true
 ) {
     val dim = if (enabled) 1f else 0.38f
+    // [Phase 5] 开关行做成小色块：开 → 板块色浓一档（一眼看到"哪些是开着的"），
+    // 关 → 只留一点色调。图标与标题同步上色，和 DSP 子卡同一套视觉语言。
+    val rowBg = if (inCard) subRowColor(active = checked) else Color.Unspecified
+    val rowTint = if (inCard && checked) sectionOnContainer(LocalSectionTone.current)
+    else MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         modifier = Modifier
             .settingsShell(inCard)
-            .padding(horizontal = 16.dp, vertical = if (inCard) 8.dp else 10.dp),
+            .then(if (inCard) Modifier.background(rowBg, SubRowShape) else Modifier)
+            .padding(horizontal = 16.dp, vertical = if (inCard) 10.dp else 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = dim), modifier = Modifier.size(22.dp))
+        Icon(icon, null, tint = rowTint.copy(alpha = dim), modifier = Modifier.size(22.dp))
         Spacer(Modifier.width(16.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(title, color = MaterialTheme.colorScheme.onBackground.copy(alpha = dim), style = MaterialTheme.typography.bodyLarge)
+            Text(
+                title,
+                color = (if (inCard && checked) sectionOnContainer(LocalSectionTone.current)
+                else MaterialTheme.colorScheme.onBackground).copy(alpha = dim),
+                style = MaterialTheme.typography.bodyLarge,
+                fontWeight = if (inCard && checked) FontWeight.SemiBold else FontWeight.Normal
+            )
             Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = dim), style = MaterialTheme.typography.bodySmall)
         }
         ExpressiveSwitch(
             checked = checked,
             enabled = enabled,
-            onCheckedChange = onCheckedChange
+            onCheckedChange = onCheckedChange,
+            // [M3 Expressive · 配色统一] 开态轨道/对勾跟随板块色，与同页 Slider 的 activeTrack/thumb 一致
+            trackOnColor = if (inCard) sectionOnContainer(LocalSectionTone.current)
+            else MaterialTheme.colorScheme.primary,
+            iconOnColor = if (inCard) sectionOnContainer(LocalSectionTone.current)
+            else MaterialTheme.colorScheme.primary
         )
     }
 }
@@ -3333,8 +3523,207 @@ private fun SettingsPrefSwitch(
     }
 }
 
+/**
+ * [M3 Expressive · Phase 4] 创意 DSP 主控卡（Hero Container）。
+ *
+ * 「引擎 DSP」是整条创意处理链的总闸，和它下面的 6 个子开关不该平起平坐。这里把它做成
+ * 一张超大外层卡片：总闸开 → primaryContainer 高亮 + 内层展开子卡片；总闸关 →
+ * surfaceContainerHigh 中性色 + 子项折叠收起（机械舱门式展开）。
+ */
+@Composable
+private fun SettingsDspMasterCard(
+    refreshKey: Int,
+    bump: () -> Unit,
+    prefs: android.content.SharedPreferences,
+    key: String,
+    icon: ImageVector,
+    title: String,
+    subtitleOn: String,
+    subtitleOff: String,
+    note: String? = null,
+    defaultValue: Boolean = true,
+    enabled: Boolean = true,
+    onChange: ((Boolean) -> Unit)? = null,
+    subItems: @Composable ColumnScope.() -> Unit
+) {
+    var checked by remember(refreshKey) { mutableStateOf(prefs.getBoolean(key, defaultValue)) }
+    // 被原声直通锁住时整组禁用，子项一并收起
+    val expanded = checked && enabled
+    // [M3 Expressive · Hero 主开关] 激活时整卡用 primary 实色 + 白字（onPrimary），
+    // 与全站「带色卡片 + 白字」的 Expressive 规范统一；未激活保持中性 surfaceContainerHigh。
+    val containerColor = if (checked) MaterialTheme.colorScheme.primary
+    else MaterialTheme.colorScheme.surfaceContainerHigh
+    val onContainer = if (checked) MaterialTheme.colorScheme.onPrimary
+    else MaterialTheme.colorScheme.onSurface
+    val contentAlpha = if (enabled) 1f else 0.38f
+
+    Surface(
+        shape = MotoExpressiveShapes.large,
+        color = containerColor,
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    icon, null,
+                    tint = onContainer.copy(alpha = contentAlpha),
+                    modifier = Modifier.size(30.dp)
+                )
+                Spacer(Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        color = onContainer.copy(alpha = contentAlpha),
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (checked) subtitleOn else subtitleOff,
+                        color = onContainer.copy(alpha = 0.78f * contentAlpha),
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+                Spacer(Modifier.width(12.dp))
+                ExpressiveSwitch(
+                    checked = checked,
+                    enabled = enabled,
+                    onCheckedChange = { value ->
+                        checked = value
+                        prefs.edit().putBoolean(key, value).apply()
+                        onChange?.invoke(value)
+                        bump()
+                    }
+                )
+            }
+            if (note != null) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    note,
+                    color = onContainer.copy(alpha = 0.7f * contentAlpha),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+            AnimatedVisibility(
+                visible = expanded,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    subItems()
+                }
+            }
+        }
+    }
+}
+
+/**
+ * [M3 Expressive · Phase 2] 创意 DSP 大卡片：每个开关独立成一张高反差表面卡。
+ * 顶层卡片：激活 → primaryContainer（高对比强调色），未激活 → surfaceVariant（中性灰）。
+ * [Phase 4] `nested = true` 时作为主控卡内部的子卡片：圆角收到 20.dp、留白 16.dp，
+ * 底色下沉一档（未激活 surfaceContainerLowest / 激活 surfaceContainerHighest），
+ * 做出「嵌进主控卡里」的凹陷层次，而不是和父卡抢色。
+ */
+@Composable
+private fun SettingsDspSwitchCard(
+    refreshKey: Int,
+    bump: () -> Unit,
+    prefs: android.content.SharedPreferences,
+    key: String,
+    icon: ImageVector,
+    title: String,
+    subtitleOn: String,
+    subtitleOff: String,
+    note: String? = null,
+    defaultValue: Boolean = false,
+    enabled: Boolean = true,
+    nested: Boolean = false,
+    onChange: ((Boolean) -> Unit)? = null
+) {
+    var checked by remember(refreshKey) { mutableStateOf(prefs.getBoolean(key, defaultValue)) }
+    val containerColor = when {
+        !nested && checked -> MaterialTheme.colorScheme.primaryContainer
+        !nested -> MaterialTheme.colorScheme.surfaceVariant
+        // 嵌套子卡：父卡已经很亮，子卡下沉一档，靠明度差而不是色相差区分开关状态
+        checked -> MaterialTheme.colorScheme.surfaceContainerHighest
+        else -> MaterialTheme.colorScheme.surfaceContainerLowest
+    }
+    val onContainer = when {
+        !nested && checked -> MaterialTheme.colorScheme.onPrimaryContainer
+        !nested -> MaterialTheme.colorScheme.onSurfaceVariant
+        checked -> MaterialTheme.colorScheme.onSurface
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    val contentAlpha = if (enabled) 1f else 0.38f
+    Surface(
+        shape = if (nested) RoundedCornerShape(20.dp) else MotoExpressiveShapes.large,
+        color = containerColor,
+        modifier = Modifier
+            .fillMaxWidth()
+            // 嵌套时父卡已提供左右留白，子卡只留纵向间距（并比顶层更紧：6 → 4）
+            .padding(horizontal = if (nested) 0.dp else 12.dp, vertical = if (nested) 0.dp else 6.dp)
+    ) {
+        Column(modifier = Modifier.padding(if (nested) 16.dp else 24.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    icon, null,
+                    tint = onContainer.copy(alpha = contentAlpha),
+                    modifier = Modifier.size(if (nested) 24.dp else 28.dp)
+                )
+                Spacer(Modifier.width(if (nested) 14.dp else 16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        title,
+                        color = onContainer.copy(alpha = contentAlpha),
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = if (nested) FontWeight.SemiBold else FontWeight.Medium
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (checked) subtitleOn else subtitleOff,
+                        color = onContainer.copy(alpha = 0.75f * contentAlpha),
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+                Spacer(Modifier.width(if (nested) 12.dp else 16.dp))
+                ExpressiveSwitch(
+                    checked = checked,
+                    enabled = enabled,
+                    onCheckedChange = { value ->
+                        checked = value
+                        prefs.edit().putBoolean(key, value).apply()
+                        onChange?.invoke(value)
+                        bump()
+                    }
+                )
+            }
+            if (note != null) {
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    note,
+                    color = onContainer.copy(alpha = 0.7f * contentAlpha),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+    }
+}
+
 /** V8.164 卡片内的选项组：标题 + 自动换行的 chip 组（窄屏不再挤成一行溢出）。 */
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SettingsOptionRow(
     title: String,
@@ -3600,7 +3989,7 @@ private fun UsbExclusiveQualityCard(bump: () -> Unit) {
     )
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SettingsChipGroup(
     options: List<Pair<String, String>>,
@@ -3634,7 +4023,7 @@ private fun SettingsChipGroup(
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun SettingsChipFlow(
     options: List<Pair<String, String>>,
@@ -3664,9 +4053,10 @@ private fun SettingsChipFlow(
                     )
                 },
                 colors = FilterChipDefaults.filterChipColors(
-                    selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.30f),
-                    selectedLabelColor = MaterialTheme.colorScheme.onBackground,
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.55f),
+                    // [Phase 5] 选中态改用所属板块的容器色（实心），整页每个板块的 chip 各有其色
+                    selectedContainerColor = sectionContainerColor(LocalSectionTone.current),
+                    selectedLabelColor = sectionOnContainer(LocalSectionTone.current),
+                    containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
                     labelColor = MaterialTheme.colorScheme.onSurface
                 ),
                 modifier = Modifier.height(32.dp)
@@ -3685,7 +4075,15 @@ private fun SettingsSliderRow(
     onValueChange: (Float) -> Unit,
     onValueChangeFinished: (() -> Unit)? = null
 ) {
-    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    // [Phase 5] 滑块行也进小色块（按"有值"当激活档，视觉上和开关行同级）
+    val rowBg = subRowColor(active = value != valueRange.start)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 8.dp)
+            .background(rowBg, SubRowShape)
+            .padding(horizontal = 16.dp, vertical = 8.dp)
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 title,
@@ -3703,7 +4101,12 @@ private fun SettingsSliderRow(
             value = value,
             onValueChange = onValueChange,
             onValueChangeFinished = onValueChangeFinished,
-            valueRange = valueRange
+            valueRange = valueRange,
+            colors = SliderDefaults.colors(
+                activeTrackColor = sectionOnContainer(LocalSectionTone.current),
+                thumbColor = sectionOnContainer(LocalSectionTone.current),
+                inactiveTrackColor = sectionOnContainer(LocalSectionTone.current).copy(alpha = 0.3f)
+            )
         )
     }
 }

@@ -39,6 +39,7 @@ import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.ui.components.glassSurface
+import com.sdw.music.player.ui.components.SDWAlertDialog
 import com.sdw.music.player.ui.components.springPress
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.draw.alpha
@@ -145,9 +146,10 @@ fun SongPickerScreen(
 
                 navigationIcon = {
 
-                    IconButton(onClick = onNavigateBack) {
+                    // [P2 · M3 Expressive] 裸 IconButton → tonal 容器键，与全站顶栏统一
+                    FilledTonalIconButton(onClick = onNavigateBack, shapes = IconButtonDefaults.shapes()) {
 
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back), tint = MaterialTheme.colorScheme.onBackground)
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, stringResource(R.string.action_back))
 
                     }
 
@@ -157,9 +159,9 @@ fun SongPickerScreen(
 
                     if (selectedIds.isNotEmpty()) {
 
-                        IconButton(onClick = { showConfirm = true }) {
+                        FilledTonalIconButton(onClick = { showConfirm = true }, shapes = IconButtonDefaults.shapes()) {
 
-                            Icon(Icons.Default.Check, stringResource(R.string.action_add), tint = MaterialTheme.colorScheme.primary)
+                            Icon(Icons.Default.Check, stringResource(R.string.action_add))
 
                         }
 
@@ -180,7 +182,8 @@ fun SongPickerScreen(
 
             // Search bar
 
-            OutlinedTextField(
+            // [M3 Expressive · 容器式搜索框] OutlinedTextField → TextField（filled 容器、无边框）
+            TextField(
 
                 value = searchQuery,
 
@@ -196,21 +199,21 @@ fun SongPickerScreen(
 
                 leadingIcon = { Icon(Icons.Default.Search, stringResource(R.string.action_search), tint = MaterialTheme.colorScheme.outlineVariant) },
 
-                colors = OutlinedTextFieldDefaults.colors(
+                colors = TextFieldDefaults.colors(
 
-                    focusedTextColor = MaterialTheme.colorScheme.onBackground,
+                    focusedTextColor = MaterialTheme.colorScheme.onSurface,
 
-                    unfocusedTextColor = MaterialTheme.colorScheme.onBackground,
+                    unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
 
-                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                    focusedIndicatorColor = Color.Transparent,
 
-                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                    unfocusedIndicatorColor = Color.Transparent,
 
                     cursorColor = MaterialTheme.colorScheme.primary,
 
-                    focusedContainerColor = MaterialTheme.colorScheme.surface,
+                    focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
 
-                    unfocusedContainerColor = MaterialTheme.colorScheme.surface
+                    unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest
 
                 ),
 
@@ -518,7 +521,8 @@ fun SongPickerScreen(
 
     if (showConfirm) {
 
-        AlertDialog(
+        // [P2 · M3 Expressive] 全站弹窗统一到 SDWAlertDialog（玻璃容器 + Panel 圆角）
+        SDWAlertDialog(
 
             onDismissRequest = { showConfirm = false },
 
@@ -562,9 +566,7 @@ fun SongPickerScreen(
 
                 }
 
-            },
-
-            containerColor = MaterialTheme.colorScheme.surface
+            }
 
         )
 

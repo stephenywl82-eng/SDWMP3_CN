@@ -5642,6 +5642,14 @@ static std::atomic<float> g_xfadeChorusRms{0.0f};
 
 
 static std::atomic<float> g_xfadeBPreGain{1.0f};
+// 【V9.9·落点音量台阶修复】交叉淡化期间 B 被预增益(preGain∈[0.6,1.0])衰减配平到 A 电平；
+// 落点 g_crossfadeActive 置 false 后会立即把 preGain 复位成 1.0，B 电平从 preGain 阶跃回 1.0
+// （最大 0.6→1.0≈+4.4dB），听感即「音量一下子大一下」。改为落点后用一个短窗把 preGain
+// 平滑爬回 1.0（而不是硬切），台阶即消失。
+static std::atomic<bool>   g_xfadeBPostRampActive{false};
+static std::atomic<float>  g_xfadeBPostRampFrom{1.0f};
+static std::atomic<int64_t> g_xfadeBPostRampStartUs{0};
+static constexpr int64_t   g_xfadeBPostRampDurUs = 250000LL;  // 落点后 250ms 爬回满音量
 
 
 
@@ -12744,6 +12752,24 @@ public:
 
 
 
+        // 【V9.9】落点后 B 预增益短窗爬坡：每帧把 g_xfadeBPreGain 朝 1.0 推进，
+        // 避免落点瞬间从 preGain 硬阶跃回 1.0 造成的「音量一下子大一下」。
+        // 仅 post-ramp 激活时执行；g_xfadeBPreGain 由下方交叉淡化门禁继续作用在 B 上。
+        if (g_xfadeBPostRampActive.load(std::memory_order_relaxed)) {
+            struct timespec _rrT; clock_gettime(CLOCK_MONOTONIC, &_rrT);
+            const int64_t _rrNow = (int64_t)_rrT.tv_sec * 1000000LL + (int64_t)_rrT.tv_nsec / 1000LL;
+            const int64_t _rrEl = _rrNow - g_xfadeBPostRampStartUs.load(std::memory_order_relaxed);
+            const float _from = g_xfadeBPostRampFrom.load(std::memory_order_relaxed);
+            if (_rrEl >= g_xfadeBPostRampDurUs) {
+                g_xfadeBPreGain.store(1.0f, std::memory_order_relaxed);
+                g_xfadeBPostRampActive.store(false, std::memory_order_relaxed);
+            } else {
+                const float _t = (float)_rrEl / (float)g_xfadeBPostRampDurUs;
+                const float _g = _from + (1.0f - _from) * _t;   // 线性爬回 1.0
+                g_xfadeBPreGain.store(_g, std::memory_order_relaxed);
+            }
+        }
+
         // Read from ring buffer（方案 B：crossfade 先 mix 进 output，再统一走下方 RMS/频谱/DSP）
 
 
@@ -13981,7 +14007,17 @@ public:
                         if (c < 8) {
                             g_xfadeADecay[c] *= XFADE_GAP_FADE_STEP;
                             if (g_xfadeADecay[c] < 1e-4f) g_xfadeADecay[c] = 0.0f;
-                            from = (xfadeOutgoingEos() && !fromB) ? 0.0f : (g_xfadeALast[c] * g_xfadeADecay[c]);
+                            // 【V8.512 · 修「DJ 模式 A 轨退出时哒一声」】
+                            // 原写法：出轨真 EOS 时直接 from = 0.0f。
+                            // EOS 只表示「解码器到尾、不会再有新样本」，并不代表输出可以立刻变 0 ——
+                            // 上一帧还是真实波形值（例如 0.3），这一帧直接给 0 就是一个阶跃
+                            // （step discontinuity），听感正是 DJ 模式下 A 轨退出时那声「哒」。
+                            //
+                            // 改成和断流缺口共用 V8.510 的持续衰减：逐采样 ×STEP、<1e-4 钳 0 并保持，
+                            // EOS 后自然滑到静音 —— 效果等价于原来想要的「静音」，但全程无阶跃。
+                            // （旧实现之所以要硬切，是因为 V8.510 之前 decay 每回调都从 0 重算，
+                            //  持续断流会周期性咔哒；改成跨回调持续衰减后，硬切已无必要且自成噪声源。）
+                            from = g_xfadeALast[c] * g_xfadeADecay[c];
                         } else from = 0.0f;
                     }
 
@@ -13998,15 +14034,16 @@ public:
                         if (c < 8) {
                             g_xfadeBDecay[c] *= XFADE_GAP_FADE_STEP;
                             if (g_xfadeBDecay[c] < 1e-4f) g_xfadeBDecay[c] = 0.0f;
-                            to = (xfadeOutgoingEos() && fromB) ? 0.0f : (g_xfadeBLast[c] * g_xfadeBDecay[c]);
+                            // 【V8.512】同 from 侧：出轨真 EOS 不再硬切 0，走同一条持续衰减曲线。
+                            // （A/B 两侧对称，出轨落在哪一侧都可能产生同一声「哒」，一并修掉。）
+                            to = g_xfadeBLast[c] * g_xfadeBDecay[c];
                         } else to = 0.0f;
                     }
 
 
 
-                    // 【V8.24 B 音量预匹配】B 轨预增益（仅 crossfade 激活期间生效）
-
-
+                    // 【V8.24 B 音量预匹配】B 轨预增益（仅交叉淡化激活期间生效；
+                    // 【V9.9】落点后的短窗爬坡改在 1:1 直读出口(output)处统一施加，见下方 XFADE-BGAIN-RAMP）
 
                     if (g_crossfadeActive.load()) to *= g_xfadeBPreGain.load(std::memory_order_relaxed);
 
@@ -16845,7 +16882,24 @@ public:
 
 
 
-                g_xfadeBPreGain.store(1.0f, std::memory_order_relaxed);  // 【V8.24】B 上位后恢复全音量
+                // 【V9.9·落点音量台阶修复】旧逻辑在此把 preGain 硬复位成 1.0，使 B 电平从
+                // preGain(∈[0.6,1.0]) 瞬间阶跃回 1.0（最大 +4.4dB）→「音量一下子大一下」。
+                // 改为：保留当前 preGain 值，并由 onAudioReady 每帧把它在 250ms 内线性爬回 1.0，
+                // 台阶被摊平为无感斜坡。若本来就是 1.0 则无需爬坡，直接复位。
+                {
+                    const float _curPg = g_xfadeBPreGain.load(std::memory_order_relaxed);
+                    if (_curPg < 0.999f) {
+                        struct timespec _pgT; clock_gettime(CLOCK_MONOTONIC, &_pgT);
+                        g_xfadeBPostRampFrom.store(_curPg, std::memory_order_relaxed);
+                        g_xfadeBPostRampStartUs.store(
+                            (int64_t)_pgT.tv_sec * 1000000LL + (int64_t)_pgT.tv_nsec / 1000LL,
+                            std::memory_order_relaxed);
+                        g_xfadeBPostRampActive.store(true, std::memory_order_relaxed);
+                        LOGI("XFADE-BGAIN-RAMP from=%.3f over %lldms (post-landing smooth)", (double)_curPg, (long long)(g_xfadeBPostRampDurUs / 1000));
+                    } else {
+                        g_xfadeBPreGain.store(1.0f, std::memory_order_relaxed);
+                    }
+                }
 
 
 
@@ -16866,7 +16920,10 @@ public:
                     // 落点退役引擎后其最后那批 A 残响延迟 ~L 帧才出声，标准 21ms 接缝窗口漏掉它 → "哒"。
                     // 加宽接缝窗口覆盖「落点 + 引擎延迟余波」，把那记延迟残响在 SEAM_FRAMES*4(≈85ms) 内摊平。
                     // 纯增益斜坡（from=g_xfadeLast 线性插值），不会引入断流；非 flip 落点维持原 21ms。
-                    const int _seamFr = g_lastLandingFlip.load(std::memory_order_relaxed) ? (SEAM_FRAMES * 4) : SEAM_FRAMES;
+                    // 【V8.52x+·去咔】落点接缝窗口统一加宽到 SEAM_FRAMES*4(≈85ms@48k)。
+                    // 引擎退役带 ~1024 帧(≈21ms)延迟余波，对 flip 与非 flip 落点都存在；
+                    // 原实现只给 flip 加宽、非 flip 仍 21ms，余波漏出 → B 完全进场后“哒”一下。
+                    const int _seamFr = SEAM_FRAMES * 4;
                     g_seamLeft.store(_seamFr, std::memory_order_relaxed);   // 【V8.473 / V8.52x】
                     g_seamTotal.store(_seamFr, std::memory_order_relaxed);
 
@@ -16889,7 +16946,10 @@ public:
                     // 落点退役引擎后其最后那批 A 残响延迟 ~L 帧才出声，标准 21ms 接缝窗口漏掉它 → "哒"。
                     // 加宽接缝窗口覆盖「落点 + 引擎延迟余波」，把那记延迟残响在 SEAM_FRAMES*4(≈85ms) 内摊平。
                     // 纯增益斜坡（from=g_xfadeLast 线性插值），不会引入断流；非 flip 落点维持原 21ms。
-                    const int _seamFr = g_lastLandingFlip.load(std::memory_order_relaxed) ? (SEAM_FRAMES * 4) : SEAM_FRAMES;
+                    // 【V8.52x+·去咔】落点接缝窗口统一加宽到 SEAM_FRAMES*4(≈85ms@48k)。
+                    // 引擎退役带 ~1024 帧(≈21ms)延迟余波，对 flip 与非 flip 落点都存在；
+                    // 原实现只给 flip 加宽、非 flip 仍 21ms，余波漏出 → B 完全进场后“哒”一下。
+                    const int _seamFr = SEAM_FRAMES * 4;
                     g_seamLeft.store(_seamFr, std::memory_order_relaxed);   // 【V8.473 / V8.52x】
                     g_seamTotal.store(_seamFr, std::memory_order_relaxed);
 
@@ -18077,6 +18137,16 @@ public:
 
 
             }   // else (rampHandled)：回落期间走引擎路径，不做 1:1 直读
+
+            // 【V9.9·落点音量台阶修复】交叉淡化落点后，B 轨预增益(preGain∈[0.6,1.0])会从
+            // preGain 硬阶跃回 1.0（最大 +4.4dB），听感即「音量一下子大一下」。这里在 1:1 直读出口
+            // 把整段 output 统一乘上 post-ramp 增益（每帧由 onAudioReady 顶部爬坡更新，250ms 内
+            // preGain→1.0）。落点那一帧仍走上方 crossfade 分支（已带 preGain，不会二次缩放），
+            // 下一帧起走此直读分支、首样本 = to*preGain 与上一帧末样本(to*preGain)连续，台阶被摊平。
+            if (g_xfadeBPostRampActive.load(std::memory_order_relaxed) && totalSamples > 0) {
+                const float _g = g_xfadeBPreGain.load(std::memory_order_relaxed);
+                for (int i = 0; i < totalSamples; i++) output[i] *= _g;
+            }
 
 
 
@@ -21294,11 +21364,11 @@ if (lock.owns_lock()) {
 
 
 
-                g_declickRemain = 2048;   // 【V8.497 加宽】原 512(≈10.6ms@48k) 对 0.15~0.40 阶跃仍听成"哒一下"；摊到 2048(≈43ms@48k) 斜率远低于"咔哒"阈值，仅确有阶跃时生效、零副作用
+                g_declickRemain = 3072;   // 【V8.497 加宽】原 512(≈10.6ms@48k) 对 0.15~0.40 阶跃仍听成"哒一下"；摊到 2048(≈43ms@48k) 斜率远低于"咔哒"阈值，仅确有阶跃时生效、零副作用
 
 
 
-                g_declickTotal  = 2048;
+                g_declickTotal  = 3072;
 
 
 
@@ -21482,7 +21552,7 @@ if (lock.owns_lock()) {
 
 
 
-        int ch = g_channelCount.load();
+        int ch = 2;  // 【V8.6xx】Oboe 流固定立体声，多声道由解码端 downmixToStereo 处理
 
 
 
@@ -21867,7 +21937,12 @@ static std::atomic<bool> g_decoderEosB{false};
 // 与瞬时欠载区分（瞬时欠载时 g_decoderRunning 仍 true，会很快恢复供数）。
 // 用于交叉淡化进行中、出轨已放完但过渡还没收尾时，立即收敛包络 pos→1.0 干净接管，
 // 杜绝 "歌停了过渡还在跑" 的过挂空读噪音（每帧一次末样本×衰减 blip）。
-static bool xfadeOutgoingEos() {
+//
+// 【V8.512】出轨 EOS 后不再拿它硬切 0（那正是 DJ 模式 A 轨退出时「哒」一声的来源：
+// 上一帧还是真实波形值，下一帧直接 0 = 阶跃）。改由 V8.510 的持续衰减自然滑到静音后，
+// 这里暂无调用点；保留实现并标 [[maybe_unused]]，避免 -Wunused-function
+// （neri 侧开了 -Werror，别让一个死函数把整条 native 编译打断）。
+[[maybe_unused]] static bool xfadeOutgoingEos() {
     return g_activeIsB.load() ? (g_decoderEosB.load() && !g_decoderRunningB.load())
                               : (g_decoderEos.load()  && !g_decoderRunning.load());
 }
@@ -21891,6 +21966,164 @@ static std::atomic<int> g_decoderOutputEncodingB{2};
 
 
 static std::atomic<bool> g_decoderIsFloatB{false};   // 【V8.239】B 轨 float 标志（与 A 轨 g_decoderIsFloat 对称）
+
+
+// 【V8.6xx】下面三个「解码器输出格式」全局量前移到 probeDecoderOutputChannels() 之前：
+// 该探测会**消费掉** MediaCodec 只发一次的 AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED 事件，
+// 所以必须在探测点就把 PCM 编码 / 声道数 / 采样率写进这些全局量 —— 否则解码线程再也
+// 收不到该事件，就会退回默认假设（PCM16 / 容器声道数）→ 杂音 / 速度错。
+static std::atomic<int> g_sampleRateA{0};          // A 轨 decoder 输出采样率（0=未定）
+static std::atomic<bool> g_decoderIsFloat{false};  // 【V7.16】decoder output format
+// 【V7.x】解码器实际输出编码（MediaFormat PCM_ENCODING）。AAC/M4A 的硬件解码器
+// 即使 configure 请求 PCM16 也可能实际输出 PCM_FLOAT，必须按真实字节宽解析，
+// 否则 float 字节被当 int16 错位读取 → 噪音/啸叫。
+// 2=PCM_16BIT, 3=PCM_8BIT, 4=PCM_FLOAT, 21=PCM_24BIT_PACKED, 22=PCM_32BIT
+static std::atomic<int> g_decoderOutputEncoding{2};
+
+
+// ============================================================================
+// 【V8.6xx E-AC3 5.1 下混 → 播放快进】开流前问解码器真实输出声道数
+// ============================================================================
+//
+// 真机实测（2026-10-28，moto XT2409-5，文件「背叛 - 曹格 (1).m4a」）：
+//   这首歌实际是 **E-AC3（Dolby Digital Plus）5.1**，.m4a 容器用 dec3 box 声明 6 声道。
+//   MediaExtractor 因此报 channel-count=6，app 就按 6 声道去开 Oboe 输出流：
+// ===========================================================================
+// 【V8.6xx】多声道（5.1 / 7.1 / Atmos E-AC-3 / 多声道 ALAC）倍速快进根因与修复
+// ---------------------------------------------------------------------------
+// 现象：48kHz 的 E-AC-3(5.1) .m4a 播放像在快进（3 倍速）。
+// 根因：容器 dec3 声明 6 声道，于是 Oboe 输出流按 6 声道打开；但 MediaCodec 的
+//   Dolby 解码器实际只吐 2 声道 PCM（系统已下混为立体声）。结果 onAudioReady 每帧
+//   按 numFrames*6 从只有 2 声道的 RingBuffer 取数据 → 真实内容只占 1/3 → 3 倍速。
+//   采样率本身没问题（file rate == native rate == 48000）。
+//
+// 修复（架构级、彻底）：Oboe 流**永远按 2 声道（立体声）打开**；解码端在把 PCM 写
+//   入 RingBuffer 之前，若解码器吐出 >2 声道，先用 downmixToStereo() 矩阵下混成
+//   2 声道。这样"流声道数"与"环形缓冲声道数"恒等，从根上消除倍速/错位。
+//   · 普通立体声文件：解码器本就吐 2ch，下混为 no-op，零开销。
+//   · 真实 5.1/7.1：矩阵下混（含系数衰减 + 限幅防爆音）。
+//   · 强制 2ch 也符合手机/耳机物理输出，避免 MTK 6ch 总线等无意义多声道路径。
+// 下面的 probeDecoderOutputChannels 作为辅助线索保留（部分解码器会在喂入首帧后才
+//   吐出 OUTPUT_FORMAT_CHANGED，单靠它不可靠，故采用上面的"强制 2ch + 下混"方案）。
+// ===========================================================================
+
+// 下混临时缓冲（解码线程用；B 轨独立一份）
+static std::vector<float> g_downmixBuffer;
+static std::vector<float> g_downmixBufferB;
+
+// 【V8.6xx】智能声道下混器：任意 N 声道 PCM → 规范 2 声道（立体声）。
+// 系数取自 ITU-R BS.775 / ATSC 5.1→2.0（0.707≈√½，LFE×0.5），输出限幅防爆音。
+// 返回写入 out 的样本数（恒为 2*帧数）。in 含 samples 个样本、ch 个声道。
+static int downmixToStereo(const float* in, int samples, int ch, float* out) {
+    if (ch <= 0 || samples <= 0) return 0;
+    int frames = samples / ch;          // 完整帧数（ch 必须整除 samples）
+    int outSamples = frames * 2;        // 输出恒为 2 声道
+    if (ch == 1) {
+        for (int i = 0; i < frames; i++) out[2*i] = out[2*i+1] = in[i];
+        return outSamples;
+    }
+    if (ch == 2) {
+        memcpy(out, in, (size_t)outSamples * sizeof(float));
+        return outSamples;
+    }
+    // 每声道下混系数 (cl, cr)：L R C LFE SL SR BL BR
+    static const float CL[8] = {1.f,0.f,0.707f,0.5f,0.707f,0.f,0.707f,0.f};
+    static const float CR[8] = {0.f,1.f,0.707f,0.5f,0.f,0.707f,0.f,0.707f};
+    for (int f = 0; f < frames; f++) {
+        const float* p = in + f*ch;
+        float l = 0.f, r = 0.f;
+        for (int c = 0; c < ch; c++) {
+            float s = p[c];
+            if (c < 8) { l += s * CL[c]; r += s * CR[c]; }
+            else { l += s * 0.707f; r += s * 0.707f; }  // 超出 8 声道：均匀分摊
+        }
+        out[2*f]   = (l > 1.f) ? 1.f : (l < -1.f ? -1.f : l);
+        out[2*f+1] = (r > 1.f) ? 1.f : (r < -1.f ? -1.f : r);
+    }
+    return outSamples;
+}
+
+static int probeDecoderOutputChannels(int containerCh) {
+    // 【V8.6xx】此探测已废弃：开流现在强制 2ch、解码端矩阵下混，无需预先探测真实声道数。
+    // 直接返回 0（调用方沿用容器声道数，随后会被 OUTPUT_FORMAT_CHANGED 修正为解码器真实值）。
+    // 原实现会 advance extractor、消费 format 事件、喂入游离输入帧，反而引入起点跳帧，故停用。
+    (void)containerCh;
+    return 0;
+
+    // raw PCM（WAV）不做下混：容器声道数就是解码器输出声道数。而且这类解码器
+    // 不保证发 OUTPUT_FORMAT_CHANGED，探测会白白丢掉开头一帧 → 直接跳过。
+    if (strncmp(g_decoderMime, "audio/raw", 9) == 0) return 0;
+
+    // 1) 喂一帧输入，逼解码器真正进入工作状态
+    ssize_t inputIndex = AMediaCodec_dequeueInputBuffer(g_decoderCodec, 0);
+    if (inputIndex >= 0) {
+        size_t inputSize = 0;
+        uint8_t* inputBuf = AMediaCodec_getInputBuffer(g_decoderCodec, (int32_t)inputIndex, &inputSize);
+        if (inputBuf && inputSize > 0) {
+            ssize_t sampleSize = AMediaExtractor_readSampleData(g_decoderExtractor, inputBuf, inputSize);
+            if (sampleSize > 0) {
+                int64_t timeUs = AMediaExtractor_getSampleTime(g_decoderExtractor);
+                g_decoderPositionUs.store(timeUs);
+                AMediaCodec_queueInputBuffer(g_decoderCodec, (int32_t)inputIndex, 0, sampleSize, timeUs, 0);
+                AMediaExtractor_advance(g_decoderExtractor);   // 解码线程接着读下一帧
+            } else {
+                // 读不到数据（空轨/损坏）：和解码线程一样按 EOS 处理
+                AMediaCodec_queueInputBuffer(g_decoderCodec, (int32_t)inputIndex, 0, 0, 0,
+                                             AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
+            }
+        }
+    }
+
+    // 2) dequeue 输出，等 AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED
+    //
+    // 【2026-10-28 真机实测·关键】Dolby DDP(E-AC3) 解码器**首次初始化要 ~330ms** 才吐出
+    // 输出格式（Dolby 库首次加载）。原来只等 25×2ms=50ms → 探测必然超时 → 退回容器
+    // 声道数(6) → 输出流仍按 6 声道开 → 每帧多吃 3 倍数据 → 还是 3 倍速快进。
+    // 预算放宽到 700ms；只有 channelCount != 2 的多声道文件才走这条路，普通立体声
+    // 文件（绝大多数）完全不受影响。
+    for (int elapsedMs = 0; elapsedMs < 700; elapsedMs += 5) {
+        AMediaCodecBufferInfo info;
+        ssize_t r = AMediaCodec_dequeueOutputBuffer(g_decoderCodec, &info, 0);
+        if (r == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+            // 权威的输出格式到手。这里必须**完整复刻**解码线程里那段
+            // OUTPUT_FORMAT_CHANGED 处理：MediaCodec 的格式变化事件只发一次，
+            // 被这里消费后解码线程就再也收不到 → 解码路径会退回默认假设 → 出杂音。
+            int ch = 0;
+            AMediaFormat* of = AMediaCodec_getOutputFormat(g_decoderCodec);
+            if (of) {
+                int32_t enc = 0;
+                if (AMediaFormat_getInt32(of, "pcm-encoding", &enc) && enc > 0) {
+                    g_decoderOutputEncoding.store(enc);
+                    g_decoderIsFloat.store(enc == 4 || enc == 22);
+                }
+                int32_t c = 0, sr = 0;
+                if (AMediaFormat_getInt32(of, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &c) && c > 0) {
+                    ch = c;
+                    g_channelCount.store(c);
+                }
+                if (AMediaFormat_getInt32(of, AMEDIAFORMAT_KEY_SAMPLE_RATE, &sr) && sr > 0) {
+                    g_sampleRateA.store(sr);
+                    if (g_fileSampleRate.load() == 0) g_fileSampleRate.store(sr);
+                }
+                AMediaFormat_delete(of);
+            }
+            LOGI("ChannelFix: decoder real output = %dch (container said %dch)", ch, containerCh);
+            return ch;
+        }
+        if (r >= 0) {
+            // 已经吐出真实数据帧（说明这个解码器不发 OUTPUT_FORMAT_CHANGED）：
+            // MediaCodec 没有「退还」接口，只能放掉这一帧。
+            // 压缩格式（AAC/E-AC3/FLAC…）不会走到这里 —— 格式变化一定先于首个数据帧。
+            AMediaCodec_releaseOutputBuffer(g_decoderCodec, (int32_t)r, false);
+            return 0;
+        }
+        usleep(5000);   // TRY_AGAIN_LATER：解码器还在初始化，等一下再问
+    }
+
+    LOGW("ChannelFix: decoder output format not ready in 700ms (mime=%s) — keep container channel count",
+         g_decoderMime);
+    return 0;
+}
 
 
 
@@ -22054,7 +22287,6 @@ static void resetResamplerB() { g_resamplePhaseB = 0.0; g_resampleHistLenB = 0; 
 
 
 
-static std::atomic<int> g_sampleRateA{0};          // A 轨 decoder 输出采样率（0=未定）
 
 
 
@@ -22355,7 +22587,6 @@ static std::vector<float> g_convertBuffer;
 
 
 
-static std::atomic<bool> g_decoderIsFloat{false};  // 【V7.16】decoder output format
 
 
 
@@ -22375,7 +22606,6 @@ static std::atomic<bool> g_decoderIsFloat{false};  // 【V7.16】decoder output 
 
 
 
-static std::atomic<int> g_decoderOutputEncoding{2};
 
 
 
@@ -22587,7 +22817,7 @@ static bool reopenOutputStream(int newRate) {
 
 
 
-    int ch = g_channelCount.load();
+    int ch = 2;  // 【V8.6xx】Oboe 流固定立体声，多声道由解码端 downmixToStereo 处理
 
 
 
@@ -24230,11 +24460,24 @@ static void ndkDecodeLoop() {
 
 
 
-                const float* writeSrc = g_convertBuffer.data();
+                // 【V8.6xx】声道下混：解码器若吐出 >2 声道（5.1/7.1/Atmos），矩阵下混为立体声，
+                // 使 RingBuffer 永远存 2ch，与强制 2ch 的 Oboe 流恒等 → 根除倍速/错位。
+                const float* pcmSrc = g_convertBuffer.data();
+                int pcmSamples = numSamples;
+                int pcmCh = g_channelCount.load();
+                if (pcmCh > 2 && (numSamples % pcmCh == 0)) {
+                    int downFrames = numSamples / pcmCh;
+                    int downNeed = downFrames * 2;
+                    if (g_downmixBuffer.size() < (size_t)downNeed + 16) g_downmixBuffer.resize(downNeed + 16384);
+                    int got = downmixToStereo(g_convertBuffer.data(), numSamples, pcmCh, g_downmixBuffer.data());
+                    if (got > 0) { pcmSrc = g_downmixBuffer.data(); pcmSamples = got; pcmCh = 2; }
+                }
+
+                const float* writeSrc = pcmSrc;
 
 
 
-                int writeSamples = numSamples;
+                int writeSamples = pcmSamples;
 
 
 
@@ -24250,7 +24493,7 @@ static void ndkDecodeLoop() {
 
 
 
-                    int chA = g_channelCount.load();
+                    int chA = pcmCh;
 
 
 
@@ -24258,7 +24501,7 @@ static void ndkDecodeLoop() {
 
 
 
-                        int outFrames = resampleLinearToStream(g_convertBuffer.data(), numSamples, chA,
+                        int outFrames = resampleLinearToStream(pcmSrc, pcmSamples, chA,
 
 
 
@@ -24368,7 +24611,7 @@ static void ndkDecodeLoop() {
 
 
 
-                g_decoderFramesOutput.fetch_add(writeSamples / g_channelCount.load());  // 【V7.16】
+                g_decoderFramesOutput.fetch_add(writeSamples / pcmCh);  // 【V7.16】【V8.6xx】用下混后的有效声道数(2)
 
 
 
@@ -25193,11 +25436,24 @@ static void ndkDecodeLoopB() {
 
 
 
-                const float* writeSrc = g_convertBufferB.data();
+                // 【V8.6xx】声道下混（B 轨）：同 A 轨，解码器吐 >2 声道时矩阵下混为立体声，
+                // 使 RingBuffer 恒为 2ch，与强制 2ch 的 Oboe 流对齐。
+                const float* pcmSrcB = g_convertBufferB.data();
+                int pcmSamplesB = numSamples;
+                int pcmChB = g_channelCountB.load();
+                if (pcmChB > 2 && (numSamples % pcmChB == 0)) {
+                    int downFrames = numSamples / pcmChB;
+                    int downNeed = downFrames * 2;
+                    if (g_downmixBufferB.size() < (size_t)downNeed + 16) g_downmixBufferB.resize(downNeed + 16384);
+                    int got = downmixToStereo(g_convertBufferB.data(), numSamples, pcmChB, g_downmixBufferB.data());
+                    if (got > 0) { pcmSrcB = g_downmixBufferB.data(); pcmSamplesB = got; pcmChB = 2; }
+                }
+
+                const float* writeSrc = pcmSrcB;
 
 
 
-                int writeSamples = numSamples;
+                int writeSamples = pcmSamplesB;
 
 
 
@@ -25209,7 +25465,7 @@ static void ndkDecodeLoopB() {
 
 
 
-                int chB = g_channelCountB.load();
+                int chB = pcmChB;
 
 
 
@@ -25217,7 +25473,7 @@ static void ndkDecodeLoopB() {
 
 
 
-                    int outFrames = resampleLinearToStream(g_convertBufferB.data(), numSamples, chB,
+                    int outFrames = resampleLinearToStream(pcmSrcB, pcmSamplesB, chB,
 
 
 
@@ -25307,7 +25563,7 @@ static void ndkDecodeLoopB() {
 
 
 
-                g_decoderFramesOutputB.fetch_add(writeSamples / g_channelCount.load());  // 【V7.16】
+                g_decoderFramesOutputB.fetch_add(writeSamples / pcmChB);  // 【V7.16】【V8.6xx】用下混后的有效声道数(2)
 
 
 
@@ -25788,6 +26044,8 @@ Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeOpen(JNIEnv *
 
 
     g_crossfadePos.store(0.0f);
+    g_xfadeBPostRampActive.store(false, std::memory_order_relaxed);  // 【V9.9】开新曲/停止：清落点爬坡
+    g_xfadeBPreGain.store(1.0f, std::memory_order_relaxed);
 
 
 
@@ -26699,7 +26957,22 @@ Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeOpen(JNIEnv *
 
 
 
-    builder.setChannelCount(channelCount);
+    // 【V8.6xx E-AC3 5.1 下混 → 快进】开流前问解码器**真实输出**声道数：
+    //   容器声明的声道数（E-AC3 5.1 = 6）与解码器实际输出（系统下混后 = 2）不一致时，
+    //   必须以解码器为准开流，否则回调按 numFrames*6 从 2 声道的 ring 取数 → 3 倍速快进。
+    //   立体声（channelCount == 2）是绝大多数，走原路径，行为完全不变。
+    {
+        int realCh = 0;
+        if (channelCount != 2) {
+            realCh = probeDecoderOutputChannels(channelCount);
+        }
+        if (realCh > 0 && realCh != channelCount) {
+            LOGW("ChannelFix: container says %dch but decoder really outputs %dch -> open Oboe stream at %dch",
+                 channelCount, realCh, realCh);
+            channelCount = realCh;
+        }
+    }
+    builder.setChannelCount(2);  // 【V8.6xx】Oboe 流固定 2ch；多声道解码端下混
 
 
 
@@ -27354,6 +27627,8 @@ Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeOpenFd(JNIEnv
 
 
     g_crossfadePos.store(0.0f);
+    g_xfadeBPostRampActive.store(false, std::memory_order_relaxed);  // 【V9.9】开新曲/停止：清落点爬坡
+    g_xfadeBPreGain.store(1.0f, std::memory_order_relaxed);
 
 
 
@@ -28360,7 +28635,22 @@ Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeOpenFd(JNIEnv
 
 
 
-    builder.setChannelCount(channelCount);
+    // 【V8.6xx E-AC3 5.1 下混 → 快进】开流前问解码器**真实输出**声道数：
+    //   容器声明的声道数（E-AC3 5.1 = 6）与解码器实际输出（系统下混后 = 2）不一致时，
+    //   必须以解码器为准开流，否则回调按 numFrames*6 从 2 声道的 ring 取数 → 3 倍速快进。
+    //   立体声（channelCount == 2）是绝大多数，走原路径，行为完全不变。
+    {
+        int realCh = 0;
+        if (channelCount != 2) {
+            realCh = probeDecoderOutputChannels(channelCount);
+        }
+        if (realCh > 0 && realCh != channelCount) {
+            LOGW("ChannelFix: container says %dch but decoder really outputs %dch -> open Oboe stream at %dch",
+                 channelCount, realCh, realCh);
+            channelCount = realCh;
+        }
+    }
+    builder.setChannelCount(2);  // 【V8.6xx】Oboe 流固定 2ch；多声道解码端下混
 
 
 
@@ -29086,7 +29376,7 @@ JNIEXPORT jboolean JNICALL
 
 
 
-Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativePlay(JNIEnv *env, jobject thiz) {
+Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativePlay(JNIEnv *env, jobject thiz, jboolean enabled) {
 
 
 
@@ -29165,10 +29455,14 @@ Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativePlay(JNIEnv *
     // 【V8.52x 去咔·硬切补齐】硬切 stop 时置位的标志：此处（新轨真正开播）re-arm 接缝，
     // 把新轨首样本从静音/旧样本在 SEAM_FRAMES(≈21ms@48k) 内线性淡入，消除"B 进场那一下哒"。
     // exchange(false) 保证只生效一次；首播/暂停恢复路径此标志恒为 false，不引入多余淡入。
-    if (g_seamArmOnNewTrack.exchange(false, std::memory_order_relaxed)) {
+    // 【V9.6 修复 Bug3】启动淡入统一由 Kotlin 经 enabled 控制：true=对前 SEAM_FRAMES 帧做 0→1 渐入，
+    // 掩盖首播/恢复/硬切的开场硬件 pop 与解码首帧瞬态；false=crossfade 自动接歌，不做渐入以免咬正在响的 B 轨。
+    // 原 g_seamArmOnNewTrack 自动 arm（硬切 stop 置位）废弃：crossfade 接歌也走过 stop 会被强制 arm，故改由 Kotlin 显式控制。
+    g_seamArmOnNewTrack.store(false, std::memory_order_relaxed);
+    if (enabled) {
         g_seamLeft.store(SEAM_FRAMES, std::memory_order_relaxed);
-                    g_seamTotal.store(SEAM_FRAMES, std::memory_order_relaxed);
-        LOGI("de-click re-armed (new-track start, hard-cut path) seam=%d", (int)SEAM_FRAMES);
+        g_seamTotal.store(SEAM_FRAMES, std::memory_order_relaxed);
+        LOGI("startup fade-in armed (seam=%d, enabled=%d)", (int)SEAM_FRAMES, (int)enabled);
     }
 
     g_playSessionLatched.store(true);
@@ -29776,6 +30070,8 @@ static void stopInternal(bool keepStream) {
 
 
     g_crossfadePos.store(0.0f);
+    g_xfadeBPostRampActive.store(false, std::memory_order_relaxed);  // 【V9.9】开新曲/停止：清落点爬坡
+    g_xfadeBPreGain.store(1.0f, std::memory_order_relaxed);
 
 
 
@@ -34837,6 +35133,7 @@ Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStartCrossfad
 
 
         g_xfadeBPreGain.store(gain, std::memory_order_relaxed);
+        g_xfadeBPostRampActive.store(false, std::memory_order_relaxed);  // 【V9.9】新交叉淡化开始，清掉上一轮落点爬坡
 
 
 
@@ -35939,6 +36236,8 @@ Java_com_sdw_music_player_core_audio_engine_OboeDirectPlayer_nativeStopIncoming(
 
 
     g_crossfadePos.store(0.0f);
+    g_xfadeBPostRampActive.store(false, std::memory_order_relaxed);  // 【V9.9】打断过渡：清落点爬坡
+    g_xfadeBPreGain.store(1.0f, std::memory_order_relaxed);
 
 
 

@@ -7,10 +7,12 @@ import com.sdw.music.player.core.audio.playback.PlayerConnection
 import com.sdw.music.player.core.audio.metadata.WavCoverReader
 
 import android.content.Context
+import android.media.MediaScannerConnection
 import android.net.Uri
 import android.provider.MediaStore
 import com.sdw.music.player.core.audio.metadata.CoverArtStore
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -187,10 +189,14 @@ object SongRepository {
             val jsonStr = arr.toString()
             val cacheFile = java.io.File(ctx.filesDir, "song_cache.json")
             val tempFile = java.io.File(ctx.filesDir, "song_cache.json.tmp")
-            // 原子写入：先写临时文件，成功后 rename 覆盖
+            // 原子写入：先写临时文件，再用 rename 直接覆盖目标。
+            // 【修复】严禁在 rename 之前 delete 旧文件——delete 之后、rename 之前若进程被杀
+            // （上滑清后台 / 退出 onDestroy 恰好落在保存途中），旧缓存被删、新缓存尚未就位，
+            // 下一次冷启动 loadSongsFromDiskCache 读不到文件 → 曲库变 0。
+            // 直接 rename 覆盖：Linux/Android 上 rename 是原子替换已存在目标，
+            // 要么旧文件还在、要么新文件就位，不会留中间态。
             tempFile.writeText(jsonStr, Charsets.UTF_8)
             if (tempFile.exists() && tempFile.length() > 0) {
-                if (cacheFile.exists()) cacheFile.delete()
                 val renamed = tempFile.renameTo(cacheFile)
                 if (!renamed) {
                     // rename 失败（跨文件系统等罕见情况），回退到直接写入
@@ -395,6 +401,13 @@ object SongRepository {
 
     fun setSongs(songList: List<Song>) {
         // [V8.90] 不再无条件整体替换，避免冲掉 heal 补好的封面 URI 与 WAV 文本标签
+        // [2026-10-25] 空列表不落盘：首启竞态（MediaStore 慢 / 权限时序）会把空缓存写死，
+        // 之后每次冷启动都加载空列表 →「永远扫不出」。内存可置空，磁盘绝不给空。
+        if (songList.isEmpty()) {
+            songs = emptyList()
+            dataVersion++
+            return
+        }
         val merged = preserveHealedMetadata(songList)
         songs = merged
         dataVersion++
@@ -528,6 +541,30 @@ object SongRepository {
         dataVersion++
         saveSongsToDiskCache(songs)
     }
+    /**
+     * [2026-10-25] 外部编辑器改完一首歌后，用重读到的 [song] 就地替换曲库里同 id 的条目：
+     * 覆盖文本/格式/时长等被标签编辑影响到的字段，保留 bpm/key/genre/收藏/播放时间/封面源
+     * 等不被标签编辑影响的字段，并落盘。找不到该 id 时直接忽略。
+     */
+    fun replaceSong(song: Song) {
+        val old = songs.find { it.id == song.id }
+        val merged = old?.copy(
+            title = song.title,
+            artist = song.artist,
+            album = song.album,
+            format = song.format,
+            filePath = song.filePath,
+            folderPath = song.folderPath,
+            path = song.path,
+            duration = if (song.duration > 0) song.duration else old.duration,
+            dateAdded = song.dateAdded
+        ) ?: song
+        songs = songs.map { if (it.id == song.id) merged else it }
+        dataVersion++
+        _foldersVersion.value++
+        saveSongsToDiskCache(songs)
+    }
+
 
     /** 记录歌曲播放时间，并持久化到磁盘缓存 */
     fun recordPlayed(id: Long) {
@@ -1007,6 +1044,144 @@ object SongRepository {
 
     // ==================== MediaStore 扫描 ====================
 
+    /** [2026-10-25] 进程级一次性标志：MediaStore 强制索引每进程只试一次（空库手机不重复白等） */
+    @Volatile
+    private var mediaIndexForceAttempted = false
+
+    /**
+     * [2026-10-25] MediaStore 预检 + 强制索引（Tier 2）。
+     *
+     * 背景：有些手机主界面「扫不出歌」。根因不是权限（分版本申请是对的），而是这些机型
+     * 冷启动时 MediaStore 尚未完成索引（刚开机 / 刚拷贝文件 / OEM 索引服务被限制），
+     * 直接查询返回 0 行。
+     *
+     * 做法：先发一次廉价 COUNT 预检；为 0 时用 MediaScannerConnection 对存储根目录
+     * 触发系统媒体扫描，然后每 500ms 轮询一次，最多等 5 秒。索引建好即返回，
+     * 主查询随即可见全部歌曲。正常手机（COUNT>0）零开销直接返回。
+     */
+    private suspend fun ensureMediaStoreIndexed(context: Context) {
+        fun countAudio(): Int = try {
+            context.contentResolver.query(
+                MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Audio.Media._ID), null, null, null
+            )?.use { it.count } ?: -1
+        } catch (e: Exception) { -1 }
+
+        try {
+            if (countAudio() != 0) return
+            // 每个进程只强制一次：真·空库的手机不该每次刷新都白等 5 秒
+            if (mediaIndexForceAttempted) return
+            mediaIndexForceAttempted = true
+            android.util.Log.w(TAG, "ensureMediaStoreIndexed: MediaStore EMPTY — forcing MediaScanner")
+            val roots = storageRootsForScan(context)
+            if (roots.isNotEmpty()) {
+                // 四参签名：(context, paths, mimeTypes, callback)
+                MediaScannerConnection.scanFile(
+                    context.applicationContext,
+                    roots,
+                    null,
+                    null as MediaScannerConnection.OnScanCompletedListener?
+                )
+            }
+            repeat(10) { attempt ->
+                delay(500)
+                if (countAudio() > 0) {
+                    android.util.Log.i(TAG, "ensureMediaStoreIndexed: indexed after ${(attempt + 1) * 500}ms")
+                    return
+                }
+            }
+            android.util.Log.w(TAG, "ensureMediaStoreIndexed: still empty after 5s — FS walk fallback next")
+        } catch (e: Exception) {
+            android.util.Log.w(TAG, "ensureMediaStoreIndexed failed: ${e.message}")
+        }
+    }
+
+    /** 存储根目录集合：主存储 + 所有已挂载卷（SD 卡 / OTG）。 */
+    private fun storageRootsForScan(context: Context): Array<String> {
+        val roots = LinkedHashSet<String>()
+        try {
+            @Suppress("DEPRECATION")
+            val primary = android.os.Environment.getExternalStorageDirectory()
+            if (primary != null) roots.add(primary.absolutePath)
+        } catch (_: Exception) {}
+        try {
+            context.getExternalFilesDirs(null).forEach { f ->
+                f ?: return@forEach
+                val p = f.absolutePath
+                val marker = p.indexOf("/Android/data/")
+                if (marker > 0) roots.add(p.substring(0, marker))
+            }
+        } catch (_: Exception) {}
+        return roots.toTypedArray()
+    }
+
+    /**
+     * [2026-10-25] Tier 3：文件系统遍历兜底。
+     *
+     * MediaStore 强制索引后仍为 0 时触发（典型：音乐目录被 .nomedia 屏蔽、OEM 媒体库损坏）。
+     * 只遍历常见音乐目录（Music / Download），深度 6、上限 5000 个文件，找到即停。
+     * Android 11+ 需要 All Files Access（MANAGE_EXTERNAL_STORAGE），未授予则跳过。
+     *
+     * 构造的 Song：id 取路径哈希的负值（与 MediaStore 正 id 区分），path 用 file:// URI
+     * （ExoPlayer 可直接播放），封面留空由既有内嵌封面管线兜底。
+     */
+    private suspend fun walkStorageForAudio(context: Context): List<Song> = withContext(Dispatchers.IO) {
+        val result = mutableListOf<Song>()
+        val canWalk = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.R ||
+            android.os.Environment.isExternalStorageManager()
+        if (!canWalk) {
+            android.util.Log.w(TAG, "walkStorageForAudio: no all-files access — skip (grant it in Settings if scan stays empty)")
+            return@withContext result
+        }
+        val audioExt = setOf(
+            "mp3", "flac", "wav", "aac", "ogg", "oga", "m4a", "mp4",
+            "ape", "wv", "opus", "dsf", "dff", "aiff", "aif", "alac", "wma"
+        )
+        val minMs = minDurationSecNow(context) * 1000L
+        var count = 0
+        val roots = storageRootsForScan(context)
+        val dirs = (roots + roots.map { "$it/Music" } + roots.map { "$it/Download" }).distinct()
+        for (dirPath in dirs) {
+            if (result.size >= 2000 || count >= 5000) break
+            val dir = java.io.File(dirPath)
+            if (!dir.isDirectory) continue
+            try {
+                dir.walkTopDown()
+                    .maxDepth(6)
+                    .filter { it.isFile && it.length() > 1024L && it.extension.lowercase() in audioExt }
+                    .forEach { f ->
+                        if (count >= 5000 || result.size >= 2000) return@forEach
+                        count++
+                        val fp = f.absolutePath
+                        val dur = runCatching { probeDurationMs(fp) }.getOrDefault(0L)
+                        if (dur in 1 until minMs) return@forEach
+                        if (isExcludedByPathRules(fp)) return@forEach
+                        result.add(
+                            Song(
+                                // 负 id：路径哈希，稳定且不与 MediaStore 正 id 冲突
+                                id = -(fp.hashCode().toLong()),
+                                title = f.nameWithoutExtension,
+                                artist = "",
+                                album = "",
+                                duration = dur,
+                                path = Uri.fromFile(f).toString(),
+                                albumArtUri = "",
+                                format = f.extension.uppercase(),
+                                filePath = fp,
+                                folderPath = f.parent ?: "",
+                                dateAdded = f.lastModified() / 1000
+                            )
+                        )
+                    }
+            } catch (e: Exception) {
+                android.util.Log.w(TAG, "walkStorageForAudio: walk $dirPath failed: ${e.message}")
+            }
+            if (result.isNotEmpty()) break
+        }
+        android.util.Log.i(TAG, "walkStorageForAudio: FS walk found ${result.size} songs (visited $count files)")
+        result
+    }
+
     suspend fun rescanFromMediaStore(
         context: Context,
         onProgress: ((Int, Int) -> Unit)? = null
@@ -1034,6 +1209,11 @@ object SongRepository {
 
             val perm = context.checkSelfPermission("android.permission.READ_MEDIA_AUDIO")
             android.util.Log.d(TAG, "rescanFromMediaStore: READ_MEDIA_AUDIO = ${perm == android.content.pm.PackageManager.PERMISSION_GRANTED}")
+
+            // [2026-10-25] Tier 2 预检：有些手机（OEM ROM / 刚拷贝文件 / 索引损坏）冷启动时
+            // MediaStore 还没建好索引，直接查返回 0 行 → 「主界面扫不出歌」。
+            // 先做廉价 COUNT 预检，为空则触发系统媒体扫描并轮询等待（最多 5 秒）。
+            ensureMediaStoreIndexed(context)
 
             try {
                 val cursor = context.contentResolver.query(uri, projection, null, null, sortOrder)
@@ -1220,6 +1400,14 @@ object SongRepository {
 
             android.util.Log.d(TAG, "rescanFromMediaStore: scanned ${musicList.size} songs")
 
+            // [2026-10-25] Tier 3：MediaStore 强制索引后仍为 0 → 文件系统遍历兜底。
+            // 典型场景：音乐目录被 .nomedia 屏蔽、OEM 媒体库损坏。仅在全空时触发，
+            // 正常手机零影响。需要 All Files Access（Android 11+）。
+            if (musicList.isEmpty()) {
+                val walked = walkStorageForAudio(context)
+                if (walked.isNotEmpty()) musicList.addAll(walked)
+            }
+
             if (reportGlobal) _scanProgress.value = 1f
 
             // 【V7.91】扫描结果为空时不覆盖缓存，保护已有数据
@@ -1283,6 +1471,141 @@ object SongRepository {
             songs
         }
     }
+
+    /**
+     * [2026-10-25] Lyrico 等外部编辑器只改了一首歌时，只重读**这一首**，
+     * 不复用 rescanFromMediaStore（全表扫描 + BPM/key 探测 + 并集合并 + 落盘，O(曲库) 极慢）。
+     * 复杂度降到 O(1)。返回更新后的 Song（id 固定用入参 [fallbackId]，保证内存键稳定）；
+     * 查不到该文件返回 null（调用方保留旧值）。
+     *
+     * 只回读"文本元数据 + 格式 + 时长 + albumart URI"，不重跑 BPM/key（标签编辑不改它们），
+     * 也不做最小时长/路径黑名单过滤（这首歌本就在曲库里，不该被过滤掉）。
+     */
+    suspend fun readSingleSong(context: Context, filePath: String, fallbackId: Long): Song? =
+        withContext(Dispatchers.IO) {
+            if (filePath.isBlank()) return@withContext null
+            val uri = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+            val projection = arrayOf(
+                MediaStore.Audio.Media._ID,
+                MediaStore.Audio.Media.TITLE,
+                MediaStore.Audio.Media.ARTIST,
+                MediaStore.Audio.Media.ALBUM,
+                MediaStore.Audio.Media.ALBUM_ID,
+                MediaStore.Audio.Media.DURATION,
+                MediaStore.Audio.Media.DATA,
+                MediaStore.Audio.Media.MIME_TYPE,
+                MediaStore.Audio.Media.DATE_ADDED
+            )
+            // 优先按路径精确定位刚被改写的文件；路径对不上（inode 被改写 / 媒体库未索引）再用旧 id 兜底。
+            val (sel, args) = if (filePath.startsWith("content://")) {
+                "${MediaStore.Audio.Media._ID} = ?" to arrayOf(fallbackId.toString())
+            } else {
+                "${MediaStore.Audio.Media.DATA} = ?" to arrayOf(filePath)
+            }
+            var cursor: android.database.Cursor? = null
+            try {
+                cursor = context.contentResolver.query(uri, projection, sel, args, null)
+                if (cursor == null || !cursor.moveToFirst()) {
+                    // 路径没命中：可能 Lyrico 重写了 inode 或媒体库尚未索引，再用旧 id 兜底一次。
+                    if (!filePath.startsWith("content://")) {
+                        cursor?.close()
+                        cursor = context.contentResolver.query(
+                            uri, projection,
+                            "${MediaStore.Audio.Media._ID} = ?", arrayOf(fallbackId.toString()), null
+                        )
+                    }
+                    if (cursor == null || !cursor.moveToFirst()) return@withContext null
+                }
+                val idIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                val titleIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+                val artistIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+                val albumIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM)
+                val albumIdIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.ALBUM_ID)
+                val durationIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                val dataIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.DATA)
+                val mimeIdx = cursor.getColumnIndexOrThrow(MediaStore.Audio.Media.MIME_TYPE)
+                val dateAddedIdx = cursor.getColumnIndex(MediaStore.Audio.Media.DATE_ADDED)
+
+                val id = cursor.getLong(idIdx)
+                val title = cursor.getString(titleIdx) ?: "Unknown"
+                val artist = sanitizeArtist(cursor.getString(artistIdx))
+                val album = sanitizeAlbum(cursor.getString(albumIdx))
+                val duration = cursor.getLong(durationIdx)
+                val path = cursor.getString(dataIdx) ?: ""
+                val mimeType = cursor.getString(mimeIdx) ?: ""
+                val dateAdded = if (dateAddedIdx >= 0) {
+                    val v = cursor.getLong(dateAddedIdx)
+                    if (v > 0L) v else if (path.isNotBlank()) java.io.File(path).lastModified() / 1000 else 0L
+                } else {
+                    if (path.isNotBlank()) java.io.File(path).lastModified() / 1000 else 0L
+                }
+
+                val ext = path.substringAfterLast('.', "").lowercase()
+                val format = when {
+                    ext in setOf("dsf", "dsd", "dff", "dxd") -> "DSD"
+                    ext in setOf("flac", "fla") -> "FLAC"
+                    ext in setOf("wav", "wave") -> "WAV"
+                    ext in setOf("aiff", "aif", "aifc") -> "AIFF"
+                    ext == "ape" -> "APE"
+                    ext == "wv" -> "WAVPACK"
+                    ext in setOf("m4a", "mp4") && mimeType.contains("mp4", true) -> "M4A"
+                    mimeType.contains("flac", true) -> "FLAC"
+                    mimeType.contains("ogg", true) || mimeType.contains("opus", true) -> "OPUS"
+                    mimeType.contains("wav", true) -> "WAV"
+                    mimeType.contains("aac", true) -> "AAC"
+                    mimeType.contains("mp4", true) || mimeType.contains("m4a", true) -> "M4A"
+                    mimeType.contains("mp3", true) -> "MP3"
+                    else -> if (ext.isNotEmpty()) ext.uppercase() else "AUDIO"
+                }
+
+                // WAV 内嵌标签优先于媒体库（与 rescanFromMediaStore 一致），仅当媒体库是占位值才覆盖。
+                var taggedTitle = title
+                var taggedArtist = artist
+                var taggedAlbum = album
+                if (format == "WAV" && path.startsWith("/")) {
+                    val needT = looksLikeFileName(title, path)
+                    val needA = looksLikeArtistFallback(artist, path)
+                    val needB = looksLikeAlbumFallback(album, path)
+                    if (needT || needA || needB) {
+                        try {
+                            WavCoverReader.readTags(path)?.let { tags ->
+                                if (needT && tags.title.isNotBlank()) taggedTitle = tags.title
+                                if (needA && tags.artist.isNotBlank()) taggedArtist = tags.artist
+                                if (needB && tags.album.isNotBlank()) taggedAlbum = tags.album
+                            }
+                        } catch (_: Exception) { }
+                    }
+                }
+
+                val albumUri = Uri.withAppendedPath(
+                    Uri.parse("content://media/external/audio/albumart"),
+                    cursor.getString(albumIdIdx)
+                ).toString()
+                // 播放用的 content URI 取真实行 _ID（inode 改写后仍是活的行）；内存键仍用 fallbackId。
+                val contentUri = Uri.withAppendedPath(
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, id.toString()
+                ).toString()
+
+                Song(
+                    id = fallbackId,
+                    title = taggedTitle,
+                    artist = taggedArtist,
+                    album = taggedAlbum,
+                    duration = if (duration > 0) duration else 0,
+                    path = contentUri,
+                    albumArtUri = albumUri,
+                    format = format,
+                    filePath = path,
+                    folderPath = path.substringBeforeLast("/", ""),
+                    dateAdded = dateAdded
+                )
+            } catch (e: Exception) {
+                android.util.Log.e(TAG, "readSingleSong error: ${e.message}", e)
+                null
+            } finally {
+                cursor?.close()
+            }
+        }
 
     // ── [V8.101] 本地全盘扫描 + 媒体库修复 ───────────────────────────
     //

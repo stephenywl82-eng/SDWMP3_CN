@@ -7,8 +7,6 @@ import com.sdw.music.player.core.audio.engine.OboeDirectPlayer
 
 import androidx.compose.foundation.clickable
 import com.sdw.music.player.ui.components.ExpressiveSwitch
-import com.sdw.music.player.ui.components.SDWDivider
-import com.sdw.music.player.ui.theme.sectionTitleStyle
 import com.sdw.music.player.ui.components.SDWTopBar
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.*
@@ -20,7 +18,11 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Headphones
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.*
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import kotlinx.coroutines.delay
@@ -98,7 +100,7 @@ private fun OboeEqFullScreen(
             SDWTopBar(
                 title = { Text(stringResource(R.string.eq_dsp_equalizer)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    FilledTonalIconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
                     }
                 },
@@ -133,27 +135,47 @@ private fun OboeEqFullScreen(
                 .fillMaxSize()
                 .padding(padding)
         ) {
-            // === MSEB 入口 ===
+            // === MSEB 入口（Expressive 带色按钮）===
             item {
-                OutlinedButton(
+                FilledTonalButton(
                     onClick = onNavigateToMseb,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    shape = MaterialTheme.shapes.large,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
                 ) {
-                    Text(stringResource(R.string.eq_mseb_psychoacoustic), style = MaterialTheme.typography.titleSmall)
+                    Icon(Icons.Filled.Tune, contentDescription = null, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        stringResource(R.string.eq_mseb_psychoacoustic),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f),
+                        textAlign = TextAlign.Start
+                    )
+                    Icon(Icons.Filled.ChevronRight, contentDescription = null, modifier = Modifier.size(20.dp))
                 }
             }
 
             // === 手动参数 EQ（发烧级）入口 ===
             item {
-                OutlinedButton(
+                FilledTonalButton(
                     onClick = onNavigateToParametricEq,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 0.dp)
+                        .padding(horizontal = 16.dp, vertical = 6.dp),
+                    shape = MaterialTheme.shapes.large,
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 14.dp)
                 ) {
-                    Text(stringResource(R.string.eq_peq_title), style = MaterialTheme.typography.titleSmall)
+                    Icon(Icons.Filled.GraphicEq, contentDescription = null, modifier = Modifier.size(22.dp))
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        stringResource(R.string.eq_peq_title),
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.weight(1f),
+                        textAlign = TextAlign.Start
+                    )
+                    Icon(Icons.Filled.ChevronRight, contentDescription = null, modifier = Modifier.size(20.dp))
                 }
             }
 
@@ -167,28 +189,38 @@ private fun OboeEqFullScreen(
                 )
             }
 
-            // === AutoEQ Headphone Correction ===
+            // === AutoEQ Headphone Correction（带色父容器）===
             item {
-                SDWDivider(
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 1f)
-                )
-                Row(
+                Surface(
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    shape = MaterialTheme.shapes.large,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp),
-                    verticalAlignment = Alignment.CenterVertically
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
                 ) {
-                    Text(
-                        text = stringResource(R.string.eq_autoeq_calibration),
-                        style = sectionTitleStyle(),
-                        modifier = Modifier.weight(1f)
-                    )
-                    Text(
-                        text = "10-band Precise EQ",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Filled.Headphones,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(Modifier.width(12.dp))
+                        Text(
+                            text = stringResource(R.string.eq_autoeq_calibration),
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        Text(
+                            text = "10-band Precise EQ",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.75f)
+                        )
+                    }
                 }
             }
 
@@ -196,17 +228,22 @@ private fun OboeEqFullScreen(
 
             // AutoEQ 全量预设库（6033 款 / 652 品牌）—— 品牌折叠列表在这个量级不可用，改搜索
             item {
-                OutlinedTextField(
+                // [P2 · M3 Expressive] 描边式 → 容器式（半透明玻璃），与主界面搜索框统一。
+                // 顺带把清空键的裸 IconButton 换成 tonal 容器键（全站顶栏/行内键已统一）。
+                TextField(
                     value = autoEqQuery,
                     onValueChange = { autoEqQuery = it },
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp, vertical = 4.dp),
-                    placeholder = { Text(stringResource(R.string.eq_autoeq_search)) },
+                    placeholder = { Text(stringResource(R.string.eq_autoeq_search), color = MaterialTheme.colorScheme.onSurfaceVariant) },
                     leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                     trailingIcon = {
                         if (autoEqQuery.isNotEmpty()) {
-                            IconButton(onClick = { autoEqQuery = "" }) {
+                            FilledTonalIconButton(
+                                onClick = { autoEqQuery = "" },
+                                shapes = IconButtonDefaults.shapes()
+                            ) {
                                 Icon(
                                     Icons.Filled.Close,
                                     contentDescription = stringResource(R.string.action_cancel)
@@ -215,7 +252,16 @@ private fun OboeEqFullScreen(
                         }
                     },
                     singleLine = true,
-                    shape = MaterialTheme.shapes.medium
+                    shape = MaterialTheme.shapes.medium,
+                    colors = TextFieldDefaults.colors(
+                        focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                        cursorColor = MaterialTheme.colorScheme.primary,
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.35f),
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent
+                    )
                 )
             }
 
@@ -388,7 +434,7 @@ private fun EqualizerPresetsScreen(onBack: () -> Unit) {
             SDWTopBar(
                 title = { Text(stringResource(R.string.eq_title)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    FilledTonalIconButton(onClick = onBack, shapes = IconButtonDefaults.shapes()) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = stringResource(R.string.action_back))
                     }
                 },

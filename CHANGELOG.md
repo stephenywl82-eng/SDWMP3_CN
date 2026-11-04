@@ -1,5 +1,25 @@
 # 更新日志 Changelog
 
+> 注：自本条目起 `versionName` 重新对齐到 `build.gradle` 的真实构建号（当前 9.9 / versionCode 936）。下方 9.19 / 9.20 等条目为早期规划口径，代码实际提交以 git log 为准。
+
+## 9.9 (2026-11-04)
+
+> `versionName` 9.9 / `versionCode` 936。本轮聚焦封面浏览体验、常亮与切歌听感修复。
+
+### 新增
+- **3D 封面流（Cover Flow）**：Apple/iTunes 风格真立体封面浏览。中心封面正对，两侧封面绕靠中心边旋转约 70° 露出书脊厚度（立体 CD 盒子而非平面），向中心汇聚成走廊景深；近黑沉浸式背景 + 高斯模糊衬底；顶部专辑详情行与底部迷你播放器保留。
+- **播放时常亮**：设置项开启后，播放页与全屏歌词页保持屏幕常亮；采用按 window 的引用计数，两页共用同一窗口、互不清除 `FLAG_KEEP_SCREEN_ON`，解决进入全屏歌词后不亮的问题。
+
+### 修复
+- **oboe 交叉淡化落点音量台阶**：B 轨预增益（preGain∈[0.6,1.0]）原在落点硬阶跃回 1.0（最大 +4.4 dB，听感「音量一下大一下」）。改为落点后 250ms 内由 1:1 直读出口把 output 按 preGain→1.0 线性爬坡，台阶摊平为无感斜坡。
+- **手动切歌硬切开关**：手动上一首/下一首可绕过交叉淡化直接硬切（`manualHardCutEnabled`）。
+
+### 优化
+- 封面流 z 层级按「距中心步数」分级，中间封面恒在最前；per-item `remember(i)` 修复窗口滑动后状态错位导致的右侧遮挡与书脊朝向错乱。
+- 沉浸模式封面放大、四边径向渐变与边缘灯贴边等多项播放界面打磨（见 git log）。
+
+---
+
 ## 9.20 (2026-10-20)
 
 > `versionName` 9.20 / `versionCode` 920。This release mainly fixes audio glitches and stability issues when playing through a USB external DAC.

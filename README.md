@@ -1,7 +1,7 @@
 # Moto Music Premium（中文版 / 多语言）
 
 > Android 高保真本地无损音乐播放器，主打 **USB DAC 独占直通** 的 Bit-Perfect 输出。
-> 当前版本 **9.19**（versionCode 919）。
+> 当前构建版本 **9.9**（versionCode 936）。
 
 ## 定位
 
@@ -16,8 +16,8 @@
 | 项目 | 值 |
 |------|------|
 | `applicationId` | `com.sdw.music.player.cn` |
-| `versionName` / `versionCode` | 9.19 / 919 |
-| `minSdk` / `targetSdk` / `compileSdk` | 24 / 35 / 35 |
+| `versionName` / `versionCode` | 9.9 / 936 |
+| `minSdk` / `targetSdk` / `compileSdk` | 24 / 35 / 37 |
 | 语言 | 9 种（10 个 locale：简中、繁中、English、Español、日本語、한국어、Français、Português、हिन्दी） |
 | 模块 | `:app`（主工程，131 个 Kotlin 文件）、`:analyzer`（音频分析） |
 | 播放核心 | 自研 native 引擎（`liboboe_bridge.so`），**已彻底移除 ExoPlayer** |
@@ -104,6 +104,18 @@
 - 折叠屏分屏布局、壁纸自适应取色（背景光晕与文字配色随封面/主题调整）
 - 桌面小部件、通知栏媒体卡片、媒体按键接管
 - 无缝切歌（Gapless）、睡眠定时器、灭屏播放、音频焦点管理
+- **播放时常亮**：设置开启后，播放页与全屏歌词页保持屏幕常亮（按 window 引用计数，两页共用同一窗口不互相清 flag）
+
+### 十、封面流（Cover Flow）
+
+Apple / iTunes 风格的真 3D 封面浏览（曲库「更多」菜单入口）：
+
+- **立体 CD 盒子**：中心封面正对，两侧封面绕「靠中心的那条边」旋转约 70° 露出书脊厚度，组成一个带厚度的 3D 盒子，而非平面贴图
+- **走廊透视**：两侧封面向中心汇聚、纵深渐远，形成 Cover Flow 标志性的「走廊」景深；近黑沉浸式背景 + 高斯模糊衬底
+- **中间封面恒在最前**：z 层级按「距中心步数」分级，中心最高、两侧递减，右侧封面永远不会压在中间之上
+- **跟手手势**：左右滑动切封面、实时跟手；松手后弹簧吸附到最近封面（临界阻尼、零过冲），停住后中间封面不跳动
+- **窗口化渲染**：只组合中心 ±N 步封面，曲库很大也不卡
+- 顶部保留专辑详情行、底部保留迷你播放器，只重做中间的封面流与背景
 
 ---
 
@@ -154,9 +166,10 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 ## 版本与更新日志
 
-- 当前：`versionName` 9.19 / `versionCode` 919
-- 完整更新记录见 **`CHANGELOG.md`**（已补齐至 9.19，8.2 及更早同样收录）。其中几个值得注意的节点：
+- 当前：`versionName` 9.9 / `versionCode` 936
+- 完整更新记录见 **`CHANGELOG.md`**（最新见 9.20，8.2 及更早同样收录）。其中几个值得注意的节点：
 
+  - **9.9（当前构建版本）**：3D 封面流（Cover Flow 立体 CD 盒子 + 走廊透视）、播放时常亮（window 引用计数，播放页/全屏歌词页共用）、oboe 交叉淡化落点音量台阶修复（B 轨 preGain 平滑爬坡，不再「音量一下大一下」）
   - **9.19**：HRIR 空间化（真·双耳环绕，实测 HRIR 替换 DTS）、core/audio 分包重构、死代码清理
   - **9.01**：修复切歌时的两声"哒"（B 进场 23ms 音频坑 / A 退场 7% 变速弹回）
   - **9.0**：ReplayGain 响度归一化、歌词页玻璃浮层
@@ -313,6 +326,7 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 - **9 种语言**：简体 / 繁体 / English / Español / 日本語 / 한국어 / Français / Português / हिन्दी，点一下切换，无需重启。
 - **封面系统**：iTunes + MusicBrainz 双源下载，FLAC 写 PICTURE block、MP3 写 ID3v2 APIC 帧嵌入。
+- **3D 封面流（Cover Flow）**：Apple/iTunes 风格的真立体封面浏览，两侧封面转出书脊厚度、向中心汇聚成走廊，中间封面永远最前。
 - **歌词系统**：四级优先级取词，支持编辑并内嵌回音频文件。
 - **分析能力**：BPM / 调性 / 曲式结构 / 波形，还能接外部音轨分离插件。
 - **交叉淡化与 DJ 混音**：小节数混音、智能落点对齐、拍点吸附交接、低频交接、按 BPM/调性/能量智能选效果。

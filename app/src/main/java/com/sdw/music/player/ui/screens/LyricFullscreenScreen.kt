@@ -66,6 +66,9 @@ import com.sdw.music.player.LyricLine
 import com.sdw.music.player.ui.components.LyricViewCompose
 import com.sdw.music.player.ui.components.SheetImmersiveStatusBar
 import com.sdw.music.player.ui.components.ImmersiveSystemBars
+import com.sdw.music.player.ui.components.KeepScreenOnRefCounter
+import com.sdw.music.player.ui.components.findHostActivity
+import androidx.compose.ui.platform.LocalView
 import com.sdw.music.player.ui.components.DefaultCoverImage
 import com.sdw.music.player.ui.components.glassSurface
 import com.sdw.music.player.ui.components.SDWAlertDialog
@@ -99,6 +102,24 @@ fun LyricFullscreenScreen(
     onLyricsSaved: ((String) -> Unit)? = null
 ) {
     val context = LocalContext.current
+    val localView = LocalView.current
+
+    // 【新增】播放时常亮：开启后本全屏歌词界面保持屏幕常亮（与播放界面共用同一偏好）
+    val keepScreenOnInPlayback = remember {
+        context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+            .getBoolean("keep_screen_on_playback", false)
+    }
+    // 播放时常亮：开启时给当前窗口加 FLAG_KEEP_SCREEN_ON，关闭或离场时移除（与播放界面共用偏好）
+    // 注意：必须用 LocalView.current.context 取窗口（与 ImmersiveSystemBars 完全一致且已验证可用）；
+    // LocalContext.current 在部分 Compose 层级下走不到 Activity，findHostActivity() 会返回 null 使整段静默失效。
+    // 用 KeepScreenOnRefCounter 引用计数：播放页与全屏歌词页共用同一 Activity window，
+    // 只有最后一个常亮页面离开才清除 flag，避免导航切换时退出方把进入方刚加的 flag 清掉。
+    DisposableEffect(keepScreenOnInPlayback) {
+        val w = localView.context.findHostActivity()?.window
+        if (keepScreenOnInPlayback) w?.let { KeepScreenOnRefCounter.acquire(it) }
+        else w?.let { KeepScreenOnRefCounter.release(it) }
+        onDispose { w?.let { KeepScreenOnRefCounter.release(it) } }
+    }
     val scope = rememberCoroutineScope()
     // V8.92 accentColor = 0L 表示「无封面色，走主题色」。直接 Color(0L) 会得到全透明，
     // 歌词高亮/开关/按钮全部看不见 —— 必须与 PlayerScreen/SongListScreen 一样回退 primary。

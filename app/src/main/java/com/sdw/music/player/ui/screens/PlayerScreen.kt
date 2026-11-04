@@ -64,18 +64,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.draw.blur
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.BlendMode
+import androidx.compose.ui.graphics.CompositingStrategy
+import androidx.compose.ui.draw.BlurredEdgeTreatment
 import coil.compose.rememberAsyncImagePainter
 import coil.request.ImageRequest
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Rect
-import androidx.compose.ui.geometry.RoundRect
-import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asAndroidPath
@@ -83,6 +84,16 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import android.graphics.BlurMaskFilter
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.Bitmap
+import android.graphics.Canvas as AndroidCanvas
+import androidx.compose.ui.graphics.Canvas as ComposeGraphicsCanvas
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.draw.alpha
+import coil.compose.AsyncImagePainter
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
@@ -100,8 +111,10 @@ import android.os.Build
 import android.os.Bundle
 import android.content.res.Configuration
 import android.content.Context
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -126,6 +139,9 @@ import com.sdw.music.player.ui.components.AddToPlaylistSheet
 import com.sdw.music.player.ui.components.rememberSharedCoverPainter
 import com.sdw.music.player.ui.components.SheetImmersiveStatusBar
 import com.sdw.music.player.ui.components.ImmersiveSystemBars
+import com.sdw.music.player.ui.components.KeepScreenOnRefCounter
+import com.sdw.music.player.ui.components.findHostActivity
+import androidx.compose.ui.platform.LocalView
 import com.sdw.music.player.Song
 import com.sdw.music.player.SongRepository
 import com.sdw.music.player.ui.viewmodel.PlayerState
@@ -187,6 +203,25 @@ fun PlayerScreen(
     audioSessionId: Int = 0,
 ) {
     val context = LocalContext.current
+    val localView = LocalView.current
+
+    // 【新增】播放时常亮：开启后在播放界面保持屏幕常亮（全屏歌词界面同此偏好）
+    val keepScreenOnInPlayback = remember {
+        context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE)
+            .getBoolean("keep_screen_on_playback", false)
+    }
+    // 播放时常亮：开启时给当前窗口加 FLAG_KEEP_SCREEN_ON，关闭或离场时移除
+    // 同 LyricFullscreen：用 findHostActivity() 走 ContextWrapper 链取真 Activity，避免裸 cast 返回 null 静默失效
+    // 用 KeepScreenOnRefCounter 引用计数（详见 LyricFullscreenScreen）：播放页与全屏歌词页共用同一
+    // Activity window，最后一个常亮页面离开才清除 flag，避免导航切换时互相踩。
+    DisposableEffect(keepScreenOnInPlayback) {
+        // 用 LocalView.current.context 取窗口（与 ImmersiveSystemBars 完全一致且已验证可用）；
+        // 不可用 LocalContext.current，其在部分 Compose 层级下走不到 Activity，findHostActivity() 会返回 null。
+        val w = localView.context.findHostActivity()?.window
+        if (keepScreenOnInPlayback) w?.let { KeepScreenOnRefCounter.acquire(it) }
+        else w?.let { KeepScreenOnRefCounter.release(it) }
+        onDispose { w?.let { KeepScreenOnRefCounter.release(it) } }
+    }
 
     // 【v8.165 省电】「亮屏 + 本 Activity 真的在前台」双条件开关
     // LaunchedEffect 不感知 STOP：熄屏、或被其它 App 完全盖住时组合仍在，while(true)
@@ -554,8 +589,26 @@ fun PlayerScreen(
     // and re-hides on window focus gain (so a dismissed sheet can't bring the bar back).
     ImmersiveSystemBars(hideNavigationBar = false)
 
-    val screenWidthDp = LocalConfiguration.current.screenWidthDp
-    val screenHeightDp = LocalConfiguration.current.screenHeightDp
+    // [2026-11-02] 横屏检测修复：Manifest 声明了 configChanges=orientation|screenSize|…，
+    // 系统旋转时不重建 Activity、只回调 onConfigurationChanged；Compose 的 LocalConfiguration
+    // 此时不会重新提供，isLandscape 等会永远停在初始（竖屏）值，旋转后播放页仍走竖屏布局、
+    // 封面不出现在右侧分栏。改用 ComponentCallbacks 监听真实配置变化写进 state 强制重组，
+    // 让 isLandscape / 屏幕宽高 / artSize 等全部派生量跟着实时更新。
+    val appCtx = LocalContext.current
+    val initialConfig = LocalConfiguration.current
+    var currentConfig by remember { mutableStateOf(initialConfig) }
+    DisposableEffect(appCtx) {
+        val cb = object : android.content.ComponentCallbacks {
+            override fun onConfigurationChanged(newConfig: Configuration) {
+                currentConfig = newConfig
+            }
+            override fun onLowMemory() {}
+        }
+        appCtx.registerComponentCallbacks(cb)
+        onDispose { appCtx.unregisterComponentCallbacks(cb) }
+    }
+    val screenWidthDp = currentConfig.screenWidthDp
+    val screenHeightDp = currentConfig.screenHeightDp
     val aspectRatio = screenWidthDp.toFloat() / screenHeightDp.toFloat()
     // 【V8.8】Moto Razr 折叠机外屏：方形比例（razr50: 413x409≈1.01, razr50U: 488x414≈1.18），
     // 区别于普通手机竖屏(~0.5)/横屏(>1.6)/内屏展开(≈2.4)。此形态需走紧凑布局。
@@ -570,7 +623,7 @@ fun PlayerScreen(
             Build.MODEL.lowercase().contains("razr") &&
             screenWidthDp >= 360 && aspectRatio in 0.85f..1.35f)
     val isCompact = screenWidthDp < 400 || isRazrOuter
-    val isLandscape = LocalConfiguration.current.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val isLandscape = currentConfig.orientation == Configuration.ORIENTATION_LANDSCAPE
     val isFoldable = !isRazrOuter && screenWidthDp >= 420 && aspectRatio in 0.7f..1.4f
 
     val artSize = if (isRazrOuter) {
@@ -1063,16 +1116,21 @@ fun PlayerScreen(
                             contentDescription = null,
                             modifier = Modifier.fillMaxSize(),
                             contentScale = ContentScale.Crop,
-                            alpha = 0.65f
+                            alpha = if (immersivePlayer) 0.92f else 0.65f
                         )
                     }
                     // 【V8.142】原先这里的第二层 B 叠加层已删除（见上方 bgTargetUri 注释）：
                     // 单层 Crossfade 即可完成与音频同相的 A→B 过渡，且交接无亮度跳变。
                 }
-            // 氛围渐变：上下柔和压暗（中间透出封面，无亮带无光环）
+            // 氛围渐变：沉浸模式只压底部护住文字、顶部留给封面自由晕开（无边界）；普通模式上下柔和压暗
             Canvas(modifier = Modifier.fillMaxSize()) {
                 drawRect(
-                    Brush.verticalGradient(
+                    if (immersivePlayer) Brush.verticalGradient(
+                        0.0f to Color.Black.copy(alpha = 0.0f),
+                        0.55f to Color.Black.copy(alpha = 0.0f),
+                        0.80f to Color.Black.copy(alpha = 0.30f),
+                        1.0f to Color.Black.copy(alpha = 0.62f)
+                    ) else Brush.verticalGradient(
                         0.0f to Color.Black.copy(alpha = 0.60f),
                         0.20f to Color.Black.copy(alpha = 0.30f),
                         0.50f to Color.Black.copy(alpha = 0.22f),
@@ -1100,19 +1158,21 @@ fun PlayerScreen(
             )
         }
 
-        // Vignette
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            val cx = size.width / 2f; val cy = size.height / 2f
-            val maxR = kotlin.math.sqrt(cx * cx + cy * cy)
-            drawCircle(
-                Brush.radialGradient(
-                    0.0f to Color.Transparent,
-                    0.45f to Color.Transparent,
-                    1.0f to Color.Black.copy(alpha = 0.10f),
-                    center = Offset(cx, cy), radius = maxR * 1.2f
-                ),
-                radius = maxR * 1.2f, center = Offset(cx, cy)
-            )
+        // Vignette：沉浸模式去掉（避免黑角破坏无边界过渡），普通模式保留轻微四角压暗
+        if (!immersivePlayer) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val cx = size.width / 2f; val cy = size.height / 2f
+                val maxR = kotlin.math.sqrt(cx * cx + cy * cy)
+                drawCircle(
+                    Brush.radialGradient(
+                        0.0f to Color.Transparent,
+                        0.45f to Color.Transparent,
+                        1.0f to Color.Black.copy(alpha = 0.10f),
+                        center = Offset(cx, cy), radius = maxR * 1.2f
+                    ),
+                    radius = maxR * 1.2f, center = Offset(cx, cy)
+                )
+            }
         }
 
         // Edge light removed — replaced by VU Meter
@@ -2518,112 +2578,114 @@ private fun PortraitLayout(coverUri: String?,
                     // 普通模式这个框的尺寸 = 封面本体尺寸（maxArt + 36dp），内容居中，
                     // 与改动前**完全一致**（原来 BoxWithConstraints 里直接放的就是它）。
                     Box(
-                        // 过渡范围：沉浸模式 64dp（卡片本体边缘淡出 + 模糊层接管，两层各占一半）；
+                        // 过渡范围：沉浸模式 64dp（封面本体边缘羽化淡出 + 模糊光晕溶解，两层各占一半）；
                         // 普通模式保持原来的 36dp，**一行不变**。
                         modifier = Modifier.size(maxArt + if (immersive) 64.dp else 36.dp),
                         contentAlignment = Alignment.Center
                     ) {
-                        // ① 底层：同一张封面的模糊版铺满本框 → 卡片四周一圈柔和光晕
                         if (immersive) {
-                            Image(
-                                painter = coverPainter,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .blur(22.dp),
-                                contentScale = ContentScale.Crop
-                            )
-                        }
-                        PlayerCoverArt(
-                            artUri = coverUri,
-                            songTitle = state.currentSongTitle,
-                            songArtist = state.currentSongArtist,
-                            accentColor = accentColor,
-                            isPlaying = isPlaying,
-                            rotation = rotation,
-                            sizeDp = maxArt,
-                            glowSizeDp = maxArt + glowPad,
-                            onClick = { onNavigateToAlbum(state.currentSongAlbum) },
-                            onDoubleTap = { if (isPlaying) onPause() else onPlay() },
-                            onSwipePrevious = onPrevious,
-                            onSwipeNext = onNext,
-                            fadeOverlayUri = fadeOverlayUri,
-                            instantCoverSwitch = instantCoverSwitch,
-                            fadeOverlayDurationMs = fadeOverlayDurationMs,
-                            fadeOverlayProgress = fadeOverlayProgress,
-                            fadeOverlayActive = fadeOverlayActive,
-                            fadeOverlayStartMs = fadeOverlayStartMs,
-                            squareCover = immersive,
-                            noRotation = immersive,
-                            // ★ 卡片**上下缘淡出**：边缘 alpha 归零后由下面的模糊层接管，
-                            //   两层之间才是连续的过渡，而不是一条硬直线。
-                            //   （普通模式不挂这个遮罩，封面依旧完整方方正正。）
-                            modifier = Modifier
-                                .size(maxArt + glowPad)
-                                .then(
-                                    if (immersive) Modifier
-                                        .graphicsLayer {
-                                            compositingStrategy = CompositingStrategy.Offscreen
-                                        }
+                            // 清晰封面本体：正方形 + 大圆角，边缘清晰、绝不带圆形模糊光晕。
+                            // （原底层 38dp 重度模糊光晕会把方形轮廓晕成圆形，已移除——用户明确要方形大圆角。）
+                            Box(
+                                modifier = Modifier.size(maxArt),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Image(
+                                    painter = coverPainter,
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(maxArt)
+                                        // 孤立离屏层：下面四道 DstIn 遮罩只和「封面本身」做扣减，不会伤到背后模糊背景
+                                        .graphicsLayer { compositingStrategy = CompositingStrategy.Offscreen }
+                                        // 四周羽化：上下左右各用一道「外缘透明→内部不透明」的渐变遮罩扣掉边缘像素，
+                                        // 形成矩形羽化（非圆形），封面自然溶进背后同图模糊光晕。
                                         .drawWithContent {
+                                            val band = size.minDimension * 0.13f
+                                            val bh = band / size.height
+                                            val bw = band / size.width
                                             drawContent()
-                                            // ★ 用 **Compose 原生** 的 drawRect + BlendMode.DstIn 做遮罩。
-                                            //   （早先用 android.graphics.Paint + PorterDuffXfermode 走
-                                            //     nativeCanvas，在 Compose 的硬件画布上不生效 ——
-                                            //     遮罩整层没起作用，边缘还是硬切。）
-                                            // ★ 四边**径向**渐变（不再是只管上下的竖向渐变）：
-                                            //   中心实、四周逐渐透明 —— 四条边和四个角一起化开，
-                                            //   画面就不会"一看还是一个正方形"。
-                                            //   过渡范围也拉宽了：半径取 0.78×对角线，
-                                            //   边缘中点已经掉到 50% 透明度，角上直接归零。
+                                            // 上边
                                             drawRect(
-                                                brush = Brush.radialGradient(
-                                                    0f to Color.White,
-                                                    0.42f to Color.White.copy(alpha = 0.97f),
-                                                    0.62f to Color.White.copy(alpha = 0.72f),
-                                                    0.80f to Color.White.copy(alpha = 0.34f),
-                                                    1f to Color.Transparent,
-                                                    center = Offset(size.width / 2f, size.height / 2f),
-                                                    radius = kotlin.math.hypot(
-                                                        size.width / 2f, size.height / 2f
-                                                    ) * 1.10f
+                                                brush = Brush.verticalGradient(
+                                                    0f to Color.Transparent, bh to Color.Black, 1f to Color.Black
+                                                ),
+                                                blendMode = BlendMode.DstIn
+                                            )
+                                            // 下边
+                                            drawRect(
+                                                brush = Brush.verticalGradient(
+                                                    0f to Color.Black, (1f - bh) to Color.Black, 1f to Color.Transparent
+                                                ),
+                                                blendMode = BlendMode.DstIn
+                                            )
+                                            // 左边
+                                            drawRect(
+                                                brush = Brush.horizontalGradient(
+                                                    0f to Color.Transparent, bw to Color.Black, 1f to Color.Black
+                                                ),
+                                                blendMode = BlendMode.DstIn
+                                            )
+                                            // 右边
+                                            drawRect(
+                                                brush = Brush.horizontalGradient(
+                                                    0f to Color.Black, (1f - bw) to Color.Black, 1f to Color.Transparent
                                                 ),
                                                 blendMode = BlendMode.DstIn
                                             )
                                         }
-                                    else Modifier
+                                        .clip(RoundedCornerShape(percent = 16)),
+                                    contentScale = ContentScale.Crop
                                 )
-                        )
-                        // ③ 上下模糊过渡：卡片**上缘和下缘**用模糊版盖住，
-                        //   再按竖向渐变把模糊量淡出 —— 上下不是硬切，而是溶进背景。
-                        if (immersive) {
-                            Image(
-                                painter = coverPainter,
-                                contentDescription = null,
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .blur(16.dp)
-                                    .drawWithContent {
-                                        drawContent()
-                                        // 同上：Compose 原生遮罩，中间透明、上下缘不透明。
-                                        // ★ 与卡片遮罩互补：中心透明（清晰卡片透出来），
-                                        //   四周逐渐不透明（模糊层接管边缘）。
-                                        drawRect(
-                                            brush = Brush.radialGradient(
-                                                0f to Color.Transparent,
-                                                0.42f to Color.Transparent,
-                                                0.62f to Color.White.copy(alpha = 0.28f),
-                                                0.80f to Color.White.copy(alpha = 0.66f),
-                                                1f to Color.White,
-                                                center = Offset(size.width / 2f, size.height / 2f),
-                                                radius = kotlin.math.hypot(
-                                                    size.width / 2f, size.height / 2f
-                                                ) * 1.10f
-                                            ),
-                                            blendMode = BlendMode.DstIn
-                                        )
-                                    },
-                                contentScale = ContentScale.Crop
+                                // 手势层：透明，仅承接点击/双击/横滑（进专辑、播放暂停、切歌）
+                                PlayerCoverArt(
+                                    artUri = coverUri,
+                                    songTitle = state.currentSongTitle,
+                                    songArtist = state.currentSongArtist,
+                                    accentColor = accentColor,
+                                    isPlaying = isPlaying,
+                                    rotation = rotation,
+                                    sizeDp = maxArt,
+                                    glowSizeDp = maxArt,
+                                    onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+                                    onDoubleTap = { if (isPlaying) onPause() else onPlay() },
+                                    onSwipePrevious = onPrevious,
+                                    onSwipeNext = onNext,
+                                    fadeOverlayUri = fadeOverlayUri,
+                                    instantCoverSwitch = instantCoverSwitch,
+                                    fadeOverlayDurationMs = fadeOverlayDurationMs,
+                                    fadeOverlayProgress = fadeOverlayProgress,
+                                    fadeOverlayActive = fadeOverlayActive,
+                                    fadeOverlayStartMs = fadeOverlayStartMs,
+                                    squareCover = true,
+                                    noRotation = true,
+                                    modifier = Modifier.size(maxArt).alpha(0f)
+                                )
+                            }
+                        }
+                        else {
+                            // ② 普通模式：保持原样（完整方封面 + 边缘辉光），一行未动。
+                            PlayerCoverArt(
+                                artUri = coverUri,
+                                songTitle = state.currentSongTitle,
+                                songArtist = state.currentSongArtist,
+                                accentColor = accentColor,
+                                isPlaying = isPlaying,
+                                rotation = rotation,
+                                sizeDp = maxArt,
+                                glowSizeDp = maxArt + glowPad,
+                                onClick = { onNavigateToAlbum(state.currentSongAlbum) },
+                                onDoubleTap = { if (isPlaying) onPause() else onPlay() },
+                                onSwipePrevious = onPrevious,
+                                onSwipeNext = onNext,
+                                fadeOverlayUri = fadeOverlayUri,
+                                instantCoverSwitch = instantCoverSwitch,
+                                fadeOverlayDurationMs = fadeOverlayDurationMs,
+                                fadeOverlayProgress = fadeOverlayProgress,
+                                fadeOverlayActive = fadeOverlayActive,
+                                fadeOverlayStartMs = fadeOverlayStartMs,
+                                squareCover = immersive,
+                                noRotation = immersive,
+                                modifier = Modifier.size(maxArt + glowPad)
                             )
                         }
                     }
@@ -2892,11 +2954,11 @@ private class EdgeBandCache {
     var hKey: Float = -1f
 }
 
-@Composable
-private fun EdgePulseBand(
-    coverColors: List<Int>,
-    accentColor: Color
-) {
+    @Composable
+    private fun EdgePulseBand(
+        coverColors: List<Int>,
+        accentColor: Color
+    ) {
     val coverHue = remember(coverColors) {
         val hsv = FloatArray(3)
         val c = coverColors.firstOrNull { it != 0 }

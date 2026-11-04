@@ -8263,7 +8263,7 @@ private var xfadeBChorusMs = -1L
         // 【V9.8】交叉淡化开启时，手动切歌改走平滑过渡（A 淡出 / B 从 0:00 淡入），
         // 复用 DJ 手动触发那套 openIncoming + startCrossfade(...,0,...) 引擎；过渡失败
         // （如解码器未就绪/未播放）时退化为硬切兜底。自动续播(fromUser=false)不受影响。
-        if (fromUser && crossfadeEnabled) {
+        if (fromUser && crossfadeEnabled && !manualHardCutEnabled()) {
             nextSongEntryMs = -1L
             val reason = triggerCrossfadeNowDetailed(nextIndex)
             if (reason.isNotEmpty()) playSong(nextIndex)
@@ -8292,7 +8292,7 @@ private var xfadeBChorusMs = -1L
         val prevIndex = if (realIdx > 0) realIdx - 1 else songs.size - 1
 
         // 【V9.8】交叉淡化开启时，手动切歌改走平滑过渡（同 playNext）。
-        if (fromUser && crossfadeEnabled) {
+        if (fromUser && crossfadeEnabled && !manualHardCutEnabled()) {
             nextSongEntryMs = -1L
             val reason = triggerCrossfadeNowDetailed(prevIndex)
             if (reason.isNotEmpty()) playSong(prevIndex)
@@ -8374,6 +8374,10 @@ private var xfadeBChorusMs = -1L
     }
 
     fun isCrossfadeEnabled(): Boolean = crossfadeEnabled
+
+    /** 【新增】手动切歌硬切绕过交叉淡化：开启后手动上一首/下一首直接硬切，不触发交叉淡化。 */
+    fun manualHardCutEnabled(): Boolean =
+        getSharedPreferences("settings", MODE_PRIVATE).getBoolean("crossfade_manual_hardcut", false)
 
     fun setCrossfadeDurationMs(ms: Int) {
         // 【V8.414】0 是「小节模式」哨兵值 —— V8.413 的 UI 在选中 bars>0 时会传 0，

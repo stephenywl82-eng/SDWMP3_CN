@@ -1,7 +1,7 @@
 # Moto Music Premium（中文版 / 多语言）
 
 > Android 高保真本地无损音乐播放器，主打 **USB DAC 独占直通** 的 Bit-Perfect 输出。
-> 当前构建版本 **9.9**（versionCode 936）。
+> 当前构建版本 **9.21**（versionCode 937）。
 
 ## 定位
 
@@ -16,7 +16,7 @@
 | 项目 | 值 |
 |------|------|
 | `applicationId` | `com.sdw.music.player.cn` |
-| `versionName` / `versionCode` | 9.9 / 936 |
+| `versionName` / `versionCode` | 9.21 / 937 |
 | `minSdk` / `targetSdk` / `compileSdk` | 24 / 35 / 37 |
 | 语言 | 9 种（10 个 locale：简中、繁中、English、Español、日本語、한국어、Français、Português、हिन्दी） |
 | 模块 | `:app`（主工程，131 个 Kotlin 文件）、`:analyzer`（音频分析） |
@@ -166,10 +166,10 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 ## 版本与更新日志
 
-- 当前：`versionName` 9.9 / `versionCode` 936
+- 当前：`versionName` 9.21 / `versionCode` 937
 - 完整更新记录见 **`CHANGELOG.md`**（最新见 9.20，8.2 及更早同样收录）。其中几个值得注意的节点：
 
-  - **9.9（当前构建版本）**：3D 封面流（Cover Flow 立体 CD 盒子 + 走廊透视）、播放时常亮（window 引用计数，播放页/全屏歌词页共用）、oboe 交叉淡化落点音量台阶修复（B 轨 preGain 平滑爬坡，不再「音量一下大一下」）
+  - **9.21（当前构建版本）**：3D 封面流（Cover Flow 立体 CD 盒子 + 走廊透视）、播放时常亮（window 引用计数，播放页/全屏歌词页共用）、oboe 交叉淡化落点音量台阶修复（B 轨 preGain 平滑爬坡，不再「音量一下大一下」）
   - **9.19**：HRIR 空间化（真·双耳环绕，实测 HRIR 替换 DTS）、core/audio 分包重构、死代码清理
   - **9.01**：修复切歌时的两声"哒"（B 进场 23ms 音频坑 / A 退场 7% 变速弹回）
   - **9.0**：ReplayGain 响度归一化、歌词页玻璃浮层

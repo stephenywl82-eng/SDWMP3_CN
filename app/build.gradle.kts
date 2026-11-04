@@ -29,8 +29,8 @@ android {
         applicationId = "com.sdw.music.player.cn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 936
-        versionName = "9.9"    // 【V9.9】修复交叉淡化落点音量台阶：B 轨预增益(preGain∈[0.6,1.0])原在落点硬阶跃回 1.0（最大+4.4dB，听感"音量一下子大一下"）。改为落点后 250ms 内由 1:1 直读出口把 output 按 preGain→1.0 线性爬坡，台阶摊平为无感斜坡。
+        versionCode = 937
+        versionName = "9.21"   // 【V9.21】3D 封面流（Cover Flow）+ 播放时常亮 + 交叉淡化落点台阶修复：B 轨预增益(preGain∈[0.6,1.0])原在落点硬阶跃回 1.0（最大+4.4dB，听感"音量一下子大一下"）。改为落点后 250ms 内由 1:1 直读出口把 output 按 preGain→1.0 线性爬坡，台阶摊平为无感斜坡。
 
         ndk {
             abiFilters += listOf("arm64-v8a")

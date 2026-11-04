@@ -12776,9 +12776,14 @@ public:
 
         int toRead = 0;
 
+        // 【V9.9 修正】回调入口捕获一次 crossfade 状态，供下方整段后处理（181xx 行 post-ramp）区分
+        // 「本帧由 crossfade 混合分支生成」还是「1:1 直读生成」。落点帧内 g_crossfadeActive 已被置 false，
+        // 但缓冲是混合分支产出的（B 已在 14048 行乘过 preGain），不能用入口之后的实时值判断。
+        const bool cfActiveAtEntry = g_crossfadeActive.load(std::memory_order_relaxed);
 
 
-        if (g_crossfadeActive.load()) {
+
+        if (cfActiveAtEntry) {
 
 
 
@@ -18143,7 +18148,10 @@ public:
             // 把整段 output 统一乘上 post-ramp 增益（每帧由 onAudioReady 顶部爬坡更新，250ms 内
             // preGain→1.0）。落点那一帧仍走上方 crossfade 分支（已带 preGain，不会二次缩放），
             // 下一帧起走此直读分支、首样本 = to*preGain 与上一帧末样本(to*preGain)连续，台阶被摊平。
-            if (g_xfadeBPostRampActive.load(std::memory_order_relaxed) && totalSamples > 0) {
+            // 【V9.9 修正】原先这里没排除落点帧：post-ramp 在落点块内被置位，本帧 181xx 处乘法仍会执行，
+            // 导致落点帧 B 被乘两次 preGain（混合里一次、此处一次）= preGain²，比前后帧低一截 → "抖一下"。
+            // 用入口捕获的 cfActiveAtEntry 排除：仅真正的 1:1 直读帧施加 post-ramp，落点帧（混合已乘）跳过。
+            if (g_xfadeBPostRampActive.load(std::memory_order_relaxed) && !cfActiveAtEntry && totalSamples > 0) {
                 const float _g = g_xfadeBPreGain.load(std::memory_order_relaxed);
                 for (int i = 0; i < totalSamples; i++) output[i] *= _g;
             }

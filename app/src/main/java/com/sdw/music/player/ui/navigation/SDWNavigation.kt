@@ -80,6 +80,8 @@ fun SDWNavHost(
     val navPositionMs = vm.positionMs.collectAsState()
     val navDurationMs = vm.durationMs.collectAsState()
     val sharedCoverState = remember { SharedCoverState() }
+    // [2026-11-02] 封面流滚动位置保活：放在导航根，离开/返回专辑页再回来不丢位置
+    val coverFlowPos = remember { mutableStateOf(0f) }
 
     // 点歌/切歌播放：栈里已有 Player 时直接弹回它（避免重复 push 导致返回栈越来越深），否则新建
     //
@@ -310,6 +312,7 @@ fun SDWNavHost(
                     onNavigateToFolder = { navController.navigate(Screen.FolderList.route) },
                     onNavigateToPlaylist = { navController.navigate(Screen.PlaylistList.route) },
                     onNavigateToAlbum = { navController.navigate(Screen.AlbumList.route) },
+                    onNavigateToCoverFlow = { navController.navigate(Screen.CoverFlow.route) },
                     onNavigateToArtist = { navController.navigate(Screen.ArtistList.route) },
                     onNavigateToSettings = { navController.navigate(Screen.Settings.route) },
                     onRefresh = { vm.refreshSongs() },
@@ -684,6 +687,35 @@ fun SDWNavHost(
                         onNavigateBack = { navController.popBackStack() }
                     )
                 }
+            }}
+
+            composable(Screen.CoverFlow.route) {PageReveal {
+                val currentPlayingSong = remember(state.currentSongId, state.songList) {
+                    state.songList.find { it.id == state.currentSongId }
+                }
+                CoverFlowScreen(
+                    songs = state.songList,
+                    pos = coverFlowPos,
+                    onNavigateBack = { navController.popBackStack() },
+                    onAlbumClick = { albumName ->
+                        if (albumName.isNotBlank() && !SongRepository.isPlaceholderAlbum(albumName)) {
+                            navController.navigate(Screen.AlbumSong.createRoute(albumName))
+                        }
+                    },
+                    onPlayAlbum = { albumSongs ->
+                        if (albumSongs.isNotEmpty()) {
+                            vm.handleIntent(PlayerIntent.PlaySongList(albumSongs))
+                        }
+                    },
+                    currentSong = currentPlayingSong,
+                    isPlaying = isPlaying,
+                    positionMs = navPositionMs,
+                    durationMs = navDurationMs,
+                    onPlayPause = { vm.handleIntent(PlayerIntent.PlayPause) },
+                    onPrevious = { vm.handleIntent(PlayerIntent.Previous) },
+                    onNext = { vm.handleIntent(PlayerIntent.Next) },
+                    onNavigateToPlayer = navigateToPlayer
+                )
             }}
 
             composable(Screen.AlbumSong.route) { backStackEntry ->PageReveal {

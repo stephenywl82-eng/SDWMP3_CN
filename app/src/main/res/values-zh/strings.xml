@@ -1136,4 +1136,27 @@
     <string name="settings_usb_ex_usb_permission_needed">未授权，点击授予</string>
     <string name="settings_usb_ex_usb_permission_none">未连接 DAC</string>
 
+    <!-- 封面流 -->
+    <string name="cover_flow">封面流</string>
+    <string name="no_albums_to_display">没有可显示的专辑</string>
+    <string name="play_this_album">播放此专辑</string>
+    <string name="album_track_count">%1$d 首</string>
+    <string name="previous_track">上一首</string>
+    <string name="play_action">播放</string>
+    <string name="pause_action">暂停</string>
+    <string name="next_track">下一首</string>
+
+    <!-- 设置：手动切歌硬切 -->
+    <string name="manual_track_cut">手动切歌硬切</string>
+    <string name="manual_track_cut_on">手动上下首直接硬切，不参与交叉淡化</string>
+    <string name="manual_track_cut_off">手动切歌仍走交叉淡化</string>
+
+    <!-- 设置：播放时常亮屏幕 -->
+    <string name="keep_screen_on_playback">播放时常亮屏幕</string>
+    <string name="keep_screen_on_playback_on">播放界面与全屏歌词界面保持常亮</string>
+    <string name="keep_screen_on_playback_off">关闭后按系统设定自动息屏</string>
+
+    <!-- 封面流：搜索无匹配 -->
+    <string name="cover_flow_no_results">没有匹配的专辑</string>
+
 </resources>

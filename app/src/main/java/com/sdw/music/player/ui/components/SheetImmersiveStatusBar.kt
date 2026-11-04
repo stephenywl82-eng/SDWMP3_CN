@@ -171,3 +171,36 @@ private fun findDialogWindow(view: View): Window? {
     }
     return null
 }
+
+// [V8.211] FLAG_KEEP_SCREEN_ON 按 window 引用计数。
+//
+// 播放页与全屏歌词页都依赖「播放时常亮」偏好，且二者共用同一个 Activity window。
+// 若各页面独立 add/clear 该 flag，导航切换时会出问题：
+//   Player -> Lyrics：Lyrics 进入先 addFlags(ON)，待 Player 退出 dispose 时 clearFlags(OFF)
+//                     把刚加的 flag 清掉 -> 全屏歌词页不常亮（已复现）。
+// 改成像 ImmersiveBarRefCounter 一样的计数：进入 +1、退出 -1，仅当计数归零才真正
+// clearFlags，最后一个常亮页面离开前屏幕一直常亮。
+object KeepScreenOnRefCounter {
+    private val map = WeakHashMap<Window, Int>()
+
+    @Synchronized
+    fun acquire(window: Window) {
+        val n = (map[window] ?: 0) + 1
+        map[window] = n
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+    }
+
+    // 返回 true 表示已归零并清除了 flag；false 表示仍有其它常亮页面持有。
+    @Synchronized
+    fun release(window: Window): Boolean {
+        val n = ((map[window] ?: 1) - 1).coerceAtLeast(0)
+        return if (n == 0) {
+            map.remove(window)
+            window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            true
+        } else {
+            map[window] = n
+            false
+        }
+    }
+}

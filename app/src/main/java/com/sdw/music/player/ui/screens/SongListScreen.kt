@@ -374,6 +374,7 @@ fun SongListScreen(
     onNavigateToPlaylist: () -> Unit,
     onNavigateToSettings: () -> Unit,
     onNavigateToAlbum: () -> Unit = {},
+    onNavigateToCoverFlow: () -> Unit = {},
     onNavigateToArtist: () -> Unit = {},
     onRefresh: () -> Unit = {},
     scanStatus: String = "idle",
@@ -933,6 +934,12 @@ fun SongListScreen(
                                         icon = Icons.Default.Album,
                                         selected = false,
                                         onClick = { showMoreSheet = false; onNavigateToAlbum() }
+                                    )
+                                    SheetOptionRow(
+                                        label = stringResource(R.string.cover_flow),
+                                        icon = Icons.Default.ViewCarousel,
+                                        selected = false,
+                                        onClick = { showMoreSheet = false; onNavigateToCoverFlow() }
                                     )
                                     SheetOptionRow(
                                         label = stringResource(R.string.title_artists),

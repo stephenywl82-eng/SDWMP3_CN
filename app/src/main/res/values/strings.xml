@@ -1136,4 +1136,27 @@
     <string name="settings_usb_ex_usb_permission_needed">Not granted — tap to authorize</string>
     <string name="settings_usb_ex_usb_permission_none">No DAC connected</string>
 
+    <!-- Cover Flow -->
+    <string name="cover_flow">Cover Flow</string>
+    <string name="no_albums_to_display">No albums to display</string>
+    <string name="play_this_album">Play this album</string>
+    <string name="album_track_count">%1$d tracks</string>
+    <string name="previous_track">Previous</string>
+    <string name="play_action">Play</string>
+    <string name="pause_action">Pause</string>
+    <string name="next_track">Next</string>
+
+    <!-- Settings: manual hard cut on track change -->
+    <string name="manual_track_cut">Manual cut on track change</string>
+    <string name="manual_track_cut_on">Manual prev/next use a hard cut, skipping crossfade</string>
+    <string name="manual_track_cut_off">Manual track change still crossfades</string>
+
+    <!-- Settings: keep screen on during playback -->
+    <string name="keep_screen_on_playback">Keep screen on during playback</string>
+    <string name="keep_screen_on_playback_on">Player and full-screen lyric screens stay awake</string>
+    <string name="keep_screen_on_playback_off">Dim as set by the system when idle</string>
+
+    <!-- Cover Flow: no albums match the search query -->
+    <string name="cover_flow_no_results">No matching albums</string>
+
 </resources>

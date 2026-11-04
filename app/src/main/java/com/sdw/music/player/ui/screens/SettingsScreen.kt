@@ -420,10 +420,45 @@ fun SettingsScreen(onNavigateBack: () -> Unit, onNavigateToAudioDiagnostic: (() 
                             }
                         }
 
-
+                        // 【新增】手动切歌硬切：开启后手动上一首/下一首直接硬切，不参与交叉淡化
+                        SDWDivider()
+                        var manualHardcut by remember(refreshTrigger) {
+                            mutableStateOf(settingsPrefs.getBoolean("crossfade_manual_hardcut", false))
+                        }
+                        SettingsSwitchItem(
+                            icon = Icons.Default.FlashOn,
+                            title = stringResource(R.string.manual_track_cut),
+                            subtitle = if (manualHardcut) stringResource(R.string.manual_track_cut_on) else stringResource(R.string.manual_track_cut_off),
+                            checked = manualHardcut,
+                            inCard = true,
+                            enabled = cfEnabled,
+                            onCheckedChange = { on ->
+                                manualHardcut = on
+                                settingsPrefs.edit().putBoolean("crossfade_manual_hardcut", on).apply()
+                            }
+                        )
                     }
                 }
                 }// 【整理】音频焦点注册：原误放 USB DAC 下（注释自述"非 DAC 路径"），实为通用播放音频策略，移入播放与过渡。
+                // 【新增】播放时常亮：开启后在播放界面与全屏歌词界面保持屏幕常亮
+                item {
+                    SettingsCard(tone = SectionTone.Primary) {
+                        var keepScreenOn by remember(refreshTrigger) {
+                            mutableStateOf(settingsPrefs.getBoolean("keep_screen_on_playback", false))
+                        }
+                        SettingsSwitchItem(
+                            icon = Icons.Default.MusicNote,
+                            title = stringResource(R.string.keep_screen_on_playback),
+                            subtitle = if (keepScreenOn) stringResource(R.string.keep_screen_on_playback_on) else stringResource(R.string.keep_screen_on_playback_off),
+                            checked = keepScreenOn,
+                            inCard = true,
+                            onCheckedChange = { on ->
+                                keepScreenOn = on
+                                settingsPrefs.edit().putBoolean("keep_screen_on_playback", on).apply()
+                            }
+                        )
+                    }
+                }
                 item {
                     SettingsCard(tone = SectionTone.Primary) {
                         SettingsPrefSwitch(

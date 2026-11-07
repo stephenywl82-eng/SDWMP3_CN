@@ -2528,6 +2528,9 @@ private var xfadeBChorusMs = -1L
     @Volatile private var dacInitInFlight: Boolean = false
     @Volatile private var dacInitPendingIndex: Int = -1
     private var dacWakeLock: PowerManager.WakeLock? = null  // [V4.0.2] prevent CPU deep-sleep in Doze mode
+    // [V9.22] 播放期间（含蓝牙/扬声器直连 Oboe）持 PARTIAL_WAKE_LOCK，防止灭屏后 CPU 深度睡眠
+    // 导致音频回调线程被节流 → 欠载爆音。USB DAC 仍走 dacWakeLock，两者互不冲突。
+    private var playbackWakeLock: PowerManager.WakeLock? = null
 
     // 
     private var dspEqEnabled: Boolean = false
@@ -2617,6 +2620,7 @@ private var xfadeBChorusMs = -1L
         usbDacController = null
         dacPlayActive = false  // [Hotplug] controller torn down -> no longer actively playing through DAC
         releaseDacWakeLock()
+        releasePlaybackWakeLock()  // [V9.22] USB 接管时释放普通播放锁，避免重复持锁
     }
 
     private fun acquireDacWakeLock() {
@@ -2634,6 +2638,26 @@ private var xfadeBChorusMs = -1L
         if (dacWakeLock?.isHeld == true) {
             dacWakeLock?.release()
             Log.w(TAG, "WakeLock released")
+        }
+    }
+
+    // [V9.22] 普通播放（蓝牙/扬声器直连 Oboe）唤醒锁：与 dacWakeLock 并存，
+    // 覆盖 USB DAC 之外的所有活跃播放场景（之前仅在 USB DAC 路径持锁，蓝牙/扬声器欠载无防护）。
+    private fun acquirePlaybackWakeLock() {
+        if (playbackWakeLock == null) {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            playbackWakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SDWMP3:PLAYBACK")
+        }
+        if (playbackWakeLock?.isHeld == false) {
+            playbackWakeLock?.acquire()
+            Log.w(TAG, "WakeLock acquired for playback")
+        }
+    }
+
+    private fun releasePlaybackWakeLock() {
+        if (playbackWakeLock?.isHeld == true) {
+            playbackWakeLock?.release()
+            Log.w(TAG, "WakeLock released (playback)")
         }
     }
 
@@ -3134,6 +3158,9 @@ private var xfadeBChorusMs = -1L
         private fun notifyPlayStateChanged(isPlaying: Boolean) {
             // [v7.113] update last known state for widget query (handles Oboe JNI lag)
             lastKnownPlayingState = isPlaying
+            // [V9.22] 播放态变化统一在此握/释播放唤醒锁：isPlaying=true 持锁、=false 释放，
+            // 覆盖蓝牙/扬声器直连 Oboe 的播放/暂停/停止/空闲回收全周期。
+            if (isPlaying) instance?.acquirePlaybackWakeLock() else instance?.releasePlaybackWakeLock()
             // save before notifying so listeners see consistent state
             savePlaybackState()
             // [Phase 1] 同步刷新 MediaSession 状态机（SimpleBasePlayer 投影）

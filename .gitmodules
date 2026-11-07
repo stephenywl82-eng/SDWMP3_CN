@@ -1,0 +1,6 @@
+[submodule "app/src/main/cpp"]
+	path = app/src/main/cpp
+	url = https://github.com/stephenywl82-eng/SDWMP3_CN_native.git
+[submodule "analyzer/src/main/cpp"]
+	path = analyzer/src/main/cpp
+	url = https://github.com/stephenywl82-eng/SDWMP3_CN_analyzer_native.git

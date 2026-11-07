@@ -337,12 +337,20 @@ fun PlayerScreen(
             // 【V8.179】只提一次调色板：extractAccentColor 和 extractCoverColors 各自会
             // 完整解码一遍封面（大图 3000px 时是几百 ms）。交叉淡化还没开始就先付两遍解码
             // 代价，切歌瞬间 CPU 被打满 → 掉帧。调色板首位就是 accent 同源色。
-            val colors = MemoryManager.extractCoverColors(
-                context, nextArt, state.currentSongId + 1000000L
-            )
-            crossfadeNextCoverColors = colors?.toList().orEmpty()
-            val c = colors?.let { it.getOrNull(1) ?: it.getOrNull(0) } ?: 0
-            if (c != 0) crossfadeNextAccent = c.toLong() and 0xFFFFFFFFL
+            // 【V9.22】转场（交叉淡化 ACTIVE）期间跳过最重的完整大图调色板解码：
+            // 该解码为 BitmapFactory.decodeFile(3000px) + palette 提取，CPU 密集（数百 ms），
+            // 与切歌转场峰值重叠会把 CPU 打满、抢占音频实时线程 → 听感「哒抖一下」。
+            // state 离开 ACTIVE 后本 effect 会因 crossfadeInfo.state 变化重新触发，届时再提取，
+            // 观感上仅 VU 表/边缘光带晚几百 ms 跟 B 轨变色。preheat 仍保留（避免封面空帧闪）。
+            val xfadeBusy = crossfadeInfo.state == com.sdw.music.player.core.audio.playback.MusicService.XfadeUiState.ACTIVE
+            if (!xfadeBusy) {
+                val colors = MemoryManager.extractCoverColors(
+                    context, nextArt, state.currentSongId + 1000000L
+                )
+                crossfadeNextCoverColors = colors?.toList().orEmpty()
+                val c = colors?.let { it.getOrNull(1) ?: it.getOrNull(0) } ?: 0
+                if (c != 0) crossfadeNextAccent = c.toLong() and 0xFFFFFFFFL
+            }
         } else {
             crossfadeNextArt = null
             crossfadeNextAccent = 0L

@@ -135,6 +135,8 @@ Apple / iTunes 风格的真 3D 封面浏览（曲库「更多」菜单入口）�
 
 ### Native 层（liboboe_bridge.so）
 
+> 原生音频引擎（C++）源码**不随本公开仓库发布**，存放于私有子模块 `SDWMP3_CN_native` / `SDWMP3_CN_analyzer_native`（见 `.gitmodules`）。公开仓库仅含预编译产物 `app/src/main/jniLibs/<abi>/liboboe_bridge.so`，直接随 APK 发货。
+
 - `usb_audio_driver.cpp` — USB 音频驱动：12 URB 预队列 + phase accumulator（5/6 帧交替精确 44100Hz），16-bit TPDF 抖动
 - `oboe_audio_engine.cpp` — Oboe/AAudio 播放引擎（解码调度、交叉淡化、输出回调）
 - `flac_decoder_jni.cpp` — FLAC 硬解 + 内嵌歌词读取
@@ -160,7 +162,7 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 产物：`app/build/outputs/apk/release/app-release.apk`
 
-> 注意：项目内含 C++ 源码，若改动 native 需按对应 NDK 构建脚本重新生成 `liboboe_bridge.so` 后再打 APK。
+> 注意：本公开仓库**不含 C++ 源码**，原生引擎位于私有子模块（见上文）。日常构建只需打 Kotlin/Compose 应用壳，预编译的 `liboboe_bridge.so` 已在 `jniLibs/` 中随 APK 发货。若需改动 native，须在取得私有子模块访问权后，用对应 NDK 构建脚本（NDK r25b）独立编译 `.so` 并拷回 `jniLibs/` 再打 APK；Gradle 的 `externalNativeBuild{cmake}` 目前为注释禁用状态。
 
 ---
 
@@ -191,7 +193,9 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 ## 许可
 
-本项目自身代码以 **Apache License 2.0** 发布，完整文本见根目录 [`LICENSE`](LICENSE)。
+本项目**公开部分**（Kotlin/Compose 应用壳、构建脚本、预编译的 `liboboe_bridge.so`）以 **Apache License 2.0** 发布，完整文本见根目录 [`LICENSE`](LICENSE)。
+
+> 原生音频引擎（C++）**为私有代码、不随本仓库开源**，以 git submodule 形式引用私有仓库 `SDWMP3_CN_native` / `SDWMP3_CN_analyzer_native`（见 `.gitmodules`）。
 
 当前用途为自用 / 本地分发，含 `MANAGE_EXTERNAL_STORAGE` 权限（用于歌词/封面写入共享存储），若上架 Google Play 需评估审核风险。
 
@@ -201,13 +205,13 @@ MVI + Hilt DI + StateFlow + Media3 MediaSession。
 
 | 组件 | 用途 | 许可 |
 |------|------|------|
-| Rubber Band Library（`app/src/main/cpp/rubberband/`） | 时间拉伸 / 变速不变调 | **GPL-2.0**（版权方另售商业许可） |
-| Oboe（`app/src/main/cpp/oboe/`） | Google 低延迟音频引擎 | Apache-2.0 |
-| Apple ALAC（`app/src/main/cpp/alac/`） | ALAC 解码 | Apache-2.0 |
+| Rubber Band Library（私有 native 子模块 `rubberband/`） | 时间拉伸 / 变速不变调 | **GPL-2.0**（版权方另售商业许可） |
+| Oboe（私有 native 子模块 `oboe/`） | Google 低延迟音频引擎 | Apache-2.0 |
+| Apple ALAC（私有 native 子模块 `alac/`） | ALAC 解码 | Apache-2.0 |
 | dr_flac / dr_wav | FLAC / WAV 解码 | 公有领域（public domain / MIT-0） |
 | kissfft、Speex（rubberband 内置） | FFT / 残响等 | BSD-3-Clause |
 
-> ⚠️ **GPL 注意**：Rubber Band Library 以 **GPL-2.0** 发布，并已被 native 链接进 APK。若你重新分发包含该组件的应用，则该部分须遵守 GPL 的 copyleft 义务（提供对应源码等）。如不愿受 GPL 约束，可移除该组件，或向版权方购买商业许可（breakfastquay.com）。
+> ⚠️ **GPL 注意**：Rubber Band Library 以 **GPL-2.0** 发布，并已静态链接进随本仓库公开发布的 `liboboe_bridge.so`。原生引擎 C++ 源码本身为私有、不公开，但 GPL 的义务随**已发布的二进制**生效：若你重新分发包含该组件的应用，须遵守 GPL 的 copyleft 义务（向用户提供对应源码等）。如不愿受 GPL 约束，可移除该组件，或向版权方购买商业许可（breakfastquay.com）。
 
 ---
 

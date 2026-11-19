@@ -29,8 +29,8 @@ android {
         applicationId = "com.sdw.music.player.cn"
         minSdk = 24
         targetSdk = 35
-        versionCode = 937
-        versionName = "9.21"   // 【V9.21】3D 封面流（Cover Flow）+ 播放时常亮 + 交叉淡化落点台阶修复：B 轨预增益(preGain∈[0.6,1.0])原在落点硬阶跃回 1.0（最大+4.4dB，听感"音量一下子大一下"）。改为落点后 250ms 内由 1:1 直读出口把 output 按 preGain→1.0 线性爬坡，台阶摊平为无感斜坡。
+        versionCode = 938
+        versionName = "9.22"   // 【V9.22 reTONE 音质内核嫁接】重采样窗函数 Blackman→Kaiser(β=12.265,A=120dB)、抽头 33→85(对标 reTONE 86)，阻带 ~-74dB→~-120dB；历史缓冲 64→96 帧。移植自 reTONE 0.92.80 HiResPlayer$Resampler。新增 retone_src.c 高质量 SRC 模块（Kaiser 多相+半带）。
 
         ndk {
             abiFilters += listOf("arm64-v8a")
